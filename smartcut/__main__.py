@@ -65,7 +65,7 @@ def main():
     parser.add_argument('--cut', type=str, help="Comma-separated list of start,end times to cut in seconds")
     parser.add_argument('--frames', action='store_true', help="Keep/Cut list is frame numbers, not times (frames are zero-indexed, and -1 means \"last frame of the video\")")
     parser.add_argument('--log-level', type=str, default='warning', help="Log level (default: warning)")
-    parser.add_argument('--version', action='version', version='Smartcut 1.1.0')
+    parser.add_argument('--version', action='version', version='Smartcut 1.2.0')
 
     args = parser.parse_args()
 
