@@ -151,6 +151,11 @@ Tests ran in 153.6s
 
 ## Version History
 
+### 1.2
+* [#11](https://github.com/skeskinen/smartcut/pull/11) Allow frame number input instead of time input, by snelg
+
+Starting from this version the Windows binaries are unsigned. This means that you'll probably get a security warning about running unsigned code. If this bothers you, you can either use older versions or run the software from source code.
+
 ### 1.1
 * Cut subtitle tracks
 * Add support for MPEG-2 cutting and more container formats (.flv, .mov, .wmv, .avi)
