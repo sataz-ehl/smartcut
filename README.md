@@ -151,6 +151,9 @@ Tests ran in 153.6s
 
 ## Version History
 
+### 1.3
+* Update to PyAV 15.0
+
 ### 1.2
 * [#11](https://github.com/skeskinen/smartcut/pull/11) Allow frame number input instead of time input, by snelg
 
