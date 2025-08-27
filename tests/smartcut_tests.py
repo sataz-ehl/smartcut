@@ -37,9 +37,11 @@ data_dir = 'test_data'
 # Parse command line arguments
 def parse_args():
     parser = argparse.ArgumentParser(description='Smart Media Cutter Tests')
-    parser.add_argument('--category', choices=['basic', 'h264', 'h265', 'codecs', 'containers', 'audio', 'mixed', 'transforms', 'long', 'external', 'all'],
+    parser.add_argument('--category', choices=['basic', 'h264', 'h265', 'codecs', 'containers', 'audio', 'mixed', 'transforms', 'long', 'external', 'real_world', 'real_world_h264', 'real_world_h265', 'real_world_av1', 'real_world_vp9', 'all'],
                        help='Run tests from specific category')
+    parser.add_argument('--single', type=str, help='Run a single specific test function (e.g., test_h264_non_idr_keyframes)')
     parser.add_argument('--list-categories', action='store_true', help='List available test categories')
+    parser.add_argument('--list-tests', action='store_true', help='List all available test functions')
     parser.add_argument('files', nargs='*', help='Specific files to test (legacy mode)')
 
     args = parser.parse_args()
@@ -56,7 +58,31 @@ def parse_args():
         print("  transforms - Video transformation and recoding tests")
         print("  long       - Long-running or large file tests")
         print("  external   - Tests requiring external downloads")
+        print("  real_world - All real-world video tests from public sources")
+        print("  real_world_h264 - Real-world H.264 videos (Google, test-videos.co.uk, etc)")
+        print("  real_world_h265 - Real-world H.265/HEVC videos")
+        print("  real_world_av1  - Real-world AV1 videos")
+        print("  real_world_vp9  - Real-world VP9 videos")
         print("  all        - Run all tests (default)")
+        sys.exit(0)
+
+    if args.list_tests:
+        print("Available test functions:")
+        test_categories = get_test_categories()
+        all_tests = []
+        for cat_tests in test_categories.values():
+            all_tests.extend(cat_tests)
+
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_tests = []
+        for test in all_tests:
+            if test not in seen:
+                seen.add(test)
+                unique_tests.append(test)
+
+        for test in sorted(unique_tests, key=lambda t: t.__name__):
+            print(f"  {test.__name__}")
         sys.exit(0)
 
     return args
@@ -65,8 +91,17 @@ def parse_args():
 def setup_legacy_args():
     global manual_input, pixel_color_diff_tolerance
 
-    # Check for legacy usage first
-    legacy_args = [arg for arg in sys.argv[1:] if not arg.startswith('--') and arg not in ['basic', 'h264', 'h265', 'codecs', 'containers', 'audio', 'mixed', 'transforms', 'long', 'external', 'all']]
+    # Check if we're using new argument format (--single, --category, etc.)
+    has_new_args = any(arg.startswith('--') for arg in sys.argv[1:])
+
+    if has_new_args:
+        # Using new argument format, no legacy mode
+        manual_input = None
+        pixel_color_diff_tolerance = 20
+        return
+
+    # Check for legacy usage (no -- arguments)
+    legacy_args = [arg for arg in sys.argv[1:] if arg not in ['basic', 'h264', 'h265', 'codecs', 'containers', 'audio', 'mixed', 'transforms', 'long', 'external', 'real_world', 'real_world_h264', 'real_world_h265', 'real_world_av1', 'real_world_vp9', 'all']]
 
     if legacy_args:
         if legacy_args[0] == 'all':
@@ -268,6 +303,51 @@ def check_videos_equal(source_container: MediaContainer, result_container: Media
                         diff = np.abs(source_color.astype(np.int16) - result_color)
                         max_diff = np.max(diff)
                         assert max_diff <= pixel_tolerance, f'Large color deviation at frame {frame_i}. Exp: {source_color}, got: {result_color}'
+
+def check_videos_equal_segment(source_container: MediaContainer, result_container: MediaContainer, start_time=0, duration=None, pixel_tolerance=20):
+    """Fast pixel testing of small video segments instead of entire video"""
+    if duration is None:
+        duration = min(10, float(source_container.duration()))  # Test max 10 seconds
+
+    end_time = start_time + duration
+
+    # Basic structure checks
+    assert source_container.video_stream.width == result_container.video_stream.width
+    assert source_container.video_stream.height == result_container.video_stream.height
+
+    frames_checked = 0
+    with av.open(source_container.path, mode='r') as source_av:
+        with av.open(result_container.path, mode='r') as result_av:
+            # Seek to start time
+            source_av.seek(int(start_time * av.time_base))
+            result_av.seek(int(start_time * av.time_base))
+
+            source_decoder = source_av.decode(video=0)
+            result_decoder = result_av.decode(video=0)
+
+            for source_frame, result_frame in zip(source_decoder, result_decoder):
+                frame_time = source_frame.pts * source_frame.time_base
+                if frame_time < start_time:
+                    continue
+                if frame_time > end_time:
+                    break
+
+                source_numpy = source_frame.to_ndarray(format='rgb24')
+                result_numpy = result_frame.to_ndarray(format='rgb24')
+                assert source_numpy.shape == result_numpy.shape, f'Video resolution changed at {frame_time:.2f}s. Exp: {source_numpy.shape}, got: {result_numpy.shape}'
+
+                # Check a few pixels per frame for speed
+                for y in [0, source_numpy.shape[0] // 2, source_numpy.shape[0] - 1]:
+                    for x in [0, source_numpy.shape[1] // 2, source_numpy.shape[1] - 1]:
+                        source_color = source_numpy[y, x]
+                        result_color = result_numpy[y, x]
+                        diff = np.abs(source_color.astype(np.int16) - result_color)
+                        max_diff = np.max(diff)
+                        assert max_diff <= pixel_tolerance, f'Large color deviation at {frame_time:.2f}s. Exp: {source_color}, got: {result_color}'
+
+                frames_checked += 1
+                if frames_checked >= 100:  # Limit frames for speed
+                    break
 
 def test_cut_on_keyframes(input_path, output_path):
     source = MediaContainer(input_path)
@@ -1185,11 +1265,338 @@ def test_manual():
     compare_tracks(source_container.audio_tracks[0], output_container.audio_tracks[0])
 
 
+# Real-world video tests using publicly available videos
+
+def test_google_bigbuckbunny():
+    """Test with Google's hosted Big Buck Bunny H.264 video (using partial segments)"""
+    filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4', 'google_bigbuckbunny.mp4')
+    output_base = test_google_bigbuckbunny.__name__
+    test_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=2, audio_export_info='auto')
+
+def test_google_elephantsdream():
+    """Test with Google's hosted Elephant's Dream H.264 video (using partial segments)"""
+    filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4', 'google_elephantsdream.mp4')
+    output_base = test_google_elephantsdream.__name__
+    test_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=2, audio_export_info='auto')
+
+def test_google_forbiggerblaze():
+    """Test with Google's hosted ForBiggerBlazes H.264 video (using partial segments)"""
+    filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4', 'google_forbiggerblaze.mp4')
+    output_base = test_google_forbiggerblaze.__name__
+    test_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=2, audio_export_info='auto')
+
+def test_google_forbiggeresc():
+    """Test with Google's hosted ForBiggerEscapes H.264 video (using partial segments)"""
+    filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4', 'google_forbiggeresc.mp4')
+    output_base = test_google_forbiggeresc.__name__
+    test_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=2, audio_export_info='auto')
+
+def test_google_subaru():
+    """Test with Google's hosted Subaru Outback commercial H.264 video (using partial segments)"""
+    filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/SubaruOutbackOnStreetAndDirt.mp4', 'google_subaru.mp4')
+    output_base = test_google_subaru.__name__
+    test_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=2, audio_export_info='auto')
+
+def test_google_tears_of_steel():
+    """Test with Google's hosted Tears of Steel H.264 video (using partial segments)"""
+    filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4', 'google_tears_of_steel.mp4')
+    output_base = test_google_tears_of_steel.__name__
+    test_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=2, audio_export_info='auto')
+
+def get_tears_of_steel_annexb():
+    """
+    Get Tears of Steel in Annex B format (TS container) for testing H.264 NAL parsing.
+    Converts from MP4 to TS to force Annex B NAL format.
+    """
+    mp4_filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4', 'google_tears_of_steel.mp4')
+    ts_filename = 'google_tears_of_steel_annexb.ts'
+
+    if not os.path.exists(ts_filename):
+        # Convert first ~200 seconds to TS format (covers our problematic non-IDR keyframes)
+        import subprocess
+        result = subprocess.run([
+            'ffmpeg', '-i', mp4_filename,
+            '-t', '200',  # First 200 seconds (covers 18.5s, 143.4s, 183.3s non-IDR frames)
+            '-c', 'copy',  # Stream copy to preserve exact H.264 stream
+            '-f', 'mpegts',  # Force MPEG-TS output (uses Annex B)
+            '-y', ts_filename
+        ], capture_output=True, text=True)
+
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to convert to TS format: {result.stderr}")
+
+    return ts_filename
+
+def test_h264_non_idr_keyframes():
+    """
+    Test that H.264 non-IDR I-frame issues are properly handled.
+
+    Cuts Google Tears of Steel video at specific points that would force segments
+    to start with non-IDR I-frames (NAL type 1). Without proper NAL filtering,
+    this causes '[h264] no frame!' errors during playback validation.
+
+    This test should PASS after implementing H.264 NAL unit filtering.
+    """
+    original_filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4', 'google_tears_of_steel.mp4')
+
+    source = MediaContainer(original_filename)
+
+    # Cut just before the first 3 non-IDR keyframes (same as comprehensive test)
+    segments = [
+        (Fraction(0), Fraction(18400, 1000)),           # 0 to 18.4s (before 18.5s non-IDR)
+        (Fraction(18400, 1000), Fraction(143280, 1000)), # 18.4s to 143.28s (before 143.375s non-IDR)
+        (Fraction(143280, 1000), Fraction(183230, 1000)), # 143.28s to 183.23s (before 183.33s non-IDR)
+        (Fraction(183230, 1000), source.duration())     # 183.23s to end
+    ]
+
+    audio_settings = AudioExportSettings(codec='passthru')
+    audio_export_info = AudioExportInfo(output_tracks=[audio_settings] * len(source.audio_tracks))
+    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH, None)
+
+    output_filename = 'h264_non_idr_minimal_test.mp4'
+
+    try:
+        smart_cut(source, segments, output_filename,
+                 audio_export_info=audio_export_info,
+                 video_settings=video_settings,
+                 log_level='info')
+
+        result = MediaContainer(output_filename)
+
+        # Test video playback - this should work after NAL filtering is implemented
+        check_videos_equal_segment(source, result, 16.5, 4, pixel_tolerance=20)
+
+        result.close()
+    except av.error.InvalidDataError as e:
+        if "no frame" in str(e):
+            # This error indicates the H.264 NAL filtering fix is needed
+            raise AssertionError("H.264 reference frame error detected!") from e
+        else:
+            raise
+    finally:
+        source.close()
+        if os.path.exists(output_filename):
+            os.remove(output_filename)
+
+def test_h264_non_idr_keyframes_annexb():
+    """
+    Test that H.264 non-IDR I-frame issues are properly handled in Annex B format.
+
+    Uses Tears of Steel converted to TS format (which uses Annex B NAL format instead
+    of length-prefixed). This verifies our NAL parsing works for both MP4 (ISOBMFF)
+    and TS (Annex B) formats.
+
+    This test should PASS after implementing H.264 NAL unit filtering.
+    """
+    ts_filename = get_tears_of_steel_annexb()
+
+    source = MediaContainer(ts_filename)
+
+    # Use the same cut points that expose non-IDR keyframe issues
+    # These times should still be valid in the converted TS file
+    segments = [
+        (Fraction(0), Fraction(18400, 1000)),           # 0 to 18.4s (before 18.5s non-IDR)
+        (Fraction(18400, 1000), Fraction(143280, 1000)), # 18.4s to 143.28s (before 143.375s non-IDR)
+        (Fraction(143280, 1000), Fraction(183230, 1000)), # 143.28s to 183.23s (before 183.33s non-IDR)
+        (Fraction(183230, 1000), source.duration())     # 183.23s to end
+    ]
+
+    audio_settings = AudioExportSettings(codec='passthru')
+    audio_export_info = AudioExportInfo(output_tracks=[audio_settings] * len(source.audio_tracks))
+    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH, None)
+
+    output_filename = 'h264_non_idr_annexb_test.ts'
+
+    try:
+        smart_cut(source, segments, output_filename,
+                 audio_export_info=audio_export_info,
+                 video_settings=video_settings,
+                 log_level='info')
+
+        result = MediaContainer(output_filename)
+
+        # Test video playback - this should work after NAL filtering is implemented
+        check_videos_equal_segment(source, result, 16.5, 4, pixel_tolerance=20)
+
+        result.close()
+    except av.error.InvalidDataError as e:
+        if "no frame" in str(e):
+            # This error indicates the H.264 NAL filtering fix is needed for Annex B format too
+            raise AssertionError("H.264 reference frame error detected!") from e
+        else:
+            raise
+    finally:
+        source.close()
+        if os.path.exists(output_filename):
+            os.remove(output_filename)
+
+def test_testvideos_bigbuckbunny_h264():
+    """Test with test-videos.co.uk Big Buck Bunny H.264"""
+    filename = cached_download('https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4', 'testvideos_bbb_h264.mp4')
+    output_path = test_testvideos_bigbuckbunny_h264.__name__ + '.mp4'
+    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH, None)
+    for c in [1, 2]:
+        test_smart_cut(filename, output_path, n_cuts=c, video_settings=video_settings, pixel_tolerance=60)
+
+def test_testvideos_bigbuckbunny_h265():
+    """Test with test-videos.co.uk Big Buck Bunny H.265/HEVC"""
+    filename = cached_download('https://test-videos.co.uk/vids/bigbuckbunny/mp4/h265/360/Big_Buck_Bunny_360_10s_1MB.mp4', 'testvideos_bbb_h265.mp4')
+    output_path = test_testvideos_bigbuckbunny_h265.__name__ + '.mp4'
+    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH, None)
+    for c in [1, 2]:
+        test_smart_cut(filename, output_path, n_cuts=c, video_settings=video_settings, pixel_tolerance=30)
+
+def test_testvideos_bigbuckbunny_vp9():
+    """Test with test-videos.co.uk Big Buck Bunny VP9"""
+    filename = cached_download('https://test-videos.co.uk/vids/bigbuckbunny/webm/vp9/360/Big_Buck_Bunny_360_10s_1MB.webm', 'testvideos_bbb_vp9.webm')
+    output_path = test_testvideos_bigbuckbunny_vp9.__name__ + '.webm'
+    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH, None)
+    for c in [1]:
+        test_smart_cut(filename, output_path, n_cuts=c, video_settings=video_settings, pixel_tolerance=60)
+
+def test_testvideos_jellyfish_h264():
+    """Test with test-videos.co.uk Jellyfish H.264"""
+    filename = cached_download('https://test-videos.co.uk/vids/jellyfish/mp4/h264/360/Jellyfish_360_10s_1MB.mp4', 'testvideos_jellyfish_h264.mp4')
+    output_path = test_testvideos_jellyfish_h264.__name__ + '.mp4'
+    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH, None)
+    for c in [1, 2]:
+        test_smart_cut(filename, output_path, n_cuts=c, video_settings=video_settings, pixel_tolerance=60)
+
+def test_testvideos_jellyfish_h265():
+    """Test with test-videos.co.uk Jellyfish H.265"""
+    filename = cached_download('https://test-videos.co.uk/vids/jellyfish/mp4/h265/360/Jellyfish_360_10s_1MB.mp4', 'testvideos_jellyfish_h265.mp4')
+    output_path = test_testvideos_jellyfish_h265.__name__ + '.mp4'
+    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH, None)
+    for c in [1, 2]:
+        test_smart_cut(filename, output_path, n_cuts=c, video_settings=video_settings, pixel_tolerance=80)
+
+
+def test_partial_smart_cut(input_path: str, output_base_name: str, segment_duration=15, n_segments=2, audio_export_info=None, video_settings=None, pixel_tolerance=20):
+    """
+    Test smart cutting on short segments from random positions in long videos.
+
+    Selects multiple random segments and merges them into a single output file,
+    then compares smart cut output against complete recode for quality validation.
+    This tests both the cutting algorithm and segment merging logic while being
+    much faster than testing the entire video.
+
+    Args:
+        input_path: Path to input video file
+        output_base_name: Base name for output files (will be suffixed)
+        segment_duration: Duration of each test segment in seconds
+        n_segments: Number of random segments to merge into one file
+        audio_export_info: Audio export settings (defaults to passthrough)
+        video_settings: Video export settings for smart cut
+        pixel_tolerance: Pixel difference tolerance for comparison
+    """
+    # Handle audio-only files
+    if os.path.splitext(input_path)[1] in ['.mp3', '.ogg']:
+        return test_audiofile_smart_cut(input_path, output_base_name + '.ogg', 2)
+
+    source = MediaContainer(input_path)
+    total_duration = float(source.duration())
+
+    # Skip if video is too short for meaningful testing
+    if total_duration < segment_duration * n_segments * 2:
+        print(f"Video too short ({total_duration:.1f}s) for partial testing, using regular test")
+        return test_smart_cut(input_path, output_base_name + os.path.splitext(input_path)[1], 2,
+                             audio_export_info, video_settings, pixel_tolerance)
+
+    # Calculate safe range for random segment selection (avoid first/last 30 seconds)
+    safe_start = 30
+    safe_end = total_duration - segment_duration - 30
+
+    if safe_end <= safe_start:
+        safe_start = segment_duration
+        safe_end = total_duration - segment_duration
+
+    print(f"Testing {n_segments} segments of {segment_duration}s each merged into one file from {input_path}")
+
+    # Set up default audio export if not specified
+    if audio_export_info == 'auto':
+        s = AudioExportSettings(codec='passthru')
+        audio_export_info = AudioExportInfo(output_tracks=[s] * len(source.audio_tracks))
+
+    # Select multiple random non-overlapping segments
+    segments = []
+
+    # Generate all possible non-overlapping segments
+    max_segments = int((safe_end - safe_start) // (segment_duration + 1))  # +1 for minimum gap
+    if max_segments < n_segments:
+        print(f"  Warning: Can only fit {max_segments} non-overlapping segments, reducing from {n_segments}")
+        n_segments = max_segments
+
+    # Use a more systematic approach to ensure non-overlapping segments
+    attempts = 0
+    while len(segments) < n_segments and attempts < 100:
+        start_time = safe_start + np.random.random() * (safe_end - safe_start)
+        end_time = start_time + segment_duration
+
+        # Check if this segment overlaps with any existing segment
+        overlaps = False
+        for existing_start, existing_end in segments:
+            # Two segments overlap if: start < existing_end AND end > existing_start
+            if start_time < existing_end and end_time > existing_start:
+                overlaps = True
+                break
+
+        if not overlaps and end_time <= safe_end:
+            segments.append((start_time, end_time))
+
+        attempts += 1
+
+    if len(segments) < n_segments:
+        print(f"  Warning: Could only find {len(segments)} non-overlapping segments out of {n_segments} requested")
+
+    # Sort segments by start time (smart_cut expects them in chronological order)
+    segments.sort(key=lambda x: x[0])
+
+    # Print selected segments in chronological order
+    for i, (start, end) in enumerate(segments):
+        print(f"  Segment {i+1}: {start:.1f}s to {end:.1f}s")
+
+    # Verify segments are non-overlapping after sorting
+    for i in range(len(segments) - 1):
+        current_end = segments[i][1]
+        next_start = segments[i + 1][0]
+        if current_end > next_start:
+            raise ValueError(f"Segments overlap after sorting: segment {i+1} ends at {current_end:.1f}s but segment {i+2} starts at {next_start:.1f}s")
+
+    # Output paths
+    smartcut_output = output_base_name + "_smartcut" + os.path.splitext(input_path)[1]
+    recode_output = output_base_name + "_recode" + os.path.splitext(input_path)[1]
+
+    # Test 1: Smart cut (default mode) - merges all segments into one file
+    smart_cut_settings = video_settings or VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH, None)
+    smart_cut(source, segments, smartcut_output,
+             audio_export_info=audio_export_info,
+             video_settings=smart_cut_settings,
+             log_level='warning')
+
+    # Test 2: Complete recode for comparison - merges all segments into one file
+    recode_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH, None)
+    smart_cut(source, segments, recode_output,
+             audio_export_info=audio_export_info,
+             video_settings=recode_settings,
+             log_level='warning')
+
+    # Compare results - both should produce equivalent output
+    smartcut_container = MediaContainer(smartcut_output)
+    recode_container = MediaContainer(recode_output)
+
+    check_videos_equal(smartcut_container, recode_container, pixel_tolerance=pixel_tolerance)
+
+    smartcut_container.close()
+    recode_container.close()
+
+    source.close()
+
 def get_test_categories():
     """
     Returns a dictionary of test categories.
     """
     test_categories = {
+        # Core synthetic test categories (generated test videos)
         'basic': [
             test_h264_cut_on_keyframes,
             test_h264_smart_cut,
@@ -1205,6 +1612,8 @@ def get_test_categories():
             test_h264_profile_high10,
             test_h264_profile_high422,
             test_h264_profile_high444,
+            test_h264_non_idr_keyframes,
+            test_h264_non_idr_keyframes_annexb,
             test_mp4_to_mkv_smart_cut,
             test_mkv_to_mp4_smart_cut,
         ],
@@ -1260,7 +1669,42 @@ def get_test_categories():
             test_sunset,
             test_seeking,
         ],
+
+        # Real-world test categories (using actual videos from the wild)
+        'real_world_h264': [
+            # Google Common Data Storage videos (H.264)
+            test_google_bigbuckbunny,
+            test_google_elephantsdream,
+            test_google_forbiggerblaze,
+            test_google_forbiggeresc,
+            test_google_subaru,
+            test_google_tears_of_steel,
+            # test-videos.co.uk H.264 samples
+            test_testvideos_bigbuckbunny_h264,
+            test_testvideos_jellyfish_h264,
+        ],
+
+        'real_world_h265': [
+            # test-videos.co.uk H.265/HEVC samples
+            test_testvideos_bigbuckbunny_h265,
+            test_testvideos_jellyfish_h265,
+        ],
+
+        'real_world_vp9': [
+            # test-videos.co.uk VP9 samples
+            test_testvideos_bigbuckbunny_vp9,
+        ],
+
+        # Meta-categories that combine multiple subcategories
+        'real_world': [
+            # This will be populated dynamically by combining all real_world_* categories
+        ],
     }
+
+    # Populate meta-categories dynamically
+    real_world_categories = [key for key in test_categories.keys() if key.startswith('real_world_')]
+    for category in real_world_categories:
+        test_categories['real_world'].extend(test_categories[category])
 
     # SMC-specific tests (require additional dependencies)
     smc_tests = {
@@ -1293,13 +1737,44 @@ def get_test_categories():
 
     return test_categories
 
-def run_tests(category=None):
+def run_tests(category=None, single_test=None):
     """
-    Runs tests from specified category or all tests if category is None.
+    Runs tests from specified category, single test, or all tests.
     """
     test_categories = get_test_categories()
 
-    if category and category != 'all':
+    if single_test:
+        # Find the specific test function
+        all_tests = []
+        for cat_tests in test_categories.values():
+            all_tests.extend(cat_tests)
+
+        # Remove duplicates
+        seen = set()
+        unique_tests = []
+        for test in all_tests:
+            if test not in seen:
+                seen.add(test)
+                unique_tests.append(test)
+
+        # Find the test by name
+        target_test = None
+        for test in unique_tests:
+            if test.__name__ == single_test:
+                target_test = test
+                break
+
+        if target_test is None:
+            print(f"Test function '{single_test}' not found.")
+            print("Available test functions:")
+            for test in sorted(unique_tests, key=lambda t: t.__name__):
+                print(f"  {test.__name__}")
+            return
+
+        tests_to_run = [target_test]
+        print(f"Running single test: {single_test}")
+
+    elif category and category != 'all':
         if category not in test_categories:
             print(f"Unknown category: {category}")
             print("Available categories:", list(test_categories.keys()))
@@ -1331,11 +1806,12 @@ def run_tests(category=None):
     for test in tests_to_run:
         test_name = test.__name__
         try:
+            # print(f"Running {test_name}")
             test()
-            print(f"{test_name}: PASS")
+            print(f"{test_name}: ✅ PASS")
             passed += 1
         except Exception as e:
-            print(f"{test_name}: FAIL:")
+            print(f"{test_name}: ❌ FAIL:")
             traceback.print_exc()
             failed += 1
 
@@ -1345,9 +1821,9 @@ def run_tests(category=None):
 
 if __name__ == "__main__":
     if manual_input is None:
-        # Parse arguments for category selection
+        # Parse arguments for category or single test selection
         args = parse_args()
-        run_tests(args.category)
+        run_tests(args.category, args.single)
     else:
         # Legacy mode - test specific files
         for file in manual_input:

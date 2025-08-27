@@ -82,6 +82,22 @@ We have ok test coverage for various video and audio formats. Video tests check 
 
 Some of the tests depend on components in the GUI app that are not open-source. These tests are disabled.
 
+Some commands to run different subsets of tests:
+```bash
+  # Test synthetic H.264 tests only
+  python smartcut_tests.py --category h264
+
+  # Test only real-world H.264 videos
+  python smartcut_tests.py --category real_world_h264
+
+  # Test all real-world videos (all codecs)
+  python smartcut_tests.py --category real_world
+
+  # See all available categories
+  python smartcut_tests.py --list-categories
+```
+
+
 Normal test run looks like this:
 ```
 Skipping smc tests
