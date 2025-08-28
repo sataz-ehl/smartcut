@@ -4,7 +4,7 @@
 
 <h1 align="center">Video Smartcut</h1>
 
-![Discord](https://img.shields.io/discord/1257684604941504623?logo=discord&logoColor=blue&label=Join%20Discord)
+![PyPI - Version](https://img.shields.io/pypi/v/smartcut?logo=pypi&logoColor=white&label=PyPI) ![Discord](https://img.shields.io/discord/1257684604941504623?logo=discord&logoColor=blue&label=Join%20Discord)
 
 This tool is an open-source CLI companion to [Smart Media Cutter](https://smartmediacutter.com).
 
