@@ -1,4 +1,0 @@
-ffmpeg-python
-soundfile
-scipy
-requests
