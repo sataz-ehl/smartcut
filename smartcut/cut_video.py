@@ -93,6 +93,7 @@ class PassthruAudioCutter:
         self.out_stream = output_av_container.add_stream_from_template(self.track.av_stream, options={'x265-params': 'log_level=error'})
 
         self.out_stream.metadata.update(self.track.av_stream.metadata)
+        self.out_stream.disposition = self.track.av_stream.disposition.value
         self.segment_start_in_output = 0
         self.prev_dts = -100_000
         self.prev_pts = -100_000
@@ -137,6 +138,7 @@ class SubtitleCutter:
         self.in_stream = media_container.av_containers[0].streams.subtitles[subtitle_track_index]
         self.out_stream = output_av_container.add_stream_from_template(self.in_stream)
         self.out_stream.metadata.update(self.in_stream.metadata)
+        self.out_stream.disposition = self.in_stream.disposition.value
         self.segment_start_in_output = 0
         self.prev_pts = -100_000
 
@@ -222,6 +224,8 @@ class VideoCutter:
             self.out_stream.height = self.in_stream.height
             if self.in_stream.sample_aspect_ratio is not None:
                 self.out_stream.sample_aspect_ratio = self.in_stream.sample_aspect_ratio
+            self.out_stream.metadata.update(self.in_stream.metadata)
+            self.out_stream.disposition = self.in_stream.disposition.value
             self.codec_name = video_settings.codec_override
 
             self.init_encoder()
@@ -241,10 +245,14 @@ class VideoCutter:
                 self.out_stream.height = self.in_stream.height
                 if self.in_stream.sample_aspect_ratio is not None:
                     self.out_stream.sample_aspect_ratio = self.in_stream.sample_aspect_ratio
+                self.out_stream.metadata.update(self.in_stream.metadata)
+                self.out_stream.disposition = self.in_stream.disposition.value
                 self.codec_name = mapped_codec_name
             else:
                 # Use template if no mapping needed
                 self.out_stream = output_av_container.add_stream_from_template(self.in_stream, options={'x265-params': 'log_level=error'})
+                self.out_stream.metadata.update(self.in_stream.metadata)
+                self.out_stream.disposition = self.in_stream.disposition.value
                 self.codec_name = original_codec_name
 
 

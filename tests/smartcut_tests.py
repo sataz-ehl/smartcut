@@ -918,6 +918,84 @@ def make_video_and_audio_mkv(path, file_duration):
         .run(quiet=True)
     )
 
+def make_video_with_subtitles(path, file_duration, subtitle_configs):
+    """
+    Create a video with multiple subtitle tracks.
+    
+    Args:
+        path: Output file path
+        file_duration: Duration in seconds
+        subtitle_configs: List of dicts with keys:
+            - 'content': SRT content string
+            - 'language': Language code (e.g., 'en', 'fi') 
+            - 'disposition': Disposition string (e.g., 'forced+default', 'default', '')
+            - 'temp_file': Temporary SRT file path
+    """
+    if os.path.exists(path):
+        return path
+        
+    # Create base video
+    tmp_video = 'tmp_video_for_sub.mkv'
+    create_test_video(tmp_video, file_duration, 'h264', 'yuv420p', 30, (32, 18))
+    
+    # Create subtitle files
+    subtitle_inputs = []
+    for config in subtitle_configs:
+        with open(config['temp_file'], 'w', encoding='utf-8') as f:
+            f.write(config['content'])
+        subtitle_inputs.append(ffmpeg.input(config['temp_file']))
+    
+    # Build ffmpeg command
+    video_input = ffmpeg.input(tmp_video)
+    
+    # Prepare output options
+    output_options = {
+        'vcodec': 'copy',
+        'scodec': 'subrip',
+        'y': None
+    }
+    
+    # Add disposition and language options for each subtitle stream
+    for i, config in enumerate(subtitle_configs):
+        if config.get('disposition'):
+            output_options[f'disposition:s:{i}'] = config['disposition']
+        if config.get('language'):
+            output_options[f'metadata:s:s:{i}'] = f'language={config["language"]}'
+    
+    # Run ffmpeg command with proper input structure
+    all_inputs = [video_input] + subtitle_inputs
+    (
+        ffmpeg
+        .output(*all_inputs, path, **output_options)
+        .run(quiet=True)
+    )
+    
+    return path
+
+def make_video_with_forced_subtitle(path, file_duration):
+    """Legacy function - creates video with single forced subtitle for backward compatibility"""
+    subtitle_content = """1
+00:00:01,000 --> 00:00:03,000
+First subtitle entry
+
+2
+00:00:05,000 --> 00:00:07,000
+Second forced subtitle
+
+3
+00:00:08,500 --> 00:00:09,500
+Final entry
+"""
+    
+    subtitle_configs = [{
+        'content': subtitle_content,
+        'language': 'en',
+        'disposition': 'forced+default',
+        'temp_file': 'tmp_test_subtitle_forced.srt'
+    }]
+    
+    return make_video_with_subtitles(path, file_duration, subtitle_configs)
+
 def test_mkv_with_video_and_audio_passthru():
     file_duration = 30
 
@@ -1591,6 +1669,151 @@ def test_partial_smart_cut(input_path: str, output_base_name: str, segment_durat
 
     source.close()
 
+def check_stream_dispositions(source_path, output_path):
+    """Helper function to verify that stream dispositions are preserved"""
+    with av.open(source_path) as source_container:
+        with av.open(output_path) as output_container:
+            # Check video stream disposition if it exists
+            if source_container.streams.video:
+                src_video = source_container.streams.video[0]
+                out_video = output_container.streams.video[0]
+                assert src_video.disposition.value == out_video.disposition.value, \
+                    f"Video disposition mismatch: {src_video.disposition} vs {out_video.disposition}"
+
+            # Check audio stream dispositions
+            assert len(source_container.streams.audio) == len(output_container.streams.audio), \
+                "Audio stream count mismatch"
+            for i, (src_audio, out_audio) in enumerate(zip(source_container.streams.audio, output_container.streams.audio)):
+                assert src_audio.disposition.value == out_audio.disposition.value, \
+                    f"Audio stream {i} disposition mismatch: {src_audio.disposition} vs {out_audio.disposition}"
+
+            # Check subtitle stream dispositions - this is the main focus
+            assert len(source_container.streams.subtitles) == len(output_container.streams.subtitles), \
+                "Subtitle stream count mismatch"
+            for i, (src_sub, out_sub) in enumerate(zip(source_container.streams.subtitles, output_container.streams.subtitles)):
+                assert src_sub.disposition.value == out_sub.disposition.value, \
+                    f"Subtitle stream {i} disposition mismatch: {src_sub.disposition} vs {out_sub.disposition}"
+
+                # Specifically check for forced flag preservation
+                src_forced = av.stream.Disposition.forced in src_sub.disposition
+                out_forced = av.stream.Disposition.forced in out_sub.disposition
+                assert src_forced == out_forced, \
+                    f"Subtitle stream {i} forced flag mismatch: source={src_forced}, output={out_forced}"
+
+def test_subtitle_disposition_preservation():
+    """Test that subtitle disposition flags (especially forced) are preserved during smart_cut"""
+    file_duration = 10
+    input_path = make_video_with_forced_subtitle('test_subtitle_forced.mkv', file_duration)
+    output_path = test_subtitle_disposition_preservation.__name__ + '.mkv'
+
+    # Load source container and verify it has forced subtitles
+    source = MediaContainer(input_path)
+
+    # Verify the source has the expected subtitle with forced flag
+    with av.open(input_path) as container:
+        assert len(container.streams.subtitles) == 1, "Source should have exactly 1 subtitle stream"
+        sub_stream = container.streams.subtitles[0]
+        assert av.stream.Disposition.forced in sub_stream.disposition, \
+            f"Source subtitle should have forced flag, got: {sub_stream.disposition}"
+
+    # Run smart_cut with a simple segment
+    segments = [(Fraction(2), Fraction(8))]  # Cut from 2s to 8s
+    smart_cut(source, segments, output_path, log_level='warning')
+
+    # Verify disposition preservation
+    check_stream_dispositions(input_path, output_path)
+    
+    print("✅ Subtitle disposition preservation test passed!")
+
+def test_multiple_language_subtitles():
+    """Test that multiple non-forced subtitle tracks with different languages are preserved"""
+    file_duration = 10
+    
+    # Define English subtitle content
+    en_subtitle_content = """1
+00:00:01,000 --> 00:00:03,000
+Hello world
+
+2
+00:00:05,000 --> 00:00:07,000
+This is English
+
+3
+00:00:08,500 --> 00:00:09,500
+The end
+"""
+    
+    # Define Finnish subtitle content
+    fi_subtitle_content = """1
+00:00:01,000 --> 00:00:03,000
+Hei maailma
+
+2
+00:00:05,000 --> 00:00:07,000
+Tämä on suomea
+
+3
+00:00:08,500 --> 00:00:09,500
+Loppu
+"""
+    
+    # Configure both subtitle tracks
+    subtitle_configs = [
+        {
+            'content': en_subtitle_content,
+            'language': 'en',
+            'disposition': 'default',  # English is default
+            'temp_file': 'tmp_test_subtitle_en.srt'
+        },
+        {
+            'content': fi_subtitle_content,
+            'language': 'fi', 
+            'disposition': '',  # Finnish has no special disposition
+            'temp_file': 'tmp_test_subtitle_fi.srt'
+        }
+    ]
+    
+    # Create test video with both subtitles
+    input_path = make_video_with_subtitles('test_multi_subtitle.mkv', file_duration, subtitle_configs)
+    output_path = test_multiple_language_subtitles.__name__ + '.mkv'
+    
+    # Verify source has both subtitle tracks
+    with av.open(input_path) as container:
+        assert len(container.streams.subtitles) == 2, f"Source should have 2 subtitle streams, got {len(container.streams.subtitles)}"
+        
+        # Check English subtitle (first stream)
+        en_sub = container.streams.subtitles[0]
+        assert av.stream.Disposition.default in en_sub.disposition, \
+            f"English subtitle should have default flag, got: {en_sub.disposition}"
+        
+        # Check Finnish subtitle (second stream)
+        fi_sub = container.streams.subtitles[1]
+        assert fi_sub.disposition.value == 0, \
+            f"Finnish subtitle should have no disposition flags, got: {fi_sub.disposition}"
+    
+    # Run smart_cut
+    source = MediaContainer(input_path)
+    segments = [(Fraction(1), Fraction(9))]  # Cut from 1s to 9s to include all subtitles
+    smart_cut(source, segments, output_path, log_level='warning')
+    
+    # Verify both subtitle tracks are preserved with correct dispositions
+    with av.open(output_path) as container:
+        assert len(container.streams.subtitles) == 2, f"Output should have 2 subtitle streams, got {len(container.streams.subtitles)}"
+        
+        en_sub_out = container.streams.subtitles[0]
+        fi_sub_out = container.streams.subtitles[1]
+        
+        # Check that dispositions are preserved
+        assert av.stream.Disposition.default in en_sub_out.disposition, \
+            f"English subtitle disposition not preserved: {en_sub_out.disposition}"
+        assert fi_sub_out.disposition.value == 0, \
+            f"Finnish subtitle disposition not preserved: {fi_sub_out.disposition}"
+    
+    # Run comprehensive disposition check
+    check_stream_dispositions(input_path, output_path)
+    
+    print("✅ Multiple language subtitles test passed!")
+
 def get_test_categories():
     """
     Returns a dictionary of test categories.
@@ -1650,6 +1873,8 @@ def get_test_categories():
 
         'mixed': [
             test_mkv_with_video_and_audio_passthru,
+            test_subtitle_disposition_preservation,
+            test_multiple_language_subtitles,
         ],
 
         'transforms': [
