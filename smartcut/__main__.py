@@ -1,7 +1,5 @@
 import argparse
 import av
-import contextlib
-from datetime import datetime
 from fractions import Fraction
 from smartcut.media_container import MediaContainer
 from smartcut.cut_video import smart_cut, VideoSettings, VideoExportMode, VideoExportQuality, AudioExportSettings, AudioExportInfo
@@ -9,12 +7,18 @@ from tqdm import tqdm
 
 def time_to_fraction(time_str_elem):
     if ':' in time_str_elem:
-        for pattern in ["%H:%M:%S", "%M:%S"]:
-            with contextlib.suppress(ValueError):
-                if time := datetime.strptime(time_str_elem, pattern):
-                    return Fraction(time.hour * 3600 + time.minute * 60 + time.second)
+        parts = time_str_elem.split(':')
+        if len(parts) == 3:
+            hours = int(parts[0])
+            minutes = int(parts[1])
+            seconds = Fraction(parts[2])
+            return Fraction(hours * 3600) + Fraction(minutes * 60) + seconds
+        elif len(parts) == 2:
+            minutes = int(parts[0])
+            seconds = Fraction(parts[1])
+            return Fraction(minutes * 60) + seconds
         else:
-            raise ValueError("Timestamp must match HH:MM:SS or MM:SS")
+            raise ValueError("Timestamp must be in format HH:MM:SS or MM:SS")
 
     return Fraction(time_str_elem)
 
@@ -78,10 +82,14 @@ examples:
   Cut using different time formats (mix seconds and minutes syntax):
     smartcut input.mp4 output.mp4 --keep 90,2:45,3:00,4:00
 
+  Subsecond precision cutting:
+    smartcut input.mp4 output.mp4 --keep 00:06:48.799,00:06:50.123
+
 time formats:
   - Seconds: 10, 30.5, 120
   - MM:SS: 01:30, 02:45
   - HH:MM:SS: 01:30:45
+  - Subseconds: 48.799, 01:30.123, 01:30:45.678
 """
 
     parser = argparse.ArgumentParser(
@@ -96,7 +104,8 @@ time formats:
                        help="Output media file path")
     parser.add_argument('--keep', metavar='SEGMENTS', type=str,
                        help="Keep specified time segments. Format: start1,end1,start2,end2,... "
-                            "Times can be in seconds (10), MM:SS (01:30), or HH:MM:SS (01:30:45)")
+                            "Times can be in seconds (10), MM:SS (01:30), HH:MM:SS (01:30:45), "
+                            "or with subseconds (48.799, 01:30.123, 01:30:45.678)")
     parser.add_argument('--cut', metavar='SEGMENTS', type=str,
                        help="Remove specified time segments (opposite of --keep). "
                             "Same time format as --keep option")
