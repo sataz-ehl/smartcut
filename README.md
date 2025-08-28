@@ -62,6 +62,21 @@ The CLI requires the input and output file paths as positional arguments. You ca
 
   This cuts out the segments from 30s to 40s and from 1m to 1m10s, keeping the rest.
 
+- **Various shorthands**:
+```bash
+  smartcut input.mp4 output.mp4 -k 10,20,40,50 # -k for --keep
+  smartcut input.mp4 output.mp4 -c 30,35 # -c for --cut
+
+  # Video start end keywords: s/start and e/end
+  smartcut input.mp4 output.mp4 -k start,30,01:00,end
+  smartcut input.mp4 output.mp4 -k s,30,60,e
+
+  # Negative timestamps for counting from end of file
+  smartcut input.mp4 output.mp4 -c "-5,end"          # Cut last 5 seconds
+  smartcut input.mp4 output.mp4 -k 10,-10          # Keep 10s to 10s from end
+  smartcut input.mp4 output.mp4 -k 0,-1:30         # Keep all but last 1m30s
+```
+
 - **Specify log level**:
 
   `smartcut.exe input.mp4 output.mp4 --keep 10,20 --log-level info`
