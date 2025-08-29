@@ -4,7 +4,7 @@
 
 <h1 align="center">Video Smartcut</h1>
 
-![PyPI - Version](https://img.shields.io/pypi/v/smartcut?logo=pypi&logoColor=white&label=PyPI) ![Discord](https://img.shields.io/discord/1257684604941504623?logo=discord&logoColor=blue&label=Join%20Discord)
+[![PyPI - Version](https://img.shields.io/pypi/v/smartcut?logo=pypi&logoColor=white&label=PyPI)](https://pypi.org/project/smartcut) [![Discord](https://img.shields.io/discord/1257684604941504623?logo=discord&logoColor=blue&label=Join%20Discord)](https://discord.gg/uYGkyfzU4c)
 
 This tool is an open-source CLI companion to [Smart Media Cutter](https://smartmediacutter.com).
 
@@ -30,7 +30,20 @@ In contrast, [Smart Media Cutter](https://smartmediacutter.com) is fully-feature
 
 Get built binaries for Windows and Linux from [releases](https://github.com/skeskinen/smartcut/releases).
 
-To install from source:
+### Install from PyPI
+
+```bash
+# Install directly with pip
+pip install smartcut
+
+# Or use pipx for isolated installation
+pipx install smartcut
+
+# Then run from anywhere
+smartcut input.mp4 output.mp4 --keep 10,20,40,50
+```
+
+### Install from source
 ```
 # Clone this repository:
 git clone https://github.com/skeskinen/smartcut.git

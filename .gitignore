@@ -36,3 +36,9 @@ sm_cython/*/*.c
 *.fcpxml
 *.otio
 *.aaf
+
+# Flatpak build artifacts
+distribution/flatpak/build-dir/
+distribution/flatpak/repo/
+*.flatpak
+.flatpak-builder
