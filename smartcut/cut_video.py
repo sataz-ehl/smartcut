@@ -1,7 +1,6 @@
 from enum import Enum
 from fractions import Fraction
 
-import itertools
 from math import e
 import os
 from typing import List
@@ -212,12 +211,14 @@ class VideoCutter:
 
         self.enc_codec = None
 
-        self.frame_cache = []
-        self.frame_cache_start_dts = -1
-
         self.in_stream = media_container.video_stream
         # Open another container because seeking to beginning of the file is unreliable...
         self.input_av_container: av.container.Container = av.open(media_container.path, 'r', metadata_errors='ignore')
+
+        self.demux_iter = self.input_av_container.demux(self.in_stream)
+        self.demux_saved_packet = None
+        self.frame_cache = []
+        self.frame_cache_start_dts = -1
 
         if video_settings.mode == VideoExportMode.RECODE and video_settings.codec_override != 'copy':
             self.out_stream = output_av_container.add_stream(video_settings.codec_override, rate=self.in_stream.guessed_rate, options={'x265-params': 'log_level=error'})
@@ -500,15 +501,9 @@ class VideoCutter:
             decoder = self.in_stream.codec_context
             decoder.flush_buffers()
 
-            packet, demux_iter = self.fetch_packet(s.gop_start_dts)
-            if packet is None:
-                return []
-            for packet in itertools.chain([packet], demux_iter):
+            for packet in self.fetch_packet(s.gop_start_dts, s.gop_end_dts):
                 for frame in decoder.decode(packet):
                     self.frame_cache.append(frame)
-                if packet.dts == s.gop_end_dts:
-                    break
-                packet = self.input_av_container.demux(self.in_stream)
             for frame in decoder.decode(None):
                 self.frame_cache.append(frame)
 
@@ -554,11 +549,7 @@ class VideoCutter:
         should_convert_cra = self._should_convert_cra_for_segment(s)
         first_packet = True
 
-        packet, demux_iter = self.fetch_packet(s.gop_start_dts)
-        if packet is None:
-            return []
-        for packet in itertools.chain([packet], demux_iter):
-            last_packet = packet.dts == s.gop_end_dts
+        for packet in self.fetch_packet(s.gop_start_dts, s.gop_end_dts):
 
             # Apply CRA to BLA conversion only to the first packet if needed
             if first_packet and should_convert_cra:
@@ -588,9 +579,6 @@ class VideoCutter:
                 packet.dts += self.segment_start_in_output / self.out_time_base
 
             result_packets.extend(self.remux_bitstream_filter.filter(packet))
-
-            if last_packet:
-                break
 
         result_packets.extend(self.remux_bitstream_filter.filter(None))
 
@@ -674,20 +662,46 @@ class VideoCutter:
         self.enc_codec = None
         return result_packets
 
-    def fetch_packet(self, target_dts):
-        iter = self.input_av_container.demux(self.in_stream)
+    def fetch_packet(self, target_dts, end_dts):
         tb = self.in_stream.time_base
-        for packet in iter:
+
+        # First, check if we have a saved packet from previous call
+        if self.demux_saved_packet is not None:
+            saved_dts = self.demux_saved_packet.dts if self.demux_saved_packet.dts is not None else -100_000_000
+            if saved_dts >= target_dts:
+                if saved_dts <= end_dts:
+                    packet = self.demux_saved_packet
+                    self.demux_saved_packet = None
+                    yield packet
+                else:
+                    # Saved packet is beyond our end range, don't yield it
+                    return
+            else:
+                # Saved packet is before our target, clear it
+                self.demux_saved_packet = None
+
+        for packet in self.demux_iter:
             in_dts = packet.dts if packet.dts is not None else -100_000_000
+
+            # Skip packets before target_dts
             if packet.pts is None or in_dts < target_dts:
                 diff = (target_dts - in_dts) * tb
                 if in_dts > 0 and diff > 120:
                     t = int(target_dts - 30 / tb)
                     # print(f"Seeking to skip a gap: {float(t * tb)}")
                     self.input_av_container.seek(t, stream = self.in_stream)
+                    # Clear saved packet after seek since iterator position changed
+                    self.demux_saved_packet = None
                 continue
-            return packet, iter
-        return None, None
+
+            # Check if packet exceeds end_dts
+            if in_dts > end_dts:
+                # Save this packet for next call and stop iteration
+                self.demux_saved_packet = packet
+                return
+
+            # Packet is in our target range, yield it
+            yield packet
 
 def smart_cut(media_container: MediaContainer, positive_segments: List[tuple[Fraction, Fraction]],
               out_path: str, audio_export_info: AudioExportInfo = None, log_level = None, progress = None,
