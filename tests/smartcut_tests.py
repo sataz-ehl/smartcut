@@ -37,7 +37,7 @@ data_dir = 'test_data'
 # Parse command line arguments
 def parse_args():
     parser = argparse.ArgumentParser(description='Smart Media Cutter Tests')
-    parser.add_argument('--category', choices=['basic', 'h264', 'h265', 'codecs', 'containers', 'audio', 'mixed', 'transforms', 'long', 'external', 'real_world', 'real_world_h264', 'real_world_h265', 'real_world_av1', 'real_world_vp9', 'all'],
+    parser.add_argument('--category', choices=['basic', 'h264', 'h265', 'codecs', 'containers', 'audio', 'mixed', 'transforms', 'long', 'external', 'real_world', 'real_world_h264', 'real_world_h265', 'real_world_av1', 'real_world_vp9', 'all', 'smc_audio', 'smc_mixed'],
                        help='Run tests from specific category')
     parser.add_argument('--single', type=str, help='Run a single specific test function (e.g., test_h264_non_idr_keyframes)')
     parser.add_argument('--list-categories', action='store_true', help='List available test categories')
@@ -2023,14 +2023,14 @@ def get_test_categories():
 
     # SMC-specific tests (require additional dependencies)
     smc_tests = {
-        'audio': [
+        'smc_audio': [
             test_vorbis_encode_mix,
             test_flac_conversions,
             test_wav_conversions,
             test_vorbis_track_cut,
             test_mp3_track_cut,
         ],
-        'mixed': [
+        'smc_mixed': [
             test_mkv_with_video_and_audio_mix,
             test_mix_with_rate_conversion,
             test_denoiser,
@@ -2043,7 +2043,7 @@ def get_test_categories():
 
         # Add SMC tests to existing categories
         for category, tests in smc_tests.items():
-            test_categories[category].extend(tests)
+            test_categories[category] = tests
 
         print("Including smc tests")
     except ImportError:
