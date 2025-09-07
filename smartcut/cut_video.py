@@ -13,6 +13,7 @@ import numpy as np
 
 from smartcut.media_container import MediaContainer
 from smartcut.nal_tools import convert_hevc_cra_to_bla
+from smartcut.media_utils import VideoExportMode, VideoExportQuality, get_crf_for_quality
 
 from smartcut.misc_data import AudioExportInfo, AudioExportSettings, CutSegment, MixInfo, VideoTransform, VideoViewTransform, WatermarkView
 
@@ -194,18 +195,6 @@ class SubtitleCutter:
         return []
 
 
-class VideoExportMode(Enum):
-    SMARTCUT = 1
-    KEYFRAMES = 2
-    RECODE = 3
-
-class VideoExportQuality(Enum):
-    LOW = 1
-    NORMAL = 2
-    HIGH = 3
-    INDISTINGUISHABLE = 4
-    NEAR_LOSSLESS = 5
-    LOSSLESS = 6
 
 @dataclass
 class VideoSettings:
@@ -324,23 +313,10 @@ class VideoCutter:
             else:
                 profile = profile.lower().replace(':', '').replace(' ', '')
 
-        # NOTE: crf 11 is a really high quality. I think this is ok because we typically only encode short segments.
-        # I didn't see a nice way to get the original quality settings from the input video stream.
-        # NOTE: 11 is too much. Try 16 for now
-
-        crf_value = 23
-        match self.video_settings.quality:
-            case VideoExportQuality.LOW:
-                crf_value = 23
-            case VideoExportQuality.NORMAL:
-                crf_value = 18
-            case VideoExportQuality.HIGH:
-                crf_value = 14
-            case VideoExportQuality.INDISTINGUISHABLE:
-                crf_value = 8
-            case VideoExportQuality.NEAR_LOSSLESS:
-                crf_value = 3
-
+        # Get CRF value for quality setting
+        crf_value = get_crf_for_quality(self.video_settings.quality)
+        
+        # Adjust CRF for newer codecs that are more efficient
         if self.codec_name in ['hevc', 'av1', 'vp9']:
             crf_value += 4
         if self.video_settings.quality == VideoExportQuality.LOSSLESS:
