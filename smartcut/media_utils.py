@@ -120,3 +120,70 @@ def is_audio_only_format(file_extension: str) -> bool:
     """
     ext = file_extension.lower().lstrip('.')
     return ext in get_audio_only_formats()
+
+# --- Validation helpers centralizing media rules ---
+
+def _normalize_video_codec_name(name: str) -> str:
+    """Normalize user-provided video encoder name to canonical form.
+
+    Accept common synonyms (e.g., 'h265' -> 'hevc').
+    """
+    if not name:
+        return ""
+    n = name.strip().lower()
+    if n == 'h265':
+        return 'hevc'
+    return n
+
+def validate_video_container_compat(encoder_name: str, container_ext: str) -> list[str]:
+    """Validate video encoder vs. container compatibility.
+
+    Returns a list of error strings if incompatible.
+    """
+    errors: list[str] = []
+    enc = _normalize_video_codec_name(encoder_name)
+    ext = container_ext.lower().lstrip('.')
+
+    # H.264 in OGG is not a supported combination
+    if enc == 'h264' and ext == 'ogg':
+        errors.append("H.264 video codec is not supported in OGG containers")
+
+    # H.265/HEVC not supported in MP3 or OGG
+    if enc == 'hevc' and ext in ['mp3', 'ogg']:
+        errors.append(f"H.265 video codec is not supported in {ext.upper()} containers")
+
+    return errors
+
+def infer_audio_codec_warnings(container_ext: str, has_any_audio: bool, has_mix_track: bool) -> list[str]:
+    """Return informational warnings about implied audio codecs by container.
+
+    This does not block export and is intended for user visibility.
+    """
+    warnings: list[str] = []
+    ext = container_ext.lower().lstrip('.')
+
+    if not has_any_audio:
+        return warnings
+
+    if ext == 'mp3':
+        if has_mix_track:
+            warnings.append("Mixed audio will be re-encoded to MP3 format")
+    elif ext == 'ogg':
+        warnings.append("Audio will be encoded using Vorbis or Opus codec")
+
+    return warnings
+
+def validate_audio_track_limits_for_container(container_ext: str, total_audio_tracks: int) -> list[str]:
+    """Validate total audio track count for a given container.
+
+    Returns list of error strings if over the limit.
+    """
+    errors: list[str] = []
+    if total_audio_tracks <= 1:
+        return errors
+
+    ext = container_ext.lower().lstrip('.')
+    single_track_formats = ['ogg', 'mp3', 'm4a', 'flac', 'wav']
+    if ext in single_track_formats:
+        errors.append(f"{ext.upper()} format can only have 1 audio track, but {total_audio_tracks} were selected")
+    return errors

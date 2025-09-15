@@ -23,7 +23,6 @@ classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: End Users/Desktop",
     "Intended Audience :: Developers",
-    "Topic :: Multimedia :: Video :: Non-Linear Editor",
     "Topic :: Multimedia :: Video :: Conversion",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",

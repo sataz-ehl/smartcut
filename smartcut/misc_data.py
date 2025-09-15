@@ -5,29 +5,6 @@ class MixInfo():
     track_levels: list[float]
 
 @dataclass
-class VideoViewTransform:
-    name: str
-    input_w: float
-    input_h: float
-    input_x: float
-    input_y: float
-    output_y: float
-    enabled: bool
-
-@dataclass
-class WatermarkView:
-    name: str
-    path: str
-    output_y: float
-    output_x: float
-    enabled: bool
-
-@dataclass
-class VideoTransform():
-    resolution: tuple[int, int]
-    views: list[VideoViewTransform | WatermarkView]
-
-@dataclass
 class AudioExportSettings:
     codec: str
     channels: str | None = None

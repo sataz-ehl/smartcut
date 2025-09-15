@@ -20,7 +20,7 @@ import soundfile as sf
 import av.datasets as av_datasets
 import scipy
 
-from smartcut.misc_data import MixInfo, VideoTransform, VideoViewTransform
+from smartcut.misc_data import MixInfo
 from smartcut.media_container import MediaContainer, AudioTrack, AudioReader
 from smartcut.cut_video import AudioExportInfo, AudioExportSettings, VideoExportMode, VideoExportQuality, VideoSettings, make_cut_segments, smart_cut
 
@@ -511,7 +511,7 @@ def test_peaks_mkv_memory_usage():
         container = MediaContainer(peaks_path)
         audio_settings = [AudioExportSettings(codec='passthru')] * len(container.audio_tracks)
         export_info = AudioExportInfo(output_tracks=audio_settings)
-        video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.NORMAL, None)
+        video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.NORMAL)
 
         smart_cut(
             container,
@@ -651,46 +651,9 @@ def test_ts_smart_cut():
     for c in [1, 2]:
         test_smart_cut(filename, output_path, c)
 
-def test_vertical_transform():
-    input_path = 'vertical_in.mkv'
-    file_duration = 5
-    n_cuts = 5
-    create_test_video(input_path, file_duration, 'h264', 'yuv420p', 30, (1920, 1080))
-    reference_path = 'vertical_ref.mkv'
-    create_test_video(reference_path, file_duration, 'h264', 'yuv420p', 30, (1080, 1920))
-    reference_container = MediaContainer(reference_path)
-
-    output_path = test_vertical_transform.__name__ + '.mkv'
-    source_container = MediaContainer(input_path)
-
-    cutpoints = source_container.video_frame_times
-    cutpoints = [0] + list(np.sort(np.random.choice(cutpoints, n_cuts, replace=False))) + [source_container.duration()]
-
-    segments = list(zip(cutpoints[:-1], cutpoints[1:]))
-
-    video_transform = VideoTransform((1080, 1920), views=[])
-    video_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.NORMAL, video_transform)
-    smart_cut(source_container, segments, output_path, video_settings=video_settings)
-
-    output_container = MediaContainer(output_path)
-    check_videos_equal(reference_container, output_container)
-
-    video_transform = VideoTransform((1080, 1920), views=[VideoViewTransform('test', 0.5, 0.5, 0.5, 0.5, 0.5, True)])
-    video_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.NORMAL, video_transform)
-    smart_cut(source_container, segments, output_path, video_settings=video_settings)
-
-    output_container = MediaContainer(output_path)
-    check_videos_equal(reference_container, output_container)
-
-    # test hevc override
-
-    video_transform = VideoTransform((1080, 1920), views=[VideoViewTransform('test', 0.5, 0.5, 0.5, 0.5, 0.5, True)])
-    video_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.NORMAL, video_transform, codec_override='hevc')
-    smart_cut(source_container, segments, output_path, video_settings=video_settings, log_level='warning')
-
-    output_container = MediaContainer(output_path)
-    assert output_container.video_stream.codec_context.name == 'hevc', f'codec should be hevc, found {output_container.video_stream.codec_context.name}'
-    check_videos_equal(reference_container, output_container)
+# Video transform functionality has been removed
+# def test_vertical_transform():
+#     pass
 
 def test_video_recode_codec_override():
     input_path = 'video_settings_in.mkv'
@@ -708,14 +671,14 @@ def test_video_recode_codec_override():
     output_path_a = test_video_recode_codec_override.__name__ + 'a.mkv'
     output_path_b = test_video_recode_codec_override.__name__ + 'b.mkv'
 
-    video_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.NORMAL, None, codec_override='hevc')
+    video_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.NORMAL, codec_override='hevc')
     smart_cut(source_container, segments, output_path_a, video_settings=video_settings, log_level='warning')
 
     output_container = MediaContainer(output_path_a)
     assert output_container.video_stream.codec_context.name == 'hevc', f'codec should be hevc, found {output_container.video_stream.codec_context.name}'
     check_videos_equal(source_container, output_container)
 
-    video_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH, None, codec_override='hevc')
+    video_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH, codec_override='hevc')
     smart_cut(source_container, segments, output_path_b, video_settings=video_settings, log_level='warning')
 
     output_container = MediaContainer(output_path_b)
@@ -724,14 +687,14 @@ def test_video_recode_codec_override():
 
     assert os.path.getsize(output_path_b) > os.path.getsize(output_path_a)
 
-    video_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.NORMAL, None, codec_override='vp9')
+    video_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.NORMAL, codec_override='vp9')
     smart_cut(source_container, segments, output_path_a, video_settings=video_settings, log_level='warning')
 
     output_container = MediaContainer(output_path_a)
     assert output_container.video_stream.codec_context.name == 'vp9', f'codec should be vp9, found {output_container.video_stream.codec_context.name}'
     check_videos_equal(source_container, output_container)
 
-    video_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH, None, codec_override='vp9')
+    video_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH, codec_override='vp9')
     smart_cut(source_container, segments, output_path_b, video_settings=video_settings, log_level='warning')
 
     output_container = MediaContainer(output_path_b)
@@ -741,14 +704,14 @@ def test_video_recode_codec_override():
     assert os.path.getsize(output_path_b) > os.path.getsize(output_path_a)
 
     # These tests are very slow because the encoders are slow
-    # video_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.NORMAL, None, codec_override='av1')
+    # video_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.NORMAL, codec_override='av1')
     # smart_cut(source_container, segments, output_path_a, video_settings=video_settings, log_level='warning')
 
     # output_container = MediaContainer(output_path_a)
     # assert output_container.video_stream.codec_context.name == 'libdav1d', f'codec should be av1, found {output_container.video_stream.codec_context.name}'
     # check_videos_equal(source_container, output_container)
 
-    # video_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH, None, codec_override='vp9')
+    # video_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH, codec_override='vp9')
     # smart_cut(source_container, segments, output_path_b, video_settings=video_settings, log_level='warning')
 
     # output_container = MediaContainer(output_path_b)
@@ -1381,7 +1344,7 @@ def test_sunset():
     os.environ["PYAV_TESTDATA_DIR"] = 'pyav_datasets'
     filename = av_datasets.curated("pexels/time-lapse-video-of-sunset-by-the-sea-854400.mp4")
     output_path = test_sunset.__name__ + '.mp4'
-    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH, None)
+    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH)
     for c in [1, 2, 3]:
         test_smart_cut(filename, output_path, n_cuts=c, video_settings=video_settings)
 
@@ -1525,7 +1488,7 @@ def test_h264_non_idr_keyframes():
 
     audio_settings = AudioExportSettings(codec='passthru')
     audio_export_info = AudioExportInfo(output_tracks=[audio_settings] * len(source.audio_tracks))
-    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH, None)
+    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH)
 
     output_filename = 'h264_non_idr_minimal_test.mp4'
 
@@ -1577,7 +1540,7 @@ def test_h264_non_idr_keyframes_annexb():
 
     audio_settings = AudioExportSettings(codec='passthru')
     audio_export_info = AudioExportInfo(output_tracks=[audio_settings] * len(source.audio_tracks))
-    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH, None)
+    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH)
 
     output_filename = 'h264_non_idr_annexb_test.ts'
 
@@ -1595,7 +1558,7 @@ def test_testvideos_bigbuckbunny_h264():
     """Test with test-videos.co.uk Big Buck Bunny H.264"""
     filename = cached_download('https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4', 'testvideos_bbb_h264.mp4')
     output_path = test_testvideos_bigbuckbunny_h264.__name__ + '.mp4'
-    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH, None)
+    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH)
     for c in [1, 2]:
         test_smart_cut(filename, output_path, n_cuts=c, video_settings=video_settings, pixel_tolerance=60)
 
@@ -1603,7 +1566,7 @@ def test_testvideos_bigbuckbunny_h265():
     """Test with test-videos.co.uk Big Buck Bunny H.265/HEVC"""
     filename = cached_download('https://test-videos.co.uk/vids/bigbuckbunny/mp4/h265/360/Big_Buck_Bunny_360_10s_1MB.mp4', 'testvideos_bbb_h265.mp4')
     output_path = test_testvideos_bigbuckbunny_h265.__name__ + '.mp4'
-    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH, None)
+    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH)
     for c in [1, 2]:
         test_smart_cut(filename, output_path, n_cuts=c, video_settings=video_settings, pixel_tolerance=60)
 
@@ -1611,7 +1574,7 @@ def test_testvideos_bigbuckbunny_vp9():
     """Test with test-videos.co.uk Big Buck Bunny VP9"""
     filename = cached_download('https://test-videos.co.uk/vids/bigbuckbunny/webm/vp9/360/Big_Buck_Bunny_360_10s_1MB.webm', 'testvideos_bbb_vp9.webm')
     output_path = test_testvideos_bigbuckbunny_vp9.__name__ + '.webm'
-    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH, None)
+    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH)
     for c in [1]:
         test_smart_cut(filename, output_path, n_cuts=c, video_settings=video_settings, pixel_tolerance=60)
 
@@ -1619,7 +1582,7 @@ def test_testvideos_jellyfish_h264():
     """Test with test-videos.co.uk Jellyfish H.264"""
     filename = cached_download('https://test-videos.co.uk/vids/jellyfish/mp4/h264/360/Jellyfish_360_10s_1MB.mp4', 'testvideos_jellyfish_h264.mp4')
     output_path = test_testvideos_jellyfish_h264.__name__ + '.mp4'
-    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH, None)
+    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH)
     for c in [1, 2]:
         test_smart_cut(filename, output_path, n_cuts=c, video_settings=video_settings, pixel_tolerance=60)
 
@@ -1627,7 +1590,7 @@ def test_testvideos_jellyfish_h265():
     """Test with test-videos.co.uk Jellyfish H.265"""
     filename = cached_download('https://test-videos.co.uk/vids/jellyfish/mp4/h265/360/Jellyfish_360_10s_1MB.mp4', 'testvideos_jellyfish_h265.mp4')
     output_path = test_testvideos_jellyfish_h265.__name__ + '.mp4'
-    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH, None)
+    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH)
     for c in [1, 2]:
         test_smart_cut(filename, output_path, n_cuts=c, video_settings=video_settings, pixel_tolerance=80, allow_failed_frames=2)
 
@@ -1728,14 +1691,14 @@ def test_partial_smart_cut(input_path: str, output_base_name: str, segment_durat
     recode_output = output_base_name + "_recode" + os.path.splitext(input_path)[1]
 
     # Test 1: Smart cut (default mode) - merges all segments into one file
-    smart_cut_settings = video_settings or VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH, None)
+    smart_cut_settings = video_settings or VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH)
     smart_cut(source, segments, smartcut_output,
              audio_export_info=audio_export_info,
              video_settings=smart_cut_settings,
              log_level='warning')
 
     # Test 2: Complete recode for comparison - merges all segments into one file
-    recode_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH, None)
+    recode_settings = VideoSettings(VideoExportMode.RECODE, VideoExportQuality.HIGH)
     smart_cut(source, segments, recode_output,
              audio_export_info=audio_export_info,
              video_settings=recode_settings,
@@ -1958,7 +1921,7 @@ def get_test_categories():
         ],
 
         'transforms': [
-            test_vertical_transform,
+            # test_vertical_transform, # removed - video transform feature removed
             test_video_recode_codec_override,
         ],
 

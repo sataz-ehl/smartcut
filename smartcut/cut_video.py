@@ -15,7 +15,7 @@ from smartcut.media_container import MediaContainer
 from smartcut.nal_tools import convert_hevc_cra_to_bla
 from smartcut.media_utils import VideoExportMode, VideoExportQuality, get_crf_for_quality
 
-from smartcut.misc_data import AudioExportInfo, AudioExportSettings, CutSegment, MixInfo, VideoTransform, VideoViewTransform, WatermarkView
+from smartcut.misc_data import AudioExportInfo, AudioExportSettings, CutSegment, MixInfo
 
 try:
     from smc.audio_handling import MixAudioCutter, RecodeTrackAudioCutter
@@ -200,7 +200,6 @@ class SubtitleCutter:
 class VideoSettings:
     mode: VideoExportMode
     quality: VideoExportQuality
-    transform: VideoTransform
     codec_override: str = 'copy'
 
 class VideoCutter:
@@ -209,7 +208,6 @@ class VideoCutter:
         self.log_level = log_level
         self.encoder_inited = False
         self.video_settings = video_settings
-        self.transform_graph = None
 
         self.enc_codec = None
 
@@ -275,10 +273,6 @@ class VideoCutter:
                 if not is_annexb(self.in_stream.codec_context.extradata):
                     self.remux_bitstream_filter = av.bitstream.BitStreamFilterContext('hevc_mp4toannexb', self.in_stream, self.out_stream)
 
-        if video_settings.transform is not None:
-            res = video_settings.transform.resolution
-            self.out_stream.width = res[0]
-            self.out_stream.height = res[1]
 
         self.last_dts = -100_000_000
 
@@ -363,55 +357,6 @@ class VideoCutter:
 
             self.encoding_options['x265-params'] = ':'.join(x265_params)
 
-        if self.video_settings.transform is not None:
-            transform = self.video_settings.transform
-            views = transform.views
-            n = len(views)
-            n_transform = len([v for v in views if isinstance(v, VideoViewTransform)])
-
-            res_w = transform.resolution[0]
-            res_h = transform.resolution[1]
-
-            graph = self.transform_graph = av.filter.Graph()
-            src_buf = graph.add_buffer(template=self.in_stream)
-            split = graph.add("split", f'{n_transform+1}')
-            src_buf.link_to(split)
-
-            bg_crop = graph.add("crop", "ih*9/16:ih")
-            base = bg_scale = graph.add("scale", f"{res_w}:{res_h}")
-
-            split.link_to(bg_crop, n_transform)
-            bg_crop.link_to(bg_scale)
-
-            for i, view in enumerate(views):
-                if isinstance(view, VideoViewTransform):
-                    crop_w = f'in_w*{view.input_w}'
-                    crop_h = f'in_h*{view.input_h}'
-                    crop_x = f'in_w*{view.input_x}'
-                    crop_y = f'in_h*{view.input_y}'
-
-                    view_crop = graph.add("crop", f"{crop_w}:{crop_h}:{crop_x}:{crop_y}")
-                    view_scale = graph.add("scale", f"{res_w}:-1")
-                    view_overlay = graph.add("overlay", f"0:{int(res_h * view.output_y)}")
-
-                    split.link_to(view_crop, i)
-                    view_crop.link_to(view_scale)
-                    base.link_to(view_overlay)
-                    view_scale.link_to(view_overlay, input_idx=1)
-
-                    base = view_overlay
-                elif isinstance(view, WatermarkView):
-                    path = view.path
-                    movie = graph.add("movie", f"filename='{path}'")
-                    watermark_overlay = graph.add("overlay", f"{int(res_w * view.output_x)}:{int(res_h * view.output_y)}")
-                    base.link_to(watermark_overlay)
-                    movie.link_to(watermark_overlay, input_idx=1)
-
-                    base = watermark_overlay
-
-            sink = graph.add("buffersink")
-            base.link_to(sink)
-            graph.configure()
 
     def segment(self, cut_segment: CutSegment) -> list[av.Packet]:
         self.out_time_base = self.out_stream.time_base
@@ -495,9 +440,6 @@ class VideoCutter:
                 break
 
             out_tb = self.out_time_base if self.codec_name != 'mpeg2video' else self.enc_codec.time_base
-            if self.transform_graph is not None:
-                self.transform_graph.vpush(frame)
-                frame = self.transform_graph.vpull()
 
             frame.pts -= s.start_time / in_tb
 
@@ -748,7 +690,7 @@ def smart_cut(media_container: MediaContainer, positive_segments: List[tuple[Fra
               out_path: str, audio_export_info: AudioExportInfo = None, log_level = None, progress = None,
               video_settings=None, segment_mode=False, cancel_object: CancelObject | None = None):
     if video_settings is None:
-        video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.NORMAL, None)
+        video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.NORMAL)
 
     adjusted_segment_times = []
     for (s, e) in positive_segments:

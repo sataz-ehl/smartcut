@@ -42,3 +42,5 @@ distribution/flatpak/build-dir/
 distribution/flatpak/repo/
 *.flatpak
 .flatpak-builder
+
+smartcut_cpp
