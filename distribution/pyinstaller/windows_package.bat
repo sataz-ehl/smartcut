@@ -4,11 +4,11 @@ REM Navigate to the project directory; adjust this if your script is elsewhere
 REM cd %~dp0
 
 REM Package the project with PyInstaller (single file)
-.venv\Scripts\pyinstaller --distpath .\dist --workpath .\build --onefile ^
+venv\Scripts\pyinstaller --distpath .\dist --workpath .\build --onefile ^
  -n smartcut -y --hidden-import=uuid smartcut\__main__.py
 
 REM Package the project with PyInstaller (directory output)
-.venv\Scripts\pyinstaller --distpath .\dist --workpath .\build ^
+venv\Scripts\pyinstaller --distpath .\dist --workpath .\build ^
  -n smartcut -y --hidden-import=uuid smartcut\__main__.py
 
 REM Create zip archive of directory output

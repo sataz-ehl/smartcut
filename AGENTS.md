@@ -11,9 +11,8 @@ Smart Media Cutter (smartcut) is a Python-based CLI tool for efficient video cut
 ### Development Setup
 ```bash
 # Create virtual environment and install dependencies
-python -m venv .venv
-source .venv/bin/activate  # Linux/Mac
-# .venv\Scripts\activate   # Windows
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
 pip install -r requirements.txt
 
 # Install test dependencies
@@ -128,4 +127,4 @@ tests/
 - Audio tracks default to passthrough with lossless quality
 - Frame-accurate cutting supported via `--frames` flag
 - Supports both "keep" and "cut" operations on time segments
-- always use venv .venv
+- always use venv `./venv`
