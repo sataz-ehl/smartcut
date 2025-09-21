@@ -41,11 +41,11 @@ test = [
     "soundfile",
     "scipy",
     "requests",
+    "psutil",
 ]
 dev = [
     "build",
     "twine",
-    "pytest",
 ]
 
 [project.urls]
