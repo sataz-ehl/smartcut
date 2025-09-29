@@ -1031,6 +1031,52 @@ def make_video_with_subtitles(path, file_duration, subtitle_configs):
 
     return path
 
+def make_video_with_attachment(path, file_duration=3,
+                               attachment_filename='smartcut_attachment.txt',
+                               attachment_payload=b'SmartCutAttachmentTest'):
+    """Create a small MKV file that carries a single attachment stream."""
+    if os.path.exists(path):
+        return path
+
+    base_video = 'tmp_attachment_base.mkv'
+    create_test_video(base_video, file_duration, 'h264', 'yuv420p', 25, (32, 18))
+
+    attachment_path = 'tmp_attachment_payload.bin'
+    with open(attachment_path, 'wb') as fh:
+        fh.write(attachment_payload)
+
+    output_options = {
+        'c': 'copy',
+        'attach': attachment_path,
+        'metadata:s:t': f'filename={attachment_filename}',
+        'metadata:s:t:0': 'mimetype=text/plain',
+        'y': None,
+    }
+
+    (
+        ffmpeg
+        .output(ffmpeg.input(base_video), path, **output_options)
+        .run(quiet=True)
+    )
+
+    return path
+
+def get_attachment_stream_metadata(path):
+    """Extract attachment metadata using ffprobe for validation."""
+    probe = ffmpeg.probe(path)
+    attachments = []
+    for stream in probe.get('streams', []):
+        if stream.get('codec_type') == 'attachment':
+            tags = stream.get('tags', {})
+            attachments.append({
+                'filename': tags.get('filename'),
+                'mimetype': tags.get('mimetype'),
+                'extradata_size': stream.get('extradata_size'),
+            })
+
+    attachments.sort(key=lambda info: info.get('filename') or '')
+    return attachments
+
 def make_video_with_forced_subtitle(path, file_duration):
     """Legacy function - creates video with single forced subtitle for backward compatibility"""
     subtitle_content = """1
@@ -2078,6 +2124,24 @@ Loppu
     # Run comprehensive disposition check
     check_stream_dispositions(input_path, output_path)
 
+
+def test_mkv_attachment_preservation():
+    """Verify that attachment streams are preserved during smart_cut operations."""
+    input_path = make_video_with_attachment('test_mkv_with_attachment.mkv')
+    output_path = test_mkv_attachment_preservation.__name__ + '.mkv'
+
+    source = MediaContainer(input_path)
+    segments = [(Fraction(0), source.duration())]
+    smart_cut(source, segments, output_path, log_level='warning')
+    source.close()
+
+    input_attachments = get_attachment_stream_metadata(input_path)
+    output_attachments = get_attachment_stream_metadata(output_path)
+
+    assert input_attachments, "Source file is expected to carry at least one attachment"
+    assert input_attachments == output_attachments, "Attachment streams metadata mismatch after smart_cut"
+
+
 def get_test_categories():
     """
     Returns a dictionary of test categories.
@@ -2135,6 +2199,7 @@ def get_test_categories():
             test_ts_h264_to_mp4_cut_on_keyframes,
             test_ts_h264_to_mp4_smart_cut,
             test_ts_h264_to_mkv_smart_cut,
+            test_mkv_attachment_preservation,
         ],
 
         'audio': [
