@@ -9,6 +9,7 @@ import av.logging
 import ffmpeg
 import platform
 import argparse
+import random
 
 import numpy as np
 import av
@@ -24,7 +25,7 @@ from smartcut.misc_data import MixInfo
 from smartcut.media_container import MediaContainer, AudioTrack, AudioReader
 from smartcut.cut_video import AudioExportInfo, AudioExportSettings, VideoExportMode, VideoExportQuality, VideoSettings, make_cut_segments, smart_cut
 
-np.random.seed(12345)
+DEFAULT_SEED = 12345
 
 # Set the log level to silence the None dts warnings. I believe those can be ignored since
 # we do set dts, except when it's not set in the source in which case it's not clear what
@@ -42,6 +43,8 @@ def parse_args():
     parser.add_argument('--single', type=str, help='Run a single specific test function (e.g., test_h264_non_idr_keyframes)')
     parser.add_argument('--list-categories', action='store_true', help='List available test categories')
     parser.add_argument('--list-tests', action='store_true', help='List all available test functions')
+    parser.add_argument('--flaky', type=int, help='Repeat each selected test N times with different seeds')
+    parser.add_argument('--seed', type=int, help='Base PRNG seed (defaults to 12345)')
     parser.add_argument('files', nargs='*', help='Specific files to test (legacy mode)')
 
     args = parser.parse_args()
@@ -86,6 +89,17 @@ def parse_args():
         sys.exit(0)
 
     return args
+
+
+def seed_all(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+
+
+def resolve_base_seed(args) -> int:
+    if args is None or args.seed is None:
+        return DEFAULT_SEED
+    return args.seed
 
 # Handle legacy argument parsing for backwards compatibility
 def setup_legacy_args():
@@ -2298,7 +2312,7 @@ def get_test_categories():
 
     return test_categories
 
-def run_tests(category=None, single_test=None):
+def run_tests(category=None, single_test=None, flaky_runs=None, base_seed=None):
     """
     Runs tests from specified category, single test, or all tests.
     """
@@ -2360,21 +2374,43 @@ def run_tests(category=None, single_test=None):
 
         print(f"Running all tests ({len(tests_to_run)} tests)")
 
+    if flaky_runs is not None and flaky_runs < 1:
+        print("--flaky requires a positive integer")
+        return
+
     perf_timer = time()
     passed = 0
     failed = 0
 
+    total_runs = flaky_runs if flaky_runs else 1
+    seed_value = base_seed if base_seed is not None else DEFAULT_SEED
+
+    if not flaky_runs:
+        seed_all(seed_value)
+
     for test in tests_to_run:
         test_name = test.__name__
-        try:
-            # print(f"Running {test_name}")
-            test()
-            print(f"{test_name}: ✅ PASS")
-            passed += 1
-        except Exception as e:
-            print(f"{test_name}: ❌ FAIL:")
-            traceback.print_exc()
-            failed += 1
+
+        for run_index in range(total_runs):
+            run_seed = seed_value if not flaky_runs else (seed_value + run_index) & 0x7FFFFFFF
+            seed_all(run_seed)
+
+            try:
+                # print(f"Running {test_name}")
+                test()
+                if flaky_runs:
+                    print(f"{test_name} [{run_index + 1}/{total_runs}] seed={run_seed}: ✅ PASS")
+                else:
+                    print(f"{test_name}: ✅ PASS")
+                passed += 1
+            except Exception as e:
+                if flaky_runs:
+                    print(f"{test_name} [{run_index + 1}/{total_runs}] seed={run_seed}: ❌ FAIL")
+                else:
+                    print(f"{test_name}: ❌ FAIL:")
+                traceback.print_exc()
+                failed += 1
+                # Continue running remaining iterations to gather full flake info
 
     elapsed = time() - perf_timer
     print(f'\nResults: {passed} passed, {failed} failed')
@@ -2384,9 +2420,11 @@ if __name__ == "__main__":
     if manual_input is None:
         # Parse arguments for category or single test selection
         args = parse_args()
-        run_tests(args.category, args.single)
+        base_seed = resolve_base_seed(args)
+        run_tests(args.category, args.single, args.flaky, base_seed)
     else:
         # Legacy mode - test specific files
+        seed_all(DEFAULT_SEED)
         for file in manual_input:
             try:
                 print(f"Testing {file}")
