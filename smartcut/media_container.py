@@ -102,7 +102,7 @@ class MediaContainer:
         else:
             self.video_stream = av_container.streams.video[0]
             self.video_stream.thread_type = "FRAME"
-            streams = [self.video_stream] + list(av_container.streams.audio)
+            streams = [self.video_stream, *av_container.streams.audio]
             if self.video_stream.start_time is not None:
                 self.start_time = self.video_stream.start_time * self.video_stream.time_base
 
@@ -361,19 +361,13 @@ class AudioReader:
                 f_end = f_start + Fraction(f.samples, f.sample_rate)
 
                 if first:
-                    if f.pts in self.track.pts_to_samples:
-                        sample_pos = self.track.pts_to_samples[f.pts]
-                    else:
-                        sample_pos = round(f_start * f.sample_rate)
+                    sample_pos = self.track.pts_to_samples[f.pts] if f.pts in self.track.pts_to_samples else round(f_start * f.sample_rate)
                     # Set the sample position from the first non-negative packet.
                     # E.g. if packets are -23 & 0 dts: the 0 sets the sample position to 0
                     first = f.pts < 0
                 elif abs(time_pos - f_start) > 0.04:
                     print(f'Skipping a gap in audio pts track: {self.track.index},  t:{float(time_pos):.1f}, t based on pts: {float(f_start):.1f}')
-                    if f.pts in self.track.pts_to_samples:
-                        sample_pos = self.track.pts_to_samples[f.pts]
-                    else:
-                        sample_pos = round(f_start * f.sample_rate)
+                    sample_pos = self.track.pts_to_samples[f.pts] if f.pts in self.track.pts_to_samples else round(f_start * f.sample_rate)
 
                 self.track.pts_to_samples[f.pts] = sample_pos
                 if sample_pos >= end_in_samples:

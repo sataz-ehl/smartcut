@@ -1,4 +1,5 @@
 import argparse
+import sys
 from fractions import Fraction
 
 import av
@@ -243,7 +244,6 @@ time formats:
     parser.add_argument('--version', action='version', version='Smartcut 1.3.3')
 
     # Preprocess argv to handle negative numbers in -k/-c arguments
-    import sys
     processed_argv = preprocess_argv_for_negative_numbers(sys.argv[1:])
     args = parser.parse_args(processed_argv)
 
@@ -256,15 +256,9 @@ time formats:
     source = MediaContainer(args.input)
 
     if args.keep:
-        if args.frames:
-            segments = parse_frame_segments(source, args.keep)
-        else:
-            segments = parse_time_segments_with_duration(args.keep, source.duration())
+        segments = parse_frame_segments(source, args.keep) if args.frames else parse_time_segments_with_duration(args.keep, source.duration())
     elif args.cut:
-        if args.frames:
-            cut_segments = parse_frame_segments(source, args.cut)
-        else:
-            cut_segments = parse_time_segments_with_duration(args.cut, source.duration())
+        cut_segments = parse_frame_segments(source, args.cut) if args.frames else parse_time_segments_with_duration(args.cut, source.duration())
         segments = [(Fraction(0), source.duration())]
         for c_start, c_end in cut_segments:
             last_segment = segments.pop()

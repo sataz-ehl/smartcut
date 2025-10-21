@@ -1,3 +1,4 @@
+import contextlib
 import heapq
 import os
 from dataclasses import dataclass
@@ -13,10 +14,8 @@ from smartcut.media_utils import VideoExportMode, VideoExportQuality, get_crf_fo
 from smartcut.misc_data import AudioExportInfo, AudioExportSettings, CutSegment
 from smartcut.nal_tools import convert_hevc_cra_to_bla
 
-try:
+with contextlib.suppress(ImportError):
     from smc.audio_handling import MixAudioCutter, RecodeTrackAudioCutter
-except ImportError:
-    pass
 
 class CancelObject:
     cancelled: bool = False
@@ -65,7 +64,7 @@ def make_cut_segments(media_container: MediaContainer,
             cut_segments.append(CutSegment(False, s, p[1]))
         return cut_segments
 
-    source_cutpoints = media_container.gop_start_times_pts_s + [media_container.eof_time]
+    source_cutpoints = [*media_container.gop_start_times_pts_s, media_container.eof_time]
     p = 0
     for gop_idx, (i, o, i_dts, o_dts) in enumerate(zip(source_cutpoints[:-1], source_cutpoints[1:], media_container.gop_start_times_dts, media_container.gop_end_times_dts)):
         while p < len(positive_segments) and positive_segments[p][1] <= i:
@@ -109,10 +108,7 @@ class PassthruAudioCutter:
         self.prev_pts = -100_000
 
     def segment(self, cut_segment: CutSegment) -> list[av.Packet]:
-        if cut_segment.start_time <= 0:
-            start = 0
-        else:
-            start = np.searchsorted(self.track.frame_times, cut_segment.start_time)
+        start = 0 if cut_segment.start_time <= 0 else np.searchsorted(self.track.frame_times, cut_segment.start_time)
         end = np.searchsorted(self.track.frame_times, cut_segment.end_time)
         in_packets = self.track.packets[start : end]
 
@@ -262,12 +258,10 @@ class VideoCutter:
                 # self.out_stream.base_rate = self.in_stream.base_rate
 
             self.remux_bitstream_filter = av.bitstream.BitStreamFilterContext('null', self.in_stream, self.out_stream)
-            if self.in_stream.codec_context.name == 'h264':
-                if not is_annexb(self.in_stream.codec_context.extradata):
-                    self.remux_bitstream_filter = av.bitstream.BitStreamFilterContext('h264_mp4toannexb', self.in_stream, self.out_stream)
-            elif self.in_stream.codec_context.name == 'hevc':
-                if not is_annexb(self.in_stream.codec_context.extradata):
-                    self.remux_bitstream_filter = av.bitstream.BitStreamFilterContext('hevc_mp4toannexb', self.in_stream, self.out_stream)
+            if self.in_stream.codec_context.name == 'h264' and not is_annexb(self.in_stream.codec_context.extradata):
+                self.remux_bitstream_filter = av.bitstream.BitStreamFilterContext('h264_mp4toannexb', self.in_stream, self.out_stream)
+            elif self.in_stream.codec_context.name == 'hevc' and not is_annexb(self.in_stream.codec_context.extradata):
+                self.remux_bitstream_filter = av.bitstream.BitStreamFilterContext('hevc_mp4toannexb', self.in_stream, self.out_stream)
 
 
         self._normalize_output_codec_tag(output_av_container)
@@ -289,12 +283,10 @@ class VideoCutter:
         if not any(name in container_name for name in ('mp4', 'mov', 'matroska', 'webm')):
             return
 
-        if codec_name == 'h264':
-            if self._is_mpegts_h264_tag(self.out_stream.codec_context.codec_tag):
-                self.out_stream.codec_context.codec_tag = 'avc1'
-        elif codec_name in ('hevc', 'h265'):
-            if self._is_mpegts_hevc_tag(self.out_stream.codec_context.codec_tag):
-                self.out_stream.codec_context.codec_tag = 'hvc1'
+        if codec_name == 'h264' and self._is_mpegts_h264_tag(self.out_stream.codec_context.codec_tag):
+            self.out_stream.codec_context.codec_tag = 'avc1'
+        elif codec_name in ('hevc', 'h265') and self._is_mpegts_hevc_tag(self.out_stream.codec_context.codec_tag):
+            self.out_stream.codec_context.codec_tag = 'hvc1'
 
     @staticmethod
     def _is_mpegts_h264_tag(codec_tag) -> bool:
@@ -568,11 +560,7 @@ class VideoCutter:
             return True
 
         # Case 2: Gap between current segment and previous segment (content was cut)
-        if self.last_remuxed_segment_gop_index is not None:
-            if s.gop_index > self.last_remuxed_segment_gop_index + 1:
-                return True
-
-        return False
+        return self.last_remuxed_segment_gop_index is not None and s.gop_index > self.last_remuxed_segment_gop_index + 1
 
     def _apply_cra_to_bla_conversion(self, packets: list[av.Packet]) -> list[av.Packet]:
         """
@@ -728,11 +716,7 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
 
     adjusted_segment_times = []
     for (s, e) in positive_segments:
-
-        if media_container.video_stream is not None and s == 0:
-            s = -1_000_000
-        else:
-            s = s + media_container.start_time
+        s = -1_000_000 if media_container.video_stream is not None and s == 0 else s + media_container.start_time
         adjusted_segment_times.append((s, e + media_container.start_time))
 
     cut_segments = make_cut_segments(media_container, adjusted_segment_times, video_settings.mode == VideoExportMode.KEYFRAMES)
@@ -752,10 +736,7 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             else:
                 # Insert the segment index right before the last '.'
                 dot_index = out_path.rfind(".")
-                if dot_index != -1:
-                    output_file = out_path[:dot_index] + segment_index + out_path[dot_index:]
-                else:
-                    output_file = f"{out_path}{segment_index}"
+                output_file = out_path[:dot_index] + segment_index + out_path[dot_index:] if dot_index != -1 else f"{out_path}{segment_index}"
 
             output_files.append((output_file, s))
 
