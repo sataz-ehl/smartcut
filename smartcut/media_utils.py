@@ -17,7 +17,7 @@ class VideoExportMode(Enum):
 class VideoExportQuality(Enum):
     """Video quality presets."""
     LOW = 1                    # "Low"
-    NORMAL = 2                 # "Normal" 
+    NORMAL = 2                 # "Normal"
     HIGH = 3                   # "High"
     INDISTINGUISHABLE = 4      # "Almost indistinguishable (Large file size)"
     NEAR_LOSSLESS = 5          # "Near lossless (Huge file size)"
@@ -54,10 +54,10 @@ class AudioChannels(Enum):
 
 def get_crf_for_quality(quality: VideoExportQuality) -> int:
     """Get CRF value for the selected quality preset.
-    
+
     Args:
         quality: Video quality enum value
-        
+
     Returns:
         CRF value (lower = higher quality)
     """
@@ -74,35 +74,35 @@ def get_crf_for_quality(quality: VideoExportQuality) -> int:
 
 def get_compatible_codec_for_format(user_codec: AudioCodec, file_extension: str) -> str:
     """Get compatible audio codec for the given file format.
-    
+
     Args:
         user_codec: User's preferred codec
         file_extension: Output file extension (e.g., 'mp3', 'flac')
-        
+
     Returns:
         Compatible codec string for PyAV
     """
     # Map extensions to required codecs for compatibility
     extension_codec_map = {
         'mp3': AudioCodec.MP3.value,
-        'flac': AudioCodec.FLAC.value, 
+        'flac': AudioCodec.FLAC.value,
         'ogg': AudioCodec.LIBOPUS.value,
         'wav': AudioCodec.PCM_S16LE.value,
         'm4a': AudioCodec.AAC.value,
         'ipod': AudioCodec.AAC.value,  # iPod format (alternative M4A name)
     }
-    
+
     # If extension requires specific codec, use it
     if file_extension.lower() in extension_codec_map:
         return extension_codec_map[file_extension.lower()]
-    
+
     # Otherwise use user's choice
     return user_codec.value
 
 
 def get_audio_only_formats() -> list[str]:
     """Get list of audio-only container formats.
-    
+
     Returns:
         List of file extensions that are audio-only
     """
@@ -111,10 +111,10 @@ def get_audio_only_formats() -> list[str]:
 
 def is_audio_only_format(file_extension: str) -> bool:
     """Check if the given file extension is audio-only.
-    
+
     Args:
         file_extension: File extension (with or without dot)
-        
+
     Returns:
         True if format is audio-only
     """

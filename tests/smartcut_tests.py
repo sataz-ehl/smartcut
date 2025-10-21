@@ -1,29 +1,26 @@
-from fractions import Fraction
+import argparse
 import glob
 import os
+import platform
+import random
 import sys
-from time import time
 import traceback
-from urllib.request import urlopen
+from fractions import Fraction
+from time import time
+
+import av
+import av.datasets as av_datasets
 import av.logging
 import ffmpeg
-import platform
-import argparse
-import random
-
 import numpy as np
-import av
-from requests import Request
 import requests
-import scipy.signal
-from smartcut import media_container
-import soundfile as sf
-import av.datasets as av_datasets
 import scipy
+import scipy.signal
+import soundfile as sf
 
-from smartcut.misc_data import MixInfo
-from smartcut.media_container import MediaContainer, AudioTrack, AudioReader
 from smartcut.cut_video import AudioExportInfo, AudioExportSettings, VideoExportMode, VideoExportQuality, VideoSettings, make_cut_segments, smart_cut
+from smartcut.media_container import AudioReader, AudioTrack, MediaContainer
+from smartcut.misc_data import MixInfo
 
 DEFAULT_SEED = 12345
 
@@ -305,30 +302,29 @@ def check_videos_equal(source_container: MediaContainer, result_container: Media
     assert diff_amount <= diff_tolerance, f'Mismatch of {diff_amount} in frame timings, at frame {diff_i}.'
 
     failed_frames = 0
-    with av.open(source_container.path, mode='r') as source_av:
-        with av.open(result_container.path, mode='r') as result_av:
-            for frame_i, (source_frame, result_frame) in enumerate(zip(source_av.decode(video=0), result_av.decode(video=0))):
-                source_numpy = source_frame.to_ndarray(format='rgb24')
-                result_numpy = result_frame.to_ndarray(format='rgb24')
-                assert source_numpy.shape == result_numpy.shape, f'Video resolution or channel count changed. Exp: {source_numpy.shape}, got: {result_numpy.shape}'
+    with av.open(source_container.path, mode='r') as source_av, av.open(result_container.path, mode='r') as result_av:
+        for frame_i, (source_frame, result_frame) in enumerate(zip(source_av.decode(video=0), result_av.decode(video=0))):
+            source_numpy = source_frame.to_ndarray(format='rgb24')
+            result_numpy = result_frame.to_ndarray(format='rgb24')
+            assert source_numpy.shape == result_numpy.shape, f'Video resolution or channel count changed. Exp: {source_numpy.shape}, got: {result_numpy.shape}'
 
-                frame_failed = False
-                for y in [0, source_numpy.shape[0] // 2, source_numpy.shape[0] - 1]:
-                    for x in [0, source_numpy.shape[1] // 2, source_numpy.shape[1] - 1]:
-                        source_color = source_numpy[y, x]
-                        result_color = result_numpy[y, x]
-                        diff = np.abs(source_color.astype(np.int16) - result_color)
-                        max_diff = np.max(diff)
-                        if max_diff > pixel_tolerance:
-                            if failed_frames >= allow_failed_frames:
-                                assert False, f'Large color deviation at frame {frame_i} (failed frame {failed_frames + 1}/{allow_failed_frames + 1}). Exp: {source_color}, got: {result_color}'
-                            frame_failed = True
-                            break
-                    if frame_failed:
+            frame_failed = False
+            for y in [0, source_numpy.shape[0] // 2, source_numpy.shape[0] - 1]:
+                for x in [0, source_numpy.shape[1] // 2, source_numpy.shape[1] - 1]:
+                    source_color = source_numpy[y, x]
+                    result_color = result_numpy[y, x]
+                    diff = np.abs(source_color.astype(np.int16) - result_color)
+                    max_diff = np.max(diff)
+                    if max_diff > pixel_tolerance:
+                        if failed_frames >= allow_failed_frames:
+                            assert False, f'Large color deviation at frame {frame_i} (failed frame {failed_frames + 1}/{allow_failed_frames + 1}). Exp: {source_color}, got: {result_color}'
+                        frame_failed = True
                         break
-
                 if frame_failed:
-                    failed_frames += 1
+                    break
+
+            if frame_failed:
+                failed_frames += 1
 
 def check_videos_equal_segment(source_container: MediaContainer, result_container: MediaContainer, start_time=0.0, duration=None, pixel_tolerance=20):
     """Fast pixel testing of small video segments instead of entire video"""
@@ -342,41 +338,40 @@ def check_videos_equal_segment(source_container: MediaContainer, result_containe
     assert source_container.video_stream.height == result_container.video_stream.height
 
     frames_checked = 0
-    with av.open(source_container.path, mode='r') as source_av:
-        with av.open(result_container.path, mode='r') as result_av:
-            # Seek to start time
-            source_av.seek(int(start_time * av.time_base))
-            result_av.seek(int(start_time * av.time_base))
+    with av.open(source_container.path, mode='r') as source_av, av.open(result_container.path, mode='r') as result_av:
+        # Seek to start time
+        source_av.seek(int(start_time * av.time_base))
+        result_av.seek(int(start_time * av.time_base))
 
-            source_decoder = source_av.decode(video=0)
-            result_decoder = result_av.decode(video=0)
+        source_decoder = source_av.decode(video=0)
+        result_decoder = result_av.decode(video=0)
 
-            print(source_container.path)
-            print(result_container.path)
+        print(source_container.path)
+        print(result_container.path)
 
-            for source_frame, result_frame in zip(source_decoder, result_decoder):
-                frame_time = source_frame.pts * source_frame.time_base
-                if frame_time < start_time:
-                    continue
-                if frame_time > end_time:
-                    break
+        for source_frame, result_frame in zip(source_decoder, result_decoder):
+            frame_time = source_frame.pts * source_frame.time_base
+            if frame_time < start_time:
+                continue
+            if frame_time > end_time:
+                break
 
-                source_numpy = source_frame.to_ndarray(format='rgb24')
-                result_numpy = result_frame.to_ndarray(format='rgb24')
-                assert source_numpy.shape == result_numpy.shape, f'Video resolution changed at {frame_time:.2f}s. Exp: {source_numpy.shape}, got: {result_numpy.shape}'
+            source_numpy = source_frame.to_ndarray(format='rgb24')
+            result_numpy = result_frame.to_ndarray(format='rgb24')
+            assert source_numpy.shape == result_numpy.shape, f'Video resolution changed at {frame_time:.2f}s. Exp: {source_numpy.shape}, got: {result_numpy.shape}'
 
-                # Check a few pixels per frame for speed
-                for y in [0, source_numpy.shape[0] // 2, source_numpy.shape[0] - 1]:
-                    for x in [0, source_numpy.shape[1] // 2, source_numpy.shape[1] - 1]:
-                        source_color = source_numpy[y, x]
-                        result_color = result_numpy[y, x]
-                        diff = np.abs(source_color.astype(np.int16) - result_color)
-                        max_diff = np.max(diff)
-                        assert max_diff <= pixel_tolerance, f'Large color deviation at {frame_time:.2f}s. Exp: {source_color}, got: {result_color}'
+            # Check a few pixels per frame for speed
+            for y in [0, source_numpy.shape[0] // 2, source_numpy.shape[0] - 1]:
+                for x in [0, source_numpy.shape[1] // 2, source_numpy.shape[1] - 1]:
+                    source_color = source_numpy[y, x]
+                    result_color = result_numpy[y, x]
+                    diff = np.abs(source_color.astype(np.int16) - result_color)
+                    max_diff = np.max(diff)
+                    assert max_diff <= pixel_tolerance, f'Large color deviation at {frame_time:.2f}s. Exp: {source_color}, got: {result_color}'
 
-                frames_checked += 1
-                if frames_checked >= 100:  # Limit frames for speed
-                    break
+            frames_checked += 1
+            if frames_checked >= 100:  # Limit frames for speed
+                break
 
 def test_cut_on_keyframes(input_path, output_path):
     source = MediaContainer(input_path)
@@ -1517,7 +1512,7 @@ def get_tears_of_steel_annexb():
             '-c', 'copy',  # Stream copy to preserve exact H.264 stream
             '-f', 'mpegts',  # Force MPEG-TS output (uses Annex B)
             '-y', ts_filename
-        ], capture_output=True, text=True)
+        ], check=False, capture_output=True, text=True)
 
         if result.returncode != 0:
             raise RuntimeError(f"Failed to convert to TS format: {result.stderr}")
@@ -1540,7 +1535,7 @@ def get_testvideos_jellyfish_h265_ts():
             '-c', 'copy',
             '-f', 'mpegts',
             '-y', ts_filename
-        ], capture_output=True, text=True)
+        ], check=False, capture_output=True, text=True)
 
         if result.returncode != 0:
             raise RuntimeError(f"Failed to convert HEVC sample to TS format: {result.stderr}")
@@ -1999,33 +1994,32 @@ def test_partial_smart_cut(input_path: str, output_base_name: str, segment_durat
 
 def check_stream_dispositions(source_path, output_path):
     """Helper function to verify that stream dispositions are preserved"""
-    with av.open(source_path) as source_container:
-        with av.open(output_path) as output_container:
-            # Check video stream disposition if it exists
-            if source_container.streams.video:
-                src_video = source_container.streams.video[0]
-                out_video = output_container.streams.video[0]
-                assert src_video.disposition.value == out_video.disposition.value, \
+    with av.open(source_path) as source_container, av.open(output_path) as output_container:
+        # Check video stream disposition if it exists
+        if source_container.streams.video:
+            src_video = source_container.streams.video[0]
+            out_video = output_container.streams.video[0]
+            assert src_video.disposition.value == out_video.disposition.value, \
                     f"Video disposition mismatch: {src_video.disposition} vs {out_video.disposition}"
 
-            # Check audio stream dispositions
-            assert len(source_container.streams.audio) == len(output_container.streams.audio), \
+        # Check audio stream dispositions
+        assert len(source_container.streams.audio) == len(output_container.streams.audio), \
                 "Audio stream count mismatch"
-            for i, (src_audio, out_audio) in enumerate(zip(source_container.streams.audio, output_container.streams.audio)):
-                assert src_audio.disposition.value == out_audio.disposition.value, \
+        for i, (src_audio, out_audio) in enumerate(zip(source_container.streams.audio, output_container.streams.audio)):
+            assert src_audio.disposition.value == out_audio.disposition.value, \
                     f"Audio stream {i} disposition mismatch: {src_audio.disposition} vs {out_audio.disposition}"
 
-            # Check subtitle stream dispositions - this is the main focus
-            assert len(source_container.streams.subtitles) == len(output_container.streams.subtitles), \
+        # Check subtitle stream dispositions - this is the main focus
+        assert len(source_container.streams.subtitles) == len(output_container.streams.subtitles), \
                 "Subtitle stream count mismatch"
-            for i, (src_sub, out_sub) in enumerate(zip(source_container.streams.subtitles, output_container.streams.subtitles)):
-                assert src_sub.disposition.value == out_sub.disposition.value, \
+        for i, (src_sub, out_sub) in enumerate(zip(source_container.streams.subtitles, output_container.streams.subtitles)):
+            assert src_sub.disposition.value == out_sub.disposition.value, \
                     f"Subtitle stream {i} disposition mismatch: {src_sub.disposition} vs {out_sub.disposition}"
 
-                # Specifically check for forced flag preservation
-                src_forced = av.stream.Disposition.forced in src_sub.disposition
-                out_forced = av.stream.Disposition.forced in out_sub.disposition
-                assert src_forced == out_forced, \
+            # Specifically check for forced flag preservation
+            src_forced = av.stream.Disposition.forced in src_sub.disposition
+            out_forced = av.stream.Disposition.forced in out_sub.disposition
+            assert src_forced == out_forced, \
                     f"Subtitle stream {i} forced flag mismatch: source={src_forced}, output={out_forced}"
 
 def test_subtitle_disposition_preservation():
@@ -2277,7 +2271,7 @@ def get_test_categories():
     }
 
     # Populate meta-categories dynamically
-    real_world_categories = [key for key in test_categories.keys() if key.startswith('real_world_')]
+    real_world_categories = [key for key in test_categories if key.startswith('real_world_')]
     for category in real_world_categories:
         test_categories['real_world'].extend(test_categories[category])
 

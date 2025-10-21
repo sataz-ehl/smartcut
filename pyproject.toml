@@ -64,3 +64,43 @@ packages = ["smartcut"]
 
 [tool.setuptools.package-data]
 smartcut = ["py.typed"]
+
+[tool.ruff]
+line-length = 300
+
+[tool.ruff.lint]
+# Select specific rules to check
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "SIM",    # flake8-simplify
+    "I",      # isort
+    "PLC",    # pylint conventions
+    "PLE",    # pylint errors
+    "PLR",    # pylint refactor
+    "PLW",    # pylint warnings
+    "RUF",    # ruff-specific rules
+]
+
+# Ignore specific rules that are not relevant for this project
+ignore = [
+    "PLR2004",  # Magic value used in comparison
+    "PLR0912",  # Too many branches
+    "PLR0915",  # Too many statements
+    "PLR0913",  # Too many arguments
+    "PLR0911",  # Too many return statements
+    "PLW2901",  # redefined-loop-name
+    "ARG002",   # unused-method-argument
+    "E741",     # ambiguous-variable-name
+    "F841",     # unused-variable
+    "B905",     # zip without strict= parameter
+]
+
+[tool.ruff.format]
+# Use double quotes for strings
+quote-style = "double"
+# Use spaces for indentation
+indent-style = "space"

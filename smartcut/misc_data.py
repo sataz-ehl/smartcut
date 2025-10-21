@@ -1,7 +1,8 @@
 from dataclasses import dataclass, field
 
+
 @dataclass
-class MixInfo():
+class MixInfo:
     track_levels: list[float]
 
 @dataclass

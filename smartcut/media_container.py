@@ -1,18 +1,25 @@
 from dataclasses import dataclass, field
 from fractions import Fraction
 from itertools import chain
+
 import av
 import av.stream
 import av.video
 import numpy as np
 
-from smartcut.nal_tools import get_h264_nal_unit_type, get_h265_nal_unit_type, is_safe_h264_keyframe_nal, is_safe_h265_keyframe_nal
+from smartcut.nal_tools import (
+    get_h264_nal_unit_type,
+    get_h265_nal_unit_type,
+    is_safe_h264_keyframe_nal,
+    is_safe_h265_keyframe_nal,
+)
+
 
 def ts_to_time(ts):
     return Fraction(round(ts*1000), 1000)
 
 @dataclass
-class AudioTrack():
+class AudioTrack:
     media_container: object
     av_stream: av.stream.Stream
     audio_load_stream: av.stream.Stream
@@ -148,12 +155,11 @@ class MediaContainer:
                     is_safe_keyframe = True
                     if first_keyframe:
                         first_keyframe = False  # Only apply to the very first keyframe
-                    else:
-                        # Use centralized helper functions for NAL type safety checks
-                        if is_h265:
-                            is_safe_keyframe = is_safe_h265_keyframe_nal(nal_type)
-                        elif is_h264:
-                            is_safe_keyframe = is_safe_h264_keyframe_nal(nal_type)
+                    # Use centralized helper functions for NAL type safety checks
+                    elif is_h265:
+                        is_safe_keyframe = is_safe_h265_keyframe_nal(nal_type)
+                    elif is_h264:
+                        is_safe_keyframe = is_safe_h264_keyframe_nal(nal_type)
                     if is_safe_keyframe:
                         self.video_keyframe_indices.append(len(frame_pts))
                         dts = packet.dts if packet.dts is not None else -100_000_000

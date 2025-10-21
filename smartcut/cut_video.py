@@ -1,21 +1,17 @@
-from enum import Enum
-from fractions import Fraction
 import heapq
-
-from math import e
 import os
-from typing import List
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from fractions import Fraction
+
 import av
 import av.bitstream
 import av.container
 import numpy as np
 
 from smartcut.media_container import MediaContainer
-from smartcut.nal_tools import convert_hevc_cra_to_bla
 from smartcut.media_utils import VideoExportMode, VideoExportQuality, get_crf_for_quality
-
-from smartcut.misc_data import AudioExportInfo, AudioExportSettings, CutSegment, MixInfo
+from smartcut.misc_data import AudioExportInfo, AudioExportSettings, CutSegment
+from smartcut.nal_tools import convert_hevc_cra_to_bla
 
 try:
     from smc.audio_handling import MixAudioCutter, RecodeTrackAudioCutter
@@ -56,9 +52,9 @@ def copy_packet(p: av.packet.Packet) -> av.packet.Packet:
     return packet
 
 def make_cut_segments(media_container: MediaContainer,
-        positive_segments: List[tuple[Fraction, Fraction]],
+        positive_segments: list[tuple[Fraction, Fraction]],
         keyframe_mode: bool = False
-        ) -> List[CutSegment]:
+        ) -> list[CutSegment]:
     cut_segments = []
     if media_container.video_stream is None:
         for p in positive_segments:
@@ -328,7 +324,7 @@ class VideoCutter:
         if 'av1' in self.codec_name:
             self.codec_name = 'av1'
             profile = None
-        if 'vp9' == self.codec_name:
+        if self.codec_name == 'vp9':
             if profile is not None:
                 profile = profile[-1:]
                 if int(profile) > 1:
@@ -338,9 +334,7 @@ class VideoCutter:
                 profile = 'baseline'
             elif 'High 4:4:4' in profile:
                 profile = 'high444'
-            elif 'Rext' in profile: # This is some sort of h265 extension. This might be the source of some issues I've had?
-                profile = None
-            elif 'Simple' in profile: # mpeg4 didn't like my profile strings
+            elif 'Rext' in profile or 'Simple' in profile: # This is some sort of h265 extension. This might be the source of some issues I've had?
                 profile = None
             else:
                 profile = profile.lower().replace(':', '').replace(' ', '')
@@ -378,9 +372,9 @@ class VideoCutter:
                 for i, o in enumerate(x265_params):
                     if ':' in o:
                         x265_params[i] = o.replace(':', ',')
-                    if not '=' in o:
+                    if '=' not in o:
                         x265_params[i] = o + '=1'
-            except:
+            except Exception:
                 pass
 
             # Repeat headers. This should be the same as `global_headers = False`,
@@ -707,7 +701,7 @@ class VideoCutter:
             for frame in self.decoder.decode(None):
                 heap_item = FrameHeapItem(frame.pts, frame)
                 heapq.heappush(self.frame_buffer, heap_item)
-        except:
+        except Exception:
             pass
 
         # Yield remaining frames within time range
@@ -726,7 +720,7 @@ class VideoCutter:
                 # Frame is outside time range, stop processing (leave it in buffer)
                 break
 
-def smart_cut(media_container: MediaContainer, positive_segments: List[tuple[Fraction, Fraction]],
+def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fraction, Fraction]],
               out_path: str, audio_export_info: AudioExportInfo = None, log_level = None, progress = None,
               video_settings=None, segment_mode=False, cancel_object: CancelObject | None = None):
     if video_settings is None:

@@ -1,9 +1,19 @@
 import argparse
-import av
 from fractions import Fraction
-from smartcut.media_container import MediaContainer
-from smartcut.cut_video import smart_cut, VideoSettings, VideoExportMode, VideoExportQuality, AudioExportSettings, AudioExportInfo
+
+import av
 from tqdm import tqdm
+
+from smartcut.cut_video import (
+    AudioExportInfo,
+    AudioExportSettings,
+    VideoExportMode,
+    VideoExportQuality,
+    VideoSettings,
+    smart_cut,
+)
+from smartcut.media_container import MediaContainer
+
 
 def time_to_fraction(time_str_elem):
     if ':' in time_str_elem:
@@ -240,7 +250,7 @@ time formats:
     # Restore negative signs that were marked during preprocessing
     restore_negative_numbers(args)
 
-    if args.keep and args.cut or not (args.keep or args.cut):
+    if (args.keep and args.cut) or not (args.keep or args.cut):
         raise ValueError("You must specify either --keep or --cut, not both.")
 
     source = MediaContainer(args.input)

@@ -4,12 +4,13 @@ Analyze keyframe structure of video files.
 Standalone tool for debugging GOP detection and keyframe analysis.
 """
 
-import sys
 import os
+import sys
 from pathlib import Path
-from smartcut.nal_tools import get_h265_nal_unit_type, get_h264_nal_unit_type, is_safe_h264_keyframe_nal, is_safe_h265_keyframe_nal
+
 import av
 
+from smartcut.nal_tools import get_h264_nal_unit_type, get_h265_nal_unit_type, is_safe_h264_keyframe_nal, is_safe_h265_keyframe_nal
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -36,7 +37,7 @@ def analyze_keyframes_structure(input_path):
         ctx = video_stream.codec_context
         duration = float(av_container.duration / av.time_base)
 
-        print(f"Video info:")
+        print("Video info:")
         print(f"  Codec: {ctx.name}")
         print(f"  Resolution: {ctx.width}x{ctx.height}")
         print(f"  Duration: {duration:.2f} seconds")
@@ -110,12 +111,11 @@ def analyze_keyframes_structure(input_path):
                     is_valid_gop = True
                     if first_keyframe:
                         first_keyframe = False  # First picture keyframe is always accepted
-                    else:
-                        # Use the same safety checks as media_container for consistency
-                        if ctx.name == 'hevc':
-                            is_valid_gop = is_safe_h265_keyframe_nal(nal_type)
-                        elif ctx.name == 'h264':
-                            is_valid_gop = is_safe_h264_keyframe_nal(nal_type)
+                    # Use the same safety checks as media_container for consistency
+                    elif ctx.name == 'hevc':
+                        is_valid_gop = is_safe_h265_keyframe_nal(nal_type)
+                    elif ctx.name == 'h264':
+                        is_valid_gop = is_safe_h264_keyframe_nal(nal_type)
 
                     if is_valid_gop:
                         valid_gop_keyframes.append((frame_time, nal_type_str))
@@ -125,7 +125,7 @@ def analyze_keyframes_structure(input_path):
         print(f"  Valid GOP keyframes: {len(valid_gop_keyframes)}")
 
         # Show first 20 keyframes (all types)
-        print(f"\nFirst 20 keyframes (all types):")
+        print("\nFirst 20 keyframes (all types):")
         keyframes_to_show = all_keyframes[:20]
         if keyframes_to_show:
             for i, (time, nal_str) in enumerate(keyframes_to_show):
@@ -137,7 +137,7 @@ def analyze_keyframes_structure(input_path):
 
         # For H.265 files, show the NAL types of the 3 next packets after each keyframe
         if ctx.name == 'hevc' and all_packets:
-            print(f"\nH.265 Keyframes with next 3 NAL types:")
+            print("\nH.265 Keyframes with next 3 NAL types:")
             print("-" * 60)
             keyframe_count = 0
             for i, packet in enumerate(all_packets):
@@ -162,7 +162,7 @@ def analyze_keyframes_structure(input_path):
                 print(f"  ... and {remaining} more keyframes")
 
         # Show first 20 valid GOP keyframes
-        print(f"\nFirst 20 valid GOP keyframes:")
+        print("\nFirst 20 valid GOP keyframes:")
         gop_keyframes_to_show = valid_gop_keyframes[:20]
         if gop_keyframes_to_show:
             for i, (time, nal_str) in enumerate(gop_keyframes_to_show):
@@ -188,7 +188,7 @@ def analyze_keyframes_structure(input_path):
             max_gop_duration = max(gop_durations)
             min_gop_duration = min(gop_durations)
 
-            print(f"\nGOP Statistics:")
+            print("\nGOP Statistics:")
             print(f"  Average GOP duration: {avg_gop_duration:.2f} seconds")
             print(f"  Min GOP duration: {min_gop_duration:.2f} seconds")
             print(f"  Max GOP duration: {max_gop_duration:.2f} seconds")
