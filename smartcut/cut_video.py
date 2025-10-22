@@ -7,6 +7,13 @@ from fractions import Fraction
 import av
 import av.bitstream
 import av.container
+from av import VideoCodecContext
+from av.packet import Packet
+from av.container import Container
+from av.container.input import InputContainer
+from av.container.output import OutputContainer
+from av.video.frame import PictureType, VideoFrame
+from av.codec.context import CodecContext
 import numpy as np
 
 from smartcut.media_container import MediaContainer
@@ -24,21 +31,21 @@ class CancelObject:
 class FrameHeapItem:
     """Wrapper for frames in the heap, sorted by PTS"""
     pts: int
-    frame: 'av.VideoFrame'
+    frame: VideoFrame
 
-    def __lt__(self, other):
+    def __lt__(self, other: 'FrameHeapItem') -> bool:
         # Handle None PTS values by treating them as -1 (earliest)
         self_pts = self.pts if self.pts is not None else -1
         other_pts = other.pts if other.pts is not None else -1
         return self_pts < other_pts
 
-def is_annexb(packet):
+def is_annexb(packet: Packet) -> bool:
         data = bytes(packet)
         return data[:3] == b'\0\0\x01' or data[:4] == b'\0\0\0\x01'
 
-def copy_packet(p: av.packet.Packet) -> av.packet.Packet:
+def copy_packet(p) -> Packet:
     # return p
-    packet = av.packet.Packet(p)
+    packet = Packet(p)
     packet.pts = p.pts
     packet.dts = p.dts
     packet.duration = p.duration
@@ -95,7 +102,7 @@ def map_codec_name_for_pyav15(codec_name: str) -> str:
     return codec_mapping.get(codec_name, codec_name)
 
 class PassthruAudioCutter:
-    def __init__(self, media_container: MediaContainer, output_av_container: av.container.Container,
+    def __init__(self, media_container: MediaContainer, output_av_container: OutputContainer,
                 track_index: int, export_settings: AudioExportSettings):
         self.track = media_container.audio_tracks[track_index]
 
@@ -107,7 +114,7 @@ class PassthruAudioCutter:
         self.prev_dts = -100_000
         self.prev_pts = -100_000
 
-    def segment(self, cut_segment: CutSegment) -> list[av.Packet]:
+    def segment(self, cut_segment: CutSegment) -> list[Packet]:
         start = 0 if cut_segment.start_time <= 0 else np.searchsorted(self.track.frame_times, cut_segment.start_time)
         end = np.searchsorted(self.track.frame_times, cut_segment.end_time)
         in_packets = self.track.packets[start : end]
@@ -137,7 +144,7 @@ class PassthruAudioCutter:
         return []
 
 class SubtitleCutter:
-    def __init__(self, media_container: MediaContainer, output_av_container: av.container.Container, subtitle_track_index: int):
+    def __init__(self, media_container: MediaContainer, output_av_container: OutputContainer, subtitle_track_index: int):
         self.track_i = subtitle_track_index
         self.packets = media_container.subtitle_tracks[subtitle_track_index]
 
@@ -150,7 +157,7 @@ class SubtitleCutter:
 
         self.current_packet_i = 0
 
-    def segment(self, cut_segment: CutSegment) -> list[av.Packet]:
+    def segment(self, cut_segment: CutSegment) -> list[Packet]:
         segment_start_pts = int(cut_segment.start_time / self.in_stream.time_base)
         segment_end_pts = int(cut_segment.end_time / self.in_stream.time_base)
 
@@ -195,7 +202,7 @@ class VideoSettings:
     codec_override: str = 'copy'
 
 class VideoCutter:
-    def __init__(self, media_container, output_av_container, video_settings: VideoSettings, log_level):
+    def __init__(self, media_container: MediaContainer, output_av_container: OutputContainer, video_settings: VideoSettings, log_level: str):
         self.media_container = media_container
         self.log_level = log_level
         self.encoder_inited = False
@@ -205,7 +212,7 @@ class VideoCutter:
 
         self.in_stream = media_container.video_stream
         # Open another container because seeking to beginning of the file is unreliable...
-        self.input_av_container: av.container.Container = av.open(media_container.path, 'r', metadata_errors='ignore')
+        self.input_av_container: InputContainer = av.open(media_container.path, 'r', metadata_errors='ignore')
 
         self.demux_iter = self.input_av_container.demux(self.in_stream)
         self.demux_saved_packet = None
@@ -274,7 +281,7 @@ class VideoCutter:
         self.last_remuxed_segment_gop_index = None
         self.is_first_remuxed_segment = True
 
-    def _normalize_output_codec_tag(self, output_av_container: av.container.Container) -> None:
+    def _normalize_output_codec_tag(self, output_av_container: OutputContainer) -> None:
         """Ensure codec tags are compatible with MP4/MOV style containers."""
 
         codec_name = self.in_stream.codec_context.name
@@ -308,7 +315,7 @@ class VideoCutter:
             return codec_tag in ('HEVC', '\x24\x00\x00\x00')
         return False
 
-    def init_encoder(self):
+    def init_encoder(self) -> None:
         self.encoder_inited = True
         # v_codec = self.in_stream.codec_context
         profile = self.out_stream.codec_context.profile
@@ -382,7 +389,7 @@ class VideoCutter:
             self.encoding_options['x265-params'] = ':'.join(x265_params)
 
 
-    def segment(self, cut_segment: CutSegment) -> list[av.Packet]:
+    def segment(self, cut_segment: CutSegment) -> list[Packet]:
         self.out_time_base = self.out_stream.time_base
 
         if cut_segment.require_recode:
@@ -425,14 +432,14 @@ class VideoCutter:
 
         return packets
 
-    def recode_segment(self, s: CutSegment) -> list[av.Packet]:
+    def recode_segment(self, s: CutSegment) -> list[Packet]:
         if not self.encoder_inited:
             self.init_encoder()
         result_packets = []
 
         if self.enc_codec is None:
             muxing_codec = self.out_stream.codec_context
-            enc_codec = av.CodecContext.create(self.codec_name, 'w')
+            enc_codec: VideoCodecContext = CodecContext.create(self.codec_name, 'w')
 
             if muxing_codec.rate is not None:
                 enc_codec.rate = muxing_codec.rate
@@ -477,7 +484,7 @@ class VideoCutter:
                 frame.pts = self.enc_last_pts + 1
             self.enc_last_pts = frame.pts
 
-            frame.pict_type = av.video.frame.PictureType.NONE
+            frame.pict_type = PictureType.NONE
             result_packets.extend(self.enc_codec.encode(frame))
 
         if self.codec_name == 'mpeg2video':
@@ -487,7 +494,7 @@ class VideoCutter:
                 p.time_base = self.out_time_base
         return result_packets
 
-    def remux_segment(self, s: CutSegment) -> list[av.Packet]:
+    def remux_segment(self, s: CutSegment) -> list[Packet]:
         result_packets = []
         segment_start_pts = int(s.start_time / self.in_stream.time_base)
 
@@ -502,7 +509,7 @@ class VideoCutter:
                 converted_data = convert_hevc_cra_to_bla(bytes(packet))
                 if converted_data != bytes(packet):
                     # Create new packet with converted data using same pattern as copy_packet
-                    new_packet = av.Packet(converted_data)
+                    new_packet = Packet(converted_data)
                     new_packet.pts = packet.pts
                     new_packet.dts = packet.dts
                     new_packet.duration = packet.duration
@@ -562,7 +569,7 @@ class VideoCutter:
         # Case 2: Gap between current segment and previous segment (content was cut)
         return self.last_remuxed_segment_gop_index is not None and s.gop_index > self.last_remuxed_segment_gop_index + 1
 
-    def _apply_cra_to_bla_conversion(self, packets: list[av.Packet]) -> list[av.Packet]:
+    def _apply_cra_to_bla_conversion(self, packets: list[Packet]) -> list[Packet]:
         """
         Apply CRA to BLA conversion to the packet list.
         This modifies the packet data to convert CRA frames to BLA frames.
@@ -575,7 +582,7 @@ class VideoCutter:
                 converted_data = convert_hevc_cra_to_bla(bytes(packet))
                 if converted_data != bytes(packet):
                     # Create a new packet with converted data
-                    new_packet = av.Packet(converted_data)
+                    new_packet = Packet(converted_data)
                     # Copy all attributes from original packet
                     new_packet.stream = packet.stream
                     new_packet.pts = packet.pts
@@ -604,7 +611,7 @@ class VideoCutter:
         self.enc_codec = None
         return result_packets
 
-    def fetch_packet(self, target_dts, end_dts):
+    def fetch_packet(self, target_dts: int, end_dts: int):
         tb = self.in_stream.time_base
 
         # First, check if we have a saved packet from previous call
@@ -645,7 +652,7 @@ class VideoCutter:
             # Packet is in our target range, yield it
             yield packet
 
-    def fetch_frame(self, gop_start_dts, gop_end_dts, end_time):
+    def fetch_frame(self, gop_start_dts: int, gop_end_dts: int, end_time: Fraction):
         # Initialize or reset for new GOP
         if self.frame_buffer_gop_dts != gop_start_dts:
             self.frame_buffer = []
@@ -709,8 +716,8 @@ class VideoCutter:
                 break
 
 def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fraction, Fraction]],
-              out_path: str, audio_export_info: AudioExportInfo = None, log_level = None, progress = None,
-              video_settings=None, segment_mode=False, cancel_object: CancelObject | None = None):
+              out_path: str, audio_export_info: AudioExportInfo | None = None, log_level: str | None = None, progress = None,
+              video_settings: VideoSettings | None = None, segment_mode: bool = False, cancel_object: CancelObject | None = None) -> Exception | None:
     if video_settings is None:
         video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.NORMAL)
 

@@ -5,6 +5,12 @@ from itertools import chain
 import av
 import av.stream
 import av.video
+from av.packet import Packet
+from av.container import Container
+from av.container.input import InputContainer
+from av.stream import Stream
+from av.video.stream import VideoStream
+from av.audio.resampler import AudioResampler
 import numpy as np
 
 from smartcut.nal_tools import (
@@ -15,20 +21,20 @@ from smartcut.nal_tools import (
 )
 
 
-def ts_to_time(ts):
+def ts_to_time(ts: float) -> Fraction:
     return Fraction(round(ts*1000), 1000)
 
 @dataclass
 class AudioTrack:
     media_container: object
-    av_stream: av.stream.Stream
-    audio_load_stream: av.stream.Stream
+    av_stream: Stream
+    audio_load_stream: Stream
     path: str
     index: int
 
     index_in_source: int = 0
 
-    packets: list[av.Packet] = field(default_factory = lambda: [])
+    packets: list[Packet] = field(default_factory = lambda: [])
     frame_times: np.array = field(default_factory = lambda: [])
     pts_to_samples: dict = field(default_factory = lambda: {})
 
@@ -53,13 +59,13 @@ class AudioTrack:
         return self.media_container.start_time
 
 class MediaContainer:
-    av_containers: list[av.container.Container]
-    video_stream: av.video.stream.VideoStream | None
+    av_containers: list[InputContainer]
+    video_stream: VideoStream | None
     path: str
 
     eof_time: Fraction
 
-    video_stream: av.stream.Stream | None
+    video_stream: Stream | None
 
     video_frame_times: np.ndarray
     video_keyframe_indices: list[int]
@@ -77,7 +83,7 @@ class MediaContainer:
     chat_cumsum: np.ndarray | None
     chat_visualize: bool
 
-    def __init__(self, path, progress_callback=None) -> None:
+    def __init__(self, path: str, progress_callback=None) -> None:
         self.path = path
 
         frame_pts = []
@@ -376,7 +382,7 @@ class AudioReader:
                 if sample_pos + f.samples > start_in_samples:
                     if f.format.name != 'fltp':
                         if self.resampler is None:
-                            self.resampler = av.AudioResampler('fltp', f.layout, f.rate)
+                            self.resampler = AudioResampler('fltp', f.layout, f.rate)
                         frames = self.resampler.resample(f)
                         # frames.extend(self.resampler.resample(None))
                         data = [rsf.to_ndarray() for rsf in frames]
