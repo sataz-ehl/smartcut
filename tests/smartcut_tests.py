@@ -1071,16 +1071,33 @@ def make_video_with_attachment(path, file_duration=3,
     return path
 
 def get_attachment_stream_metadata(path):
-    """Extract attachment metadata using ffprobe for validation."""
-    probe = ffmpeg.probe(path)
+    """Extract attachment metadata and raw bytes using PyAV.
+
+    Returns a list of dicts with keys:
+      - 'filename': attachment filename (if present)
+      - 'mimetype': attachment mimetype (if present)
+      - 'extradata_size': size of raw data
+      - 'data': raw attachment bytes
+    """
     attachments = []
-    for stream in probe.get('streams', []):
-        if stream.get('codec_type') == 'attachment':
-            tags = stream.get('tags', {})
+    with av.open(path) as container:
+        # Use the dedicated attachments accessor; matches PyAV's own tests
+        for att in container.streams.attachments:
+            # For MKV, PyAV exposes name/mimetype/data directly
+            name = getattr(att, 'name', None)
+            mimetype = getattr(att, 'mimetype', None)
+            data_bytes = getattr(att, 'data', None)
+
+            # Also pick filename/mimetype from metadata if present
+            md = dict(getattr(att, 'metadata', {}) or {})
+            filename = name or md.get('filename')
+            mimetype = mimetype or md.get('mimetype')
+
             attachments.append({
-                'filename': tags.get('filename'),
-                'mimetype': tags.get('mimetype'),
-                'extradata_size': stream.get('extradata_size'),
+                'filename': filename,
+                'mimetype': mimetype,
+                'extradata_size': (len(data_bytes) if data_bytes is not None else None),
+                'data': data_bytes,
             })
 
     attachments.sort(key=lambda info: info.get('filename') or '')

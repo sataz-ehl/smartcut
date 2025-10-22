@@ -758,6 +758,19 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             include_video = True
             if output_av_container.format.name in ['ogg', 'mp3', 'm4a', 'ipod', 'flac', 'wav']: #ipod is the real name for m4a, I guess
                 include_video = False
+
+                        # Preserve container attachments (e.g., MKV attachments) when supported by the output format
+            container_name = (output_av_container.format.name or "").lower()
+            supports_attachments = any(x in container_name for x in ("matroska", "webm"))
+
+            if supports_attachments:
+                # Copy attachment streams from the primary input container
+                for in_stream in media_container.av_containers[0].streams:
+                    if getattr(in_stream, "type", None) != "attachment":
+                        continue
+
+                    output_av_container.add_stream_from_template(in_stream)
+
             generators = []
             if media_container.video_stream is not None and include_video:
                 generators.append(VideoCutter(media_container, output_av_container, video_settings, log_level))
