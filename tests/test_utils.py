@@ -175,11 +175,15 @@ def compare_tracks(track_orig: AudioTrack, track_modified: AudioTrack, rms_thres
     if expected_samples == 0:
         raise AssertionError("Audio track has no samples to compare")
 
-    if y_modified.shape[1] > expected_samples:
-        y_modified = y_modified[:, :expected_samples]
-    elif y_modified.shape[1] < expected_samples:
-        pad_width = expected_samples - y_modified.shape[1]
-        y_modified = np.pad(y_modified, ((0, 0), (0, pad_width)))
+    assert y_orig.shape == y_modified.shape, f"Audio shape was modified. {y_orig.shape} -> {y_modified.shape}"
+
+    ALLOW_PADDING = False
+    if ALLOW_PADDING:
+        if y_modified.shape[1] > expected_samples:
+            y_modified = y_modified[:, :expected_samples]
+        elif y_modified.shape[1] < expected_samples:
+            pad_width = expected_samples - y_modified.shape[1]
+            y_modified = np.pad(y_modified, ((0, 0), (0, pad_width)))
 
     corr_ref = scipy.signal.correlate(y_orig, y_orig)
     corr_inp = scipy.signal.correlate(y_orig, y_modified)
@@ -249,7 +253,7 @@ def check_videos_equal(source_container: MediaContainer, result_container: Media
 def check_videos_equal_segment(source_container: MediaContainer, result_container: MediaContainer, start_time=0.0, duration=None, pixel_tolerance=20):
     """Fast pixel testing of small video segments instead of entire video"""
     if duration is None:
-        duration = min(10, float(source_container.duration()))  # Test max 10 seconds
+        duration = min(10, float(source_container.duration))  # Test max 10 seconds
 
     end_time = start_time + duration
 
@@ -292,7 +296,7 @@ def check_videos_equal_segment(source_container: MediaContainer, result_containe
 
 def run_cut_on_keyframes_test(input_path, output_path):
     source = MediaContainer(input_path)
-    cutpoints = source.gop_start_times_pts_s + [source.duration()]
+    cutpoints = source.gop_start_times_pts_s + [source.duration]
 
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
 
@@ -310,7 +314,7 @@ def run_smartcut_test(input_path: str, output_path, n_cuts, audio_export_info = 
         return run_audiofile_smartcut(input_path, output_path, n_cuts)
     source = MediaContainer(input_path)
     cutpoints = source.video_frame_times
-    cutpoints = [0] + list(np.sort(np.random.choice(cutpoints, n_cuts, replace=False))) + [source.duration()]
+    cutpoints = [0] + list(np.sort(np.random.choice(cutpoints, n_cuts, replace=False))) + [source.duration]
 
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
 
@@ -326,7 +330,7 @@ def run_smartcut_test(input_path: str, output_path, n_cuts, audio_export_info = 
 
 def run_audiofile_smartcut(input_path, output_path, n_cuts):
     source_container = MediaContainer(input_path)
-    duration = source_container.duration()
+    duration = source_container.duration
     cutpoints = np.arange(duration*1000)[1:-1]
     cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [duration]
 

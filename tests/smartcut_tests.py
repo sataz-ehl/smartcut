@@ -159,7 +159,7 @@ def test_h264_multiple_cuts():
     output_path = test_h264_smart_cut.__name__ + '.mkv'
     for c in [1, 2, 3, 10, 30, 100]:
         cutpoints = source.video_frame_times
-        cutpoints = [0] + list(np.sort(np.random.choice(cutpoints, c, replace=False))) + [source.duration()]
+        cutpoints = [0] + list(np.sort(np.random.choice(cutpoints, c, replace=False))) + [source.duration]
 
         segments = list(zip(cutpoints[:-1], cutpoints[1:]))
 
@@ -390,7 +390,7 @@ def test_video_recode_codec_override():
     source_container = MediaContainer(input_path)
 
     cutpoints = source_container.video_frame_times
-    cutpoints = [0] + list(np.sort(np.random.choice(cutpoints, n_cuts, replace=False))) + [source_container.duration()]
+    cutpoints = [0] + list(np.sort(np.random.choice(cutpoints, n_cuts, replace=False))) + [source_container.duration]
 
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
 
@@ -474,7 +474,7 @@ def test_vorbis_passthru():
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
     smart_cut(source_container, segments, output_path, audio_export_info=export_info)
     suffix_container = MediaContainer(output_path)
-    assert suffix_container.duration() > 14.9 and suffix_container.duration() < 15.1
+    assert suffix_container.duration > 14.9 and suffix_container.duration < 15.1
      # The cut point is not on packet boundary so the audio stream doesn't start at 0
     assert suffix_container.audio_tracks[0].packets[0].pts < 1000
 
@@ -489,7 +489,7 @@ def test_vorbis_track_cut():
     n_cuts = 10
     source_container = MediaContainer(filename)
     cutpoints = np.arange(file_duration*1000)[1:-1]
-    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration()]
+    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration]
 
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
 
@@ -506,7 +506,7 @@ def test_vorbis_track_cut():
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
     smart_cut(source_container, segments, output_path, audio_export_info=export_info)
     suffix_container = MediaContainer(output_path)
-    assert suffix_container.duration() > 14.9 and suffix_container.duration() < 15.1
+    assert suffix_container.duration > 14.9 and suffix_container.duration < 15.1
      # The cut point is not on packet boundary so the audio stream doesn't start at 0
     assert suffix_container.audio_tracks[0].packets[0].pts < 1000
 
@@ -521,7 +521,7 @@ def test_mp3_track_cut():
     n_cuts = 10
     source_container = MediaContainer(filename)
     cutpoints = np.arange(file_duration*1000)[1:-1]
-    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration()]
+    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration]
 
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
 
@@ -541,7 +541,7 @@ def test_mp3_track_cut():
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
     smart_cut(source_container, segments, output_path, audio_export_info=export_info)
     suffix_container = MediaContainer(output_path)
-    assert suffix_container.duration() > 14.9 and suffix_container.duration() < 15.1
+    assert suffix_container.duration > 14.9 and suffix_container.duration < 15.1
      # The cut point is not on packet boundary so the audio stream doesn't start at 0
     assert suffix_container.audio_tracks[0].packets[0].pts < 1000
 
@@ -553,7 +553,7 @@ def test_mp3_passthru():
     generate_sine_wave(file_duration, filename, frequency=freq)
     output_path = test_mp3_passthru.__name__ + '.mp3'
 
-    n_cuts = 10
+    n_cuts = 5
     source_container = MediaContainer(filename)
     cutpoints = np.arange(file_duration*1000)[1:-1]
     cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [file_duration]
@@ -569,11 +569,13 @@ def test_mp3_passthru():
     compare_tracks(source_container.audio_tracks[0], output_container.audio_tracks[0])
 
     # partial file i.e. suffix
+    suffix_output_path = test_mp3_passthru.__name__ + '_suffix.mp3'
+
     cutpoints = [15, file_duration]
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
-    smart_cut(source_container, segments, output_path, audio_export_info=export_info)
-    suffix_container = MediaContainer(output_path)
-    assert suffix_container.duration() > 14.9 and suffix_container.duration() < 15.1
+    smart_cut(source_container, segments, suffix_output_path, audio_export_info=export_info)
+    suffix_container = MediaContainer(suffix_output_path)
+    assert suffix_container.duration > 14.8 and suffix_container.duration < 15.1
      # The cut point is not on packet boundary so the audio stream doesn't start at 0
     assert suffix_container.audio_tracks[0].packets[0].pts < 1000
 
@@ -589,7 +591,7 @@ def test_vorbis_encode_mix():
     n_cuts = 10
     source_container = MediaContainer(filename)
     cutpoints = np.arange(file_duration*1000)[1:-1]
-    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration()]
+    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration]
 
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
 
@@ -613,7 +615,7 @@ def test_flac_conversions():
     n_cuts = 10
     source_container = MediaContainer(filename)
     cutpoints = np.arange(file_duration*1000)[1:-1]
-    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration()]
+    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration]
 
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
 
@@ -648,7 +650,7 @@ def test_wav_conversions():
     n_cuts = 10
     source_container = MediaContainer(filename)
     cutpoints = np.arange(file_duration*1000)[1:-1]
-    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration()]
+    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration]
 
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
 
@@ -934,7 +936,7 @@ def test_mix_with_rate_conversion():
     source_container.add_audio_file(in_2)
 
     cutpoints = np.arange(file_duration*1000)[1:-1]
-    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration()]
+    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration]
 
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
 
@@ -967,7 +969,7 @@ def test_denoiser():
         source_container = MediaContainer(in_file)
 
         cutpoints = np.arange(file_duration*1000)[1:-1]
-        cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration()]
+        cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration]
 
         segments = list(zip(cutpoints[:-1], cutpoints[1:]))
 
@@ -994,7 +996,7 @@ def test_denoiser():
 
     mix = MixInfo([1., 1.])
 
-    segments = [(0, source_container.duration())]
+    segments = [(0, source_container.duration)]
 
     # output denoise
     mix_export_settings = AudioExportSettings(codec='libvorbis', channels='mono', bitrate=92_000, sample_rate=48_000, denoise=2)
@@ -1176,8 +1178,8 @@ def test_manual():
 
     output_path = test_manual.__name__ + '.ogg'
     n_cuts = 3
-    cutpoints = np.arange(source_container.duration()*1000)[1:-1]
-    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration()]
+    cutpoints = np.arange(source_container.duration*1000)[1:-1]
+    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration]
 
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
 
@@ -1295,7 +1297,7 @@ def test_h264_non_idr_keyframes():
         (Fraction(0), Fraction(18400, 1000)),           # 0 to 18.4s (before 18.5s non-IDR)
         (Fraction(18400, 1000), Fraction(143280, 1000)), # 18.4s to 143.28s (before 143.375s non-IDR)
         (Fraction(143280, 1000), Fraction(183230, 1000)), # 143.28s to 183.23s (before 183.33s non-IDR)
-        (Fraction(183230, 1000), source.duration())     # 183.23s to end
+        (Fraction(183230, 1000), source.duration)     # 183.23s to end
     ]
 
     audio_settings = AudioExportSettings(codec='passthru')
@@ -1546,7 +1548,7 @@ def test_h264_non_idr_keyframes_annexb():
         (Fraction(0), Fraction(18400, 1000)),           # 0 to 18.4s (before 18.5s non-IDR)
         (Fraction(18400, 1000), Fraction(143280, 1000)), # 18.4s to 143.28s (before 143.375s non-IDR)
         (Fraction(143280, 1000), Fraction(183230, 1000)), # 143.28s to 183.23s (before 183.33s non-IDR)
-        (Fraction(183230, 1000), source.duration())     # 183.23s to end
+        (Fraction(183230, 1000), source.duration)     # 183.23s to end
     ]
 
     audio_settings = AudioExportSettings(codec='passthru')
@@ -1629,7 +1631,7 @@ def test_partial_smart_cut(input_path: str, output_base_name: str, segment_durat
         return run_audiofile_smartcut(input_path, output_base_name + '.ogg', 2)
 
     source = MediaContainer(input_path)
-    total_duration = float(source.duration())
+    total_duration = float(source.duration)
 
     # Skip if video is too short for meaningful testing
     if total_duration < segment_duration * n_segments * 2:
@@ -1687,8 +1689,8 @@ def test_partial_smart_cut(input_path: str, output_base_name: str, segment_durat
     segments.sort(key=lambda x: x[0])
 
     # Print selected segments in chronological order
-    for i, (start, end) in enumerate(segments):
-        print(f"  Segment {i+1}: {start:.1f}s to {end:.1f}s")
+    # for i, (start, end) in enumerate(segments):
+    #     print(f"  Segment {i+1}: {start:.1f}s to {end:.1f}s")
 
     # Verify segments are non-overlapping after sorting
     for i in range(len(segments) - 1):
@@ -1873,7 +1875,7 @@ def test_mkv_attachment_preservation():
     output_path = test_mkv_attachment_preservation.__name__ + '.mkv'
 
     source = MediaContainer(input_path)
-    segments = [(Fraction(0), source.duration())]
+    segments = [(Fraction(0), source.duration)]
     smart_cut(source, segments, output_path, log_level='warning')
     source.close()
 

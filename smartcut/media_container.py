@@ -24,6 +24,8 @@ from smartcut.nal_tools import (
 def ts_to_time(ts: float) -> Fraction:
     return Fraction(round(ts*1000), 1000)
 
+AV_TIME_BASE: int = 1000000
+
 @dataclass
 class AudioTrack:
     media_container: object
@@ -46,8 +48,6 @@ class MediaContainer:
     video_stream: VideoStream | None
     path: str
 
-    eof_time: Fraction
-
     video_frame_times: np.ndarray
     video_keyframe_indices: list[int]
     gop_start_times_pts_s: list[int] # Smallest pts in a GOP, in seconds
@@ -59,13 +59,12 @@ class MediaContainer:
     audio_tracks: list[AudioTrack]
     subtitle_tracks: list
 
-    def __init__(self, path: str, progress_callback=None) -> None:
+    def __init__(self, path: str) -> None:
         self.path = path
 
         frame_pts = []
         self.video_keyframe_indices = []
 
-        est_eof_time = 0
         av_container = av.open(path, 'r', metadata_errors='ignore')
         audio_loading_container = av.open(path, 'r', metadata_errors='ignore')
         self.av_containers = [av_container, audio_loading_container]
@@ -73,7 +72,9 @@ class MediaContainer:
         self.chat_url = None
         self.chat_history = None
         self.chat_visualize = True
-        self.start_time = 0
+        self.start_time = Fraction(av_container.start_time, AV_TIME_BASE) if av_container.start_time is not None else 0
+        manual_duration_calc = av_container.duration is None
+        self.duration = Fraction(av_container.duration , AV_TIME_BASE) if av_container.duration is not None else 0
 
         is_h264 = False
         is_h265 = False
@@ -87,8 +88,6 @@ class MediaContainer:
             self.video_stream = av_container.streams.video[0]
             self.video_stream.thread_type = "FRAME"
             streams = [self.video_stream, *av_container.streams.audio]
-            if self.video_stream.start_time is not None:
-                self.start_time = self.video_stream.start_time * self.video_stream.time_base
 
             if self.video_stream.codec_context.name == 'hevc':
                 is_h265 = True
@@ -118,14 +117,11 @@ class MediaContainer:
         self.gop_start_nal_types = []
         last_seen_video_dts = -1
 
-        # Progress tracking for demux loop
-        packet_count = 0
-        progress_report_interval = 1000  # Report progress every 1000 packets
-
         for packet in av_container.demux(streams):
             if packet.pts is None:
                 continue
-            est_eof_time = max(est_eof_time, (packet.pts + packet.duration) * packet.time_base)
+            if manual_duration_calc and (packet.pts is not None and packet.duration is not None):
+                self.duration = max(self.duration, (packet.pts + packet.duration) * packet.time_base)
             if packet.stream.type == 'video' and self.video_stream:
 
                 if packet.is_keyframe:
@@ -164,18 +160,6 @@ class MediaContainer:
             elif packet.stream.type == 'subtitle':
                 self.subtitle_tracks[stream_index_to_subtitle_track[packet.stream_index]].append(packet)
 
-            # Report progress periodically during demux
-            packet_count += 1
-            if progress_callback and packet_count % progress_report_interval == 0:
-                # We can't know total packets in advance, so report based on time processed
-                time_processed = float(est_eof_time) if est_eof_time > 0 else 0
-                # Estimate progress as a percentage (this is approximate)
-                if time_processed > 0:
-                    progress_callback(int(min(90, time_processed * 10)), 100)  # Cap at 90% during demux
-
-        # Adding 1ms of extra to make sure we include the last frame in the output
-        self.eof_time = est_eof_time + Fraction(1, 1000)
-
         if self.video_stream is not None:
             self.gop_end_times_dts.append(last_seen_video_dts)
             self.video_frame_times = np.sort(np.array(frame_pts)) * self.video_stream.time_base
@@ -188,12 +172,6 @@ class MediaContainer:
         for t in self.audio_tracks:
             frame_times = np.array(t.frame_times)
             t.frame_times = frame_times * t.av_stream.time_base
-            # last_packet = t.packets[-1]
-            last_packet = t.last_packet
-            t.eof_time = (last_packet.pts + last_packet.duration) * last_packet.time_base
-
-    def duration(self):
-        return self.eof_time - self.start_time
 
     def _fill_hevc_picture_nal_types(self):
         """
@@ -264,7 +242,7 @@ class MediaContainer:
         t += self.start_time
         idx = np.searchsorted(self.video_frame_times, t)
         if idx == len(self.video_frame_times):
-            return self.duration()
+            return self.duration
         elif idx == 0:
             return self.video_frame_times[0] - self.start_time
         # Otherwise, find the closest of the two possible candidates: arr[idx-1] and arr[idx]
@@ -275,36 +253,6 @@ class MediaContainer:
                 return prev_val - self.start_time
             else:
                 return next_val - self.start_time
-
-    def add_audio_file(self, path):
-        av_container = av.open(path, 'r', metadata_errors='ignore')
-        self.av_containers.append(av_container)
-        audio_load_container = av.open(path, 'r', metadata_errors='ignore')
-        self.av_containers.append(audio_load_container)
-        idx = 0
-        stream = av_container.streams.audio[idx]
-        stream.thread_type = "FRAME"
-        audio_load_stream = audio_load_container.streams.audio[idx]
-        audio_load_stream.thread_type = "FRAME"
-        track = AudioTrack(self, stream, audio_load_stream, path, len(self.audio_tracks), 0)
-        self.audio_tracks.append(track)
-
-        est_eof_time = 0
-        for packet in av_container.demux(stream):
-            if packet.pts is None:
-                continue
-            est_eof_time = max(est_eof_time, (packet.pts + packet.duration) * packet.time_base)
-            track.packets.append(packet)
-            track.frame_times.append(packet.pts)
-
-        if self.video_stream is None:
-            self.eof_time = max(self.eof_time, est_eof_time)
-
-        track.frame_times = np.array(track.frame_times)
-        track.frame_times = track.frame_times * stream.time_base
-        last_packet = track.packets[-1]
-        track.eof_time = (last_packet.pts + last_packet.duration) * last_packet.time_base
-        return track
 
 class AudioReader:
     def __init__(self, track: AudioTrack, use_loading_stream: bool = False):

@@ -53,6 +53,8 @@ def copy_packet(p) -> Packet:
     packet.time_base = p.time_base
     packet.stream = p.stream
     packet.is_keyframe = p.is_keyframe
+    for side_data in p.iter_sidedata():
+        packet.set_sidedata(side_data)
     # packet.is_discard = p.is_discard
 
     return packet
@@ -65,13 +67,13 @@ def make_cut_segments(media_container: MediaContainer,
     if media_container.video_stream is None:
         for p in positive_segments:
             s = p[0]
-            while s + 5 < p[1]:
-                cut_segments.append(CutSegment(False, s, s + 4))
-                s += 4
+            while s + 20 < p[1]:
+                cut_segments.append(CutSegment(False, s, s + 19))
+                s += 19
             cut_segments.append(CutSegment(False, s, p[1]))
         return cut_segments
 
-    source_cutpoints = [*media_container.gop_start_times_pts_s, media_container.eof_time]
+    source_cutpoints = [*media_container.gop_start_times_pts_s, media_container.start_time + media_container.duration]
     p = 0
     for gop_idx, (i, o, i_dts, o_dts) in enumerate(zip(source_cutpoints[:-1], source_cutpoints[1:], media_container.gop_start_times_dts, media_container.gop_end_times_dts)):
         while p < len(positive_segments) and positive_segments[p][1] <= i:
@@ -109,7 +111,7 @@ class PassthruAudioCutter:
         self.out_stream = output_av_container.add_stream_from_template(self.track.av_stream, options={'x265-params': 'log_level=error'})
 
         self.out_stream.metadata.update(self.track.av_stream.metadata)
-        self.out_stream.disposition = self.track.av_stream.disposition.value
+        self.out_stream.disposition = self.track.av_stream.disposition.value #pyright: ignore
         self.segment_start_in_output = 0
         self.prev_dts = -100_000
         self.prev_pts = -100_000
@@ -516,6 +518,9 @@ class VideoCutter:
                     new_packet.time_base = packet.time_base
                     new_packet.stream = packet.stream
                     new_packet.is_keyframe = packet.is_keyframe
+                    for side_data in packet.iter_sidedata():
+                        new_packet.set_sidedata(side_data)
+
                     packet = new_packet
 
             # Mark that we've processed the first packet
@@ -722,9 +727,14 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
         video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.NORMAL)
 
     adjusted_segment_times = []
+
+    EPSILON = Fraction(1, 1_000_000)
     for (s, e) in positive_segments:
-        s = -1_000_000 if media_container.video_stream is not None and s == 0 else s + media_container.start_time
-        adjusted_segment_times.append((s, e + media_container.start_time))
+        if s <= EPSILON:
+            s = -10
+        if e >= media_container.duration - EPSILON:
+            e = media_container.duration + 10
+        adjusted_segment_times.append((s + media_container.start_time, e + media_container.start_time))
 
     cut_segments = make_cut_segments(media_container, adjusted_segment_times, video_settings.mode == VideoExportMode.KEYFRAMES)
 
