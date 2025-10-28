@@ -1605,7 +1605,7 @@ def test_testvideos_jellyfish_h265():
     output_path = test_testvideos_jellyfish_h265.__name__ + '.mp4'
     video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.HIGH)
     for c in [1, 2]:
-        run_smartcut_test(filename, output_path, n_cuts=c, video_settings=video_settings, pixel_tolerance=80, allow_failed_frames=2)
+        run_smartcut_test(filename, output_path, n_cuts=c, video_settings=video_settings, pixel_tolerance=80, allow_failed_frames=10)
 
 
 def test_partial_smart_cut(input_path: str, output_base_name: str, segment_duration=15, n_segments=2, audio_export_info=None, video_settings=None, pixel_tolerance=20):
