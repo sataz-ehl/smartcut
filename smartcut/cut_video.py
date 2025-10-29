@@ -73,7 +73,7 @@ def make_cut_segments(media_container: MediaContainer,
             cut_segments.append(CutSegment(False, s, p[1]))
         return cut_segments
 
-    source_cutpoints = [*media_container.gop_start_times_pts_s, media_container.start_time + media_container.duration]
+    source_cutpoints = [*media_container.gop_start_times_pts_s, media_container.start_time + media_container.duration + Fraction(1,10000)]
     p = 0
     for gop_idx, (i, o, i_dts, o_dts) in enumerate(zip(source_cutpoints[:-1], source_cutpoints[1:], media_container.gop_start_times_dts, media_container.gop_end_times_dts)):
         while p < len(positive_segments) and positive_segments[p][1] <= i:
@@ -256,6 +256,7 @@ class VideoCutter:
                 self.out_stream.disposition = self.in_stream.disposition.value
                 self.codec_name = mapped_codec_name
             else:
+                # TODO: this used to be the only branch. Verify the above (mapped branch) is necessary
                 # Use template if no mapping needed
                 self.out_stream = output_av_container.add_stream_from_template(self.in_stream, options={'x265-params': 'log_level=error'})
                 self.out_stream.metadata.update(self.in_stream.metadata)
@@ -671,9 +672,10 @@ class VideoCutter:
 
     def fetch_frame(self, gop_start_dts: int, gop_end_dts: int, end_time: Fraction, start_dts_override: int | None = None):
         # Check if previous iteration consumed exactly to this GOP start
-        continuous = (self._last_fetch_end_dts is not None and self._last_fetch_end_dts == gop_start_dts)
+        continuous = self._last_fetch_end_dts is not None and (self._last_fetch_end_dts in (gop_end_dts, gop_start_dts))
+        self._last_fetch_end_dts = gop_end_dts
 
-        # Choose actual start DTS. Allow priming from previous GOP unless we're continuous.
+        # Choose actual start DTS. Allow priming from previous GOP unless we're either still in the same GOP or continuing to the next one.
         start_dts = gop_start_dts if continuous else (start_dts_override if start_dts_override is not None else gop_start_dts)
 
         # Initialize or reset for new GOP boundary unless continuous
@@ -710,7 +712,8 @@ class VideoCutter:
                 heapq.heappush(self.frame_buffer, heap_item)
 
             # Release frames that are safe (buffer_lowest_pts <= current_dts)
-            while len(self.frame_buffer) > 1:  # Keep at least one frame for ordering
+            BUFFERED_FRAMES_COUNT = 15 # We need this to be quite high, b/c GENPTS is on and we can't know if the pts values are real or fake
+            while len(self.frame_buffer) > BUFFERED_FRAMES_COUNT:
                 lowest_heap_item = self.frame_buffer[0]  # Peek at heap minimum
                 frame = lowest_heap_item.frame
                 frame_pts = lowest_heap_item.pts if lowest_heap_item.pts is not None else -1
@@ -723,8 +726,7 @@ class VideoCutter:
                         yield frame
                     else:
                         # Safe frame is beyond end_time - we're done since all frames from now would be beyond end time
-                        self._last_fetch_end_dts = None
-                        return
+                       return
                 else:
                     break
 
@@ -751,9 +753,6 @@ class VideoCutter:
             else:
                 # Frame is outside time range, stop processing (leave it in buffer)
                 break
-
-        # Mark that we reached end of this GOP's packets (continuous demux position)
-        self._last_fetch_end_dts = gop_end_dts
 
 def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fraction, Fraction]],
               out_path: str, audio_export_info: AudioExportInfo | None = None, log_level: str | None = None, progress = None,
@@ -849,9 +848,6 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                 assert s.start_time < s.end_time
                 for g in generators:
                     for packet in g.segment(s):
-                        # if isinstance(g, VideoCutter):
-                            # if packet.dts > 468468:
-                        # print(float(packet.dts * output_av_container.streams.video[0].time_base))
                         if packet.dts < -900_000:
                             packet.dts = None
 
@@ -866,9 +862,6 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                         output_av_container.mux(packet)
             for g in generators:
                 for packet in g.finish():
-                    # if isinstance(g, VideoCutter):
-                    # print("finish packet: ", packet)
-
                     # Fix AVI format PTS/DTS ordering requirement
                     # AVI format requires PTS >= DTS (decode timestamp cannot be after presentation)
                     if (out_path.lower().endswith('.avi') and packet.dts is not None and

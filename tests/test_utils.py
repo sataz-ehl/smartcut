@@ -201,10 +201,116 @@ def compare_tracks(track_orig: AudioTrack, track_modified: AudioTrack, rms_thres
 
     assert rms < rms_threshold, f"Audio contents have changed: {rms} (rms error)"
 
+def _median_fraction(values):
+    if not values:
+        return None
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    if n % 2 == 1:
+        return s[mid]
+    return (s[mid - 1] + s[mid]) / 2
+
+
+def _infer_frame_count_anomaly(source_times, result_times):
+    """Find the largest output gap and provide nearby PTS context.
+
+    Returns dict with:
+      - kind: 'missing'|'extra' based on frame count delta
+      - result_gap_index: index in result where the gap occurs (between j and j+1)
+      - gap: size of the gap (Fraction)
+      - expected: median expected frame interval from source (Fraction)
+      - result_pts_around: list of (idx, float_secs) for up to 5 frames around the gap
+      - source_pts_near_gap: list of (idx, float_secs) near the gap time in the source
+    Returns None if nothing sensible can be inferred.
+    """
+    try:
+        n_s = len(source_times)
+        n_r = len(result_times)
+        if n_s < 2 or n_r < 2:
+            return None
+
+        # Expected frame interval from source timings (robust median)
+        s_diffs = [source_times[i + 1] - source_times[i] for i in range(n_s - 1)]
+        dt = _median_fraction(s_diffs)
+        if dt is None or dt == 0:
+            return None
+
+        # Find the largest gap in result
+        r_diffs = [result_times[i + 1] - result_times[i] for i in range(n_r - 1)]
+        if not r_diffs:
+            return None
+        j = int(np.argmax(r_diffs))
+        gap = r_diffs[j]
+
+        # Prepare PTS context around the gap in result
+        def _pts_slice(arr, center_left_idx, window=2):
+            start = max(0, center_left_idx - window)
+            end = min(len(arr) - 1, center_left_idx + window + 1)  # inclusive end index for frames
+            vals = []
+            for idx in range(start, end + 1):
+                try:
+                    vals.append((idx, float(arr[idx])))
+                except Exception:
+                    vals.append((idx, arr[idx]))
+            return vals
+
+        result_pts_around = _pts_slice(result_times, j, window=2)
+
+        # Choose a representative time inside the gap and show nearby source PTS
+        mid_time = result_times[j] + gap / 2
+        k = int(np.argmin([abs(st - mid_time) for st in source_times]))
+        # Build symmetric window around k
+        src_start = max(0, k - 2)
+        src_end = min(len(source_times) - 1, k + 2)
+        source_pts_near_gap = []
+        for idx in range(src_start, src_end + 1):
+            try:
+                source_pts_near_gap.append((idx, float(source_times[idx])))
+            except Exception:
+                source_pts_near_gap.append((idx, source_times[idx]))
+
+        return {
+            'kind': 'missing' if n_r < n_s else 'extra' if n_r > n_s else 'unknown',
+            'result_gap_index': j + 1,  # gap is between j and j+1
+            'gap': gap,
+            'expected': dt,
+            'result_pts_around': result_pts_around,
+            'source_pts_near_gap': source_pts_near_gap,
+        }
+    except Exception:
+        return None
+
+
 def check_videos_equal(source_container: MediaContainer, result_container: MediaContainer, pixel_tolerance = 20, allow_failed_frames = 0):
     assert source_container.video_stream.width == result_container.video_stream.width
     assert source_container.video_stream.height == result_container.video_stream.height
-    assert len(result_container.video_frame_times) == len(source_container.video_frame_times), f'Mismatch frame count. Exp: {len(source_container.video_frame_times)}, got: {len(result_container.video_frame_times)}'
+    if len(result_container.video_frame_times) != len(source_container.video_frame_times):
+        # Provide a concise, output-focused gap report with local PTS context
+        s = source_container.video_frame_times
+        r = result_container.video_frame_times
+        hint = _infer_frame_count_anomaly(list(s), list(r))
+        if hint is not None:
+            def _fmt_pts(series):
+                return ", ".join([f"{i}:{t:.6f}s" if isinstance(t, float) else f"{i}:{t}" for i, t in series])
+
+            gap_note = ''
+            if hint.get('gap') is not None and hint.get('expected') is not None:
+                try:
+                    gap_note = f" (gap {float(hint['gap']):.6f}s vs expected {float(hint['expected']):.6f}s)"
+                except Exception:
+                    gap_note = f" (gap {hint['gap']} vs expected {hint['expected']})"
+
+            msg = (
+                f"Mismatch frame count. Exp: {len(s)}, got: {len(r)}. "
+                f"Largest gap in output around result index {hint['result_gap_index']}{gap_note}.\n"
+                f"Result PTS around gap: [{_fmt_pts(hint['result_pts_around'])}]\n"
+                f"Source PTS near gap:  [{_fmt_pts(hint['source_pts_near_gap'])}]\n"
+                f"Last packet PTS (source -> result): {float(s[-1])} -> {float(r[-1])}"
+            )
+        else:
+            msg = f"Mismatch frame count. Exp: {len(s)}, got: {len(r)}"
+        assert len(result_container.video_frame_times) == len(source_container.video_frame_times), msg
     r = result_container.video_frame_times
     s = source_container.video_frame_times
 

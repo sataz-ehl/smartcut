@@ -1046,23 +1046,25 @@ def test_av1_smart_cut():
     for c in [1, 2]:
         run_smartcut_test(filename, output_path, n_cuts=c)
 
-def test_avi_smart_cut():
+def test_avi_mpeg4_smart_cut():
     filename = 'mpeg4.avi'
 
     create_test_video(filename, 30, 'mpeg4', 'yuv420p', 30, (32, 18))
-    output_path = test_avi_smart_cut.__name__ + filename
+    output_path = test_avi_mpeg4_smart_cut.__name__ + '.avi'
     for c in [2, 5, 10]:
         run_smartcut_test(filename, output_path, n_cuts=c)
 
+def test_avi_mjpeg_smart_cut():
     filename = 'mjpeg.avi'
     create_test_video(filename, 30, 'mjpeg', 'yuvj420p', 30, (32, 18))
-    output_path = test_avi_smart_cut.__name__ + filename
+    output_path = test_avi_mjpeg_smart_cut.__name__ + '.avi'
     for c in [2, 5, 10]:
         run_smartcut_test(filename, output_path, n_cuts=c)
 
+def test_avi_h263_smart_cut():
     filename = 'h263.avi'
     create_test_video(filename, 30, 'h263', 'yuv420p', 30, (128, 96))
-    output_path = test_avi_smart_cut.__name__ + filename
+    output_path = test_avi_h263_smart_cut.__name__ + '.avi'
     for c in [2, 5, 10]:
         run_smartcut_test(filename, output_path, n_cuts=c)
 
@@ -1076,7 +1078,7 @@ def test_avi_to_mkv_smart_cut():
 def test_flv_smart_cut():
     filename = 'flv.flv'
     create_test_video(filename, 30, 'flv', 'yuv420p', 30, (32, 16))
-    output_path = test_avi_smart_cut.__name__ + filename
+    output_path = test_flv_smart_cut.__name__ + filename
     for c in [2, 5, 10]:
         run_smartcut_test(filename, output_path, n_cuts=c)
 
@@ -1172,26 +1174,15 @@ def test_broken_ref_vid():
     for c in [1, 2, 3]:
         run_smartcut_test(filename, output_path, n_cuts=c)
 
-
 def test_manual():
-    source_container = MediaContainer('../../out.flac')
+    seed_all(12357)
+    filename = 'h264_input.avi'
 
-    output_path = test_manual.__name__ + '.ogg'
-    n_cuts = 3
-    cutpoints = np.arange(source_container.duration*1000)[1:-1]
-    cutpoints = [0] + [Fraction(x, 1000) for x in np.sort(np.random.choice(cutpoints, n_cuts, replace=False))] + [source_container.duration]
+    # 30s H.264 test video
+    create_test_video(filename, 30, 'h264', 'yuv420p', 30, (128, 96))
 
-    segments = list(zip(cutpoints[:-1], cutpoints[1:]))
-
-    mix = MixInfo([1.])
-    settings = AudioExportSettings(codec='libopus', channels = 'mono', bitrate=64000, sample_rate=48000)
-    export_info = AudioExportInfo(mix_info=mix, mix_export_settings=settings)
-
-    smart_cut(source_container, segments, output_path, audio_export_info=export_info)
-
-    output_container = MediaContainer(output_path)
-    compare_tracks(source_container.audio_tracks[0], output_container.audio_tracks[0])
-
+    output_path = test_manual.__name__ + '.mkv'
+    run_smartcut_test(filename, output_path, n_cuts=3, pixel_tolerance=50)
 
 # Real-world video tests using publicly available videos
 
@@ -1935,7 +1926,9 @@ def get_test_categories():
         ],
 
         'containers': [
-            test_avi_smart_cut,
+            test_avi_mpeg4_smart_cut,
+            test_avi_mjpeg_smart_cut,
+            test_avi_h263_smart_cut,
             test_avi_to_mkv_smart_cut,
             test_flv_smart_cut,
             test_mov_smart_cut,
@@ -2004,6 +1997,9 @@ def get_test_categories():
         'real_world': [
             # This will be populated dynamically by combining all real_world_* categories
         ],
+        'manual': [
+            test_manual
+        ]
     }
 
     # Populate meta-categories dynamically
@@ -2090,6 +2086,7 @@ def run_tests(category=None, single_test=None, flaky_runs=None, base_seed=None):
     else:
         # Run all tests
         tests_to_run = []
+        test_categories.pop('manual')
         for cat_tests in test_categories.values():
             tests_to_run.extend(cat_tests)
 
