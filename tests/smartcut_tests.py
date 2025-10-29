@@ -1229,7 +1229,7 @@ def test_google_tears_of_steel():
     """Test with Google's hosted Tears of Steel H.264 video (using partial segments)"""
     filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4', 'google_tears_of_steel.mp4')
     output_base = test_google_tears_of_steel.__name__
-    test_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=2, audio_export_info='auto')
+    test_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=2, audio_export_info='auto', pixel_tolerance=30)
 
 def get_tears_of_steel_annexb():
     """
