@@ -1175,14 +1175,8 @@ def test_broken_ref_vid():
         run_smartcut_test(filename, output_path, n_cuts=c)
 
 def test_manual():
-    seed_all(12357)
-    filename = 'h264_input.avi'
-
-    # 30s H.264 test video
-    create_test_video(filename, 30, 'h264', 'yuv420p', 30, (128, 96))
-
-    output_path = test_manual.__name__ + '.mkv'
-    run_smartcut_test(filename, output_path, n_cuts=3, pixel_tolerance=50)
+    seed_all(12353)
+    test_google_subaru()
 
 # Real-world video tests using publicly available videos
 

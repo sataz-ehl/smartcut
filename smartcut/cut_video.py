@@ -261,6 +261,7 @@ class VideoCutter:
                 self.out_stream = output_av_container.add_stream_from_template(self.in_stream, options={'x265-params': 'log_level=error'})
                 self.out_stream.metadata.update(self.in_stream.metadata)
                 self.out_stream.disposition = self.in_stream.disposition.value
+                self.out_stream.time_base = self.in_stream.time_base
                 self.codec_name = original_codec_name
 
 
@@ -850,25 +851,9 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                     for packet in g.segment(s):
                         if packet.dts < -900_000:
                             packet.dts = None
-
-                        # Fix AVI format PTS/DTS ordering requirement
-                        # AVI format requires PTS >= DTS (decode timestamp cannot be after presentation)
-                        if (out_path.lower().endswith('.avi') and packet.dts is not None and
-                            packet.pts is not None and packet.pts < packet.dts):
-                            # Always adjust PTS up to match DTS to preserve decode order
-                            packet.pts = packet.dts
-
-                        # print(packet)
                         output_av_container.mux(packet)
             for g in generators:
                 for packet in g.finish():
-                    # Fix AVI format PTS/DTS ordering requirement
-                    # AVI format requires PTS >= DTS (decode timestamp cannot be after presentation)
-                    if (out_path.lower().endswith('.avi') and packet.dts is not None and
-                        packet.pts is not None and packet.pts < packet.dts):
-                        # Always adjust PTS up to match DTS to preserve decode order
-                        packet.pts = packet.dts
-
                     output_av_container.mux(packet)
             if progress is not None:
                 progress.emit(previously_done_segments)

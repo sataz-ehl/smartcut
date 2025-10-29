@@ -402,7 +402,7 @@ def check_videos_equal_segment(source_container: MediaContainer, result_containe
 
 def run_cut_on_keyframes_test(input_path, output_path):
     source = MediaContainer(input_path)
-    cutpoints = source.gop_start_times_pts_s + [source.duration]
+    cutpoints = source.gop_start_times_pts_s + [source.duration + 1]
 
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
 
@@ -420,7 +420,7 @@ def run_smartcut_test(input_path: str, output_path, n_cuts, audio_export_info = 
         return run_audiofile_smartcut(input_path, output_path, n_cuts)
     source = MediaContainer(input_path)
     cutpoints = source.video_frame_times
-    cutpoints = [0] + list(np.sort(np.random.choice(cutpoints, n_cuts, replace=False))) + [source.duration]
+    cutpoints = [0] + list(np.sort(np.random.choice(cutpoints, n_cuts, replace=False))) + [source.duration + 1]
 
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
 

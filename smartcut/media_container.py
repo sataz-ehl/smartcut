@@ -115,11 +115,12 @@ class MediaContainer:
         self.gop_start_times_dts = []
         self.gop_end_times_dts = []
         self.gop_start_nal_types = []
-        last_seen_video_dts = -1
+        last_seen_video_dts = None
 
         for packet in av_container.demux(streams):
             if packet.pts is None:
                 continue
+
             if manual_duration_calc and (packet.pts is not None and packet.duration is not None):
                 self.duration = max(self.duration, (packet.pts + packet.duration) * packet.time_base)
             if packet.stream.type == 'video' and self.video_stream:
@@ -146,7 +147,7 @@ class MediaContainer:
                         self.gop_start_times_dts.append(dts)
                         self.gop_start_nal_types.append(nal_type)
 
-                        if last_seen_video_dts > 0:
+                        if last_seen_video_dts is not None:
                             self.gop_end_times_dts.append(last_seen_video_dts)
                 last_seen_video_dts = packet.dts
                 frame_pts.append(packet.pts)
