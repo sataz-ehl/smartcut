@@ -195,6 +195,14 @@ Tests ran in 153.6s
 
 ## Version History
 
+### 1.4
+* Support converting from .ts to .mp4/.mkv.
+* Add support for .mkv attachments. They are copied to output when cutting a file with attachments.
+* Various small fixes to cutting correctness and corner cases.
+* Added --flaky to test suite to catch even more corner cases.
+* All tests pass with 10 different random seeds.
+* Update to PyAV 16.
+
 ### 1.3.3
 * Another h264 NAL detection fix
 
