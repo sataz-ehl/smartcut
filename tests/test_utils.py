@@ -347,7 +347,7 @@ def check_videos_equal(source_container: MediaContainer, result_container: Media
                     max_diff = np.max(diff)
                     if max_diff > pixel_tolerance:
                         if failed_frames >= allow_failed_frames:
-                            assert False, f'Large color deviation at frame {frame_i} (failed frame {failed_frames + 1}/{allow_failed_frames + 1}). Exp: {source_color}, got: {result_color}'
+                            assert False, f'Large color deviation at frame {frame_i} (failed frame {failed_frames + 1}/{allow_failed_frames + 1}). Exp: {source_color}, got: {result_color}, {result_container.path}'
                         frame_failed = True
                         break
                 if frame_failed:

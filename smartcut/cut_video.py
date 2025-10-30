@@ -358,7 +358,14 @@ class VideoCutter:
         if profile is not None:
             self.encoding_options['profile'] = profile
 
-        if self.codec_name == 'hevc':
+        if self.codec_name == 'h264':
+            # sps-id = 3. We try to avoid collisions with the existing SPS ids.
+            # Particularly 0 is very commonly used. Technically we should probably try
+            # to dynamically set this to a safe number, but it can be difficult to know
+            # our detection is robust / correct.
+            self.encoding_options['x264-params'] = 'sps-id=3'
+
+        elif self.codec_name == 'hevc':
             # Get the encoder settings from input stream extradata.
             # In theory this should not work. The stuff in extradata is technically just comments set by the encoder.
             # Another issue is that the extradata format is going to be different depending on the encoder.
@@ -459,7 +466,9 @@ class VideoCutter:
                 enc_codec.time_base = Fraction(1, muxing_codec.rate)
             else:
                 enc_codec.time_base = self.out_stream.time_base
-            enc_codec.flags = muxing_codec.flags
+            #enc_codec.flags = muxing_codec.flags # This was here, but it's a bit sus. Disabling doesn't break any tests
+            #enc_codec.flags ^= Flags.global_header # either doesn't help or doesn't work
+
             if muxing_codec.bit_rate is not None:
                 enc_codec.bit_rate = muxing_codec.bit_rate
             if muxing_codec.bit_rate_tolerance is not None:

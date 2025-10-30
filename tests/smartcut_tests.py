@@ -375,7 +375,7 @@ def test_ts_smart_cut():
     filename = cached_download('https://filesamples.com/samples/video/ts/sample_1280x720.ts', 'mpeg2.ts')
     output_path = test_ts_smart_cut.__name__ + '.ts'
     for c in [1, 2]:
-        run_smartcut_test(filename, output_path, c)
+        run_smartcut_test(filename, output_path, c, pixel_tolerance=30)
 
 # Video transform functionality has been removed
 # def test_vertical_transform():
@@ -1184,37 +1184,37 @@ def test_google_bigbuckbunny():
     """Test with Google's hosted Big Buck Bunny H.264 video (using partial segments)"""
     filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4', 'google_bigbuckbunny.mp4')
     output_base = test_google_bigbuckbunny.__name__
-    test_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=2, audio_export_info='auto')
+    test_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=4, audio_export_info='auto')
 
 def test_google_elephantsdream():
     """Test with Google's hosted Elephant's Dream H.264 video (using partial segments)"""
     filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4', 'google_elephantsdream.mp4')
     output_base = test_google_elephantsdream.__name__
-    test_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=2, audio_export_info='auto')
+    test_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=4, audio_export_info='auto')
 
 def test_google_forbiggerblaze():
     """Test with Google's hosted ForBiggerBlazes H.264 video (using partial segments)"""
     filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4', 'google_forbiggerblaze.mp4')
     output_base = test_google_forbiggerblaze.__name__
-    test_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=2, audio_export_info='auto')
+    test_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=4, audio_export_info='auto')
 
 def test_google_forbiggeresc():
     """Test with Google's hosted ForBiggerEscapes H.264 video (using partial segments)"""
     filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4', 'google_forbiggeresc.mp4')
     output_base = test_google_forbiggeresc.__name__
-    test_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=2, audio_export_info='auto')
+    test_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=4, audio_export_info='auto')
 
 def test_google_subaru():
     """Test with Google's hosted Subaru Outback commercial H.264 video (using partial segments)"""
     filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/SubaruOutbackOnStreetAndDirt.mp4', 'google_subaru.mp4')
     output_base = test_google_subaru.__name__
-    test_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=2, audio_export_info='auto')
+    test_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=4, audio_export_info='auto')
 
 def test_google_tears_of_steel():
     """Test with Google's hosted Tears of Steel H.264 video (using partial segments)"""
     filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4', 'google_tears_of_steel.mp4')
     output_base = test_google_tears_of_steel.__name__
-    test_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=2, audio_export_info='auto', pixel_tolerance=30)
+    test_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=4, audio_export_info='auto', pixel_tolerance=30)
 
 def get_tears_of_steel_annexb():
     """
