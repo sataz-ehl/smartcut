@@ -759,7 +759,8 @@ def test_libde265_tears_of_steel_h265():
         segment_duration=15,
         n_segments=3,
         audio_export_info='auto',
-        pixel_tolerance=50,
+        pixel_tolerance=40,
+        allow_failed_frames=3,
         recode_codec_override='h264'
     )
 

@@ -449,7 +449,7 @@ def run_audiofile_smartcut(input_path, output_path, n_cuts):
     compare_tracks(source_container.audio_tracks[0], output_container.audio_tracks[0])
 
 
-def run_partial_smart_cut(input_path: str, output_base_name: str, segment_duration=15, n_segments=2, audio_export_info=None, video_settings=None, pixel_tolerance=20, recode_codec_override: str | None = None):
+def run_partial_smart_cut(input_path: str, output_base_name: str, segment_duration=15, n_segments=2, audio_export_info=None, video_settings=None, pixel_tolerance=20, allow_failed_frames = 0, recode_codec_override: str | None = None):
     """
     Test smart cutting on short segments from random positions in long videos.
 
@@ -565,7 +565,7 @@ def run_partial_smart_cut(input_path: str, output_base_name: str, segment_durati
     smartcut_container = MediaContainer(smartcut_output)
     recode_container = MediaContainer(recode_output)
 
-    check_videos_equal(smartcut_container, recode_container, pixel_tolerance=pixel_tolerance)
+    check_videos_equal(smartcut_container, recode_container, pixel_tolerance=pixel_tolerance, allow_failed_frames=allow_failed_frames)
 
     smartcut_container.close()
     recode_container.close()

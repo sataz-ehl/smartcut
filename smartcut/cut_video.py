@@ -6,13 +6,13 @@ from typing import cast
 
 import av
 import av.bitstream
-from av.stream import Disposition
 import numpy as np
 from av import VideoCodecContext, VideoStream
 from av.codec.context import CodecContext
 from av.container.input import InputContainer
 from av.container.output import OutputContainer
 from av.packet import Packet
+from av.stream import Disposition
 from av.video.frame import PictureType, VideoFrame
 
 from smartcut.media_container import MediaContainer
@@ -210,7 +210,7 @@ class VideoSettings:
     codec_override: str = 'copy'
 
 class VideoCutter:
-    def __init__(self, media_container: MediaContainer, output_av_container: OutputContainer, video_settings: VideoSettings, log_level: str):
+    def __init__(self, media_container: MediaContainer, output_av_container: OutputContainer, video_settings: VideoSettings, log_level: str | None):
         self.media_container = media_container
         self.log_level = log_level
         self.encoder_inited = False
@@ -218,8 +218,7 @@ class VideoCutter:
 
         self.enc_codec = None
 
-        self.in_stream = media_container.video_stream
-        assert self.in_stream is not None
+        self.in_stream = cast(VideoStream, media_container.video_stream)
         # Open another container because seeking to beginning of the file is unreliable...
         self.input_av_container: InputContainer = av.open(media_container.path, 'r', metadata_errors='ignore')
 
@@ -304,16 +303,19 @@ class VideoCutter:
     def _normalize_output_codec_tag(self, output_av_container: OutputContainer) -> None:
         """Ensure codec tags are compatible with MP4/MOV style containers."""
 
-        codec_name = self.in_stream.codec_context.name
+        in_codec_ctx = self.in_stream.codec_context
+        codec_name = in_codec_ctx.name
         container_name = output_av_container.format.name.lower() if output_av_container.format.name else ''
 
         if not any(name in container_name for name in ('mp4', 'mov', 'matroska', 'webm')):
             return
 
-        if codec_name == 'h264' and self._is_mpegts_h264_tag(self.out_stream.codec_context.codec_tag):
-            self.out_stream.codec_context.codec_tag = 'avc1'
-        elif codec_name in ('hevc', 'h265') and self._is_mpegts_hevc_tag(self.out_stream.codec_context.codec_tag):
-            self.out_stream.codec_context.codec_tag = 'hvc1'
+        out_codec_ctx = self.out_stream.codec_context
+        assert out_codec_ctx is not None
+        if codec_name == 'h264' and self._is_mpegts_h264_tag(out_codec_ctx.codec_tag):
+            out_codec_ctx.codec_tag = 'avc1'
+        elif codec_name in ('hevc', 'h265') and self._is_mpegts_hevc_tag(out_codec_ctx.codec_tag):
+            out_codec_ctx.codec_tag = 'hvc1'
 
     @staticmethod
     def _is_mpegts_h264_tag(codec_tag) -> bool:
@@ -340,7 +342,8 @@ class VideoCutter:
         # v_codec = self.in_stream.codec_context
         profile = self.out_stream.codec_context.profile
 
-        if 'av1' in self.codec_name:
+        codec_name = self.codec_name or ''
+        if 'av1' in codec_name:
             self.codec_name = 'av1'
             profile = None
         if self.codec_name == 'vp9':
@@ -390,9 +393,13 @@ class VideoCutter:
             # And I've tested that it works on some real videos as well.
             # Maybe there is some option that I'm not setting correctly and there is a better way to get the correct value?
 
+            assert self.in_stream is not None
+            assert self.in_stream.codec_context is not None
             extradata = self.in_stream.codec_context.extradata
             x265_params = []
             try:
+                if extradata is None:
+                    raise ValueError("No extradata")
                 options_str = str(extradata.split(b'options: ')[1][:-1], 'ascii')
                 x265_params = options_str.split(' ')
                 for i, o in enumerate(x265_params):
@@ -504,7 +511,10 @@ class VideoCutter:
             start_override = self.media_container.gop_start_times_dts[s.gop_index - 1]
 
         for frame in self.fetch_frame(s.gop_start_dts, s.gop_end_dts, s.end_time, start_override):
-            in_tb = frame.time_base if frame.time_base is not None else self.in_stream.time_base
+            assert self.in_stream is not None
+            in_stream_tb = self.in_stream.time_base
+            assert in_stream_tb is not None
+            in_tb = frame.time_base if frame.time_base is not None else in_stream_tb
             if frame.pts * in_tb < s.start_time:
                 continue
             if frame.pts * in_tb >= s.end_time:
@@ -534,7 +544,10 @@ class VideoCutter:
 
     def remux_segment(self, s: CutSegment) -> list[Packet]:
         result_packets = []
-        segment_start_pts = int(s.start_time / self.in_stream.time_base)
+        assert self.in_stream is not None
+        in_tb = self.in_stream.time_base
+        assert in_tb is not None
+        segment_start_pts = int(s.start_time / in_tb)
 
         # Check if we need CRA to BLA conversion for this segment
         should_convert_cra = self._should_convert_cra_for_segment(s)
@@ -565,11 +578,11 @@ class VideoCutter:
 
             # Apply timing adjustments
             packet.pts -= segment_start_pts
-            packet.pts = packet.pts * self.in_stream.time_base / self.out_time_base
+            packet.pts = packet.pts * in_tb / self.out_time_base
             packet.pts += self.segment_start_in_output / self.out_time_base
             if packet.dts is not None:
                 packet.dts -= segment_start_pts
-                packet.dts = packet.dts * self.in_stream.time_base / self.out_time_base
+                packet.dts = packet.dts * in_tb / self.out_time_base
                 packet.dts += self.segment_start_in_output / self.out_time_base
 
             result_packets.extend(self.remux_bitstream_filter.filter(packet))
@@ -591,6 +604,8 @@ class VideoCutter:
             discontinuity in the stream: -c 20,30. Current segment is the first segment without recoding after the cut that happened at 30.
         """
         # Check 1: Must be HEVC
+        assert self.in_stream is not None
+        assert self.in_stream.codec_context is not None
         if self.in_stream.codec_context.name != 'hevc':
             return False
 
@@ -653,6 +668,7 @@ class VideoCutter:
         return result_packets
 
     def fetch_packet(self, target_dts: int, end_dts: int):
+        assert self.in_stream is not None
         tb = self.in_stream.time_base
 
         # First, check if we have a saved packet from previous call
@@ -721,6 +737,7 @@ class VideoCutter:
                 pass
 
         # Get time_base for PTS calculations
+        assert self.in_stream is not None
         time_base = self.in_stream.time_base
 
         # Process packets and yield frames when safe

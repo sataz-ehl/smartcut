@@ -79,9 +79,11 @@ class MediaContainer:
             streams = [*av_container.streams.audio]
         else:
             self.video_stream = av_container.streams.video[0]
+            assert self.video_stream is not None
             self.video_stream.thread_type = "FRAME"
             streams = [self.video_stream, *av_container.streams.audio]
 
+            assert self.video_stream.codec_context is not None
             if self.video_stream.codec_context.name == 'hevc':
                 is_h265 = True
             if self.video_stream.codec_context.name == 'h264':
