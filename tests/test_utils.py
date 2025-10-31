@@ -122,7 +122,7 @@ def read_track_audio(track: AudioTrack) -> tuple[np.ndarray, int]:
     sample_rate = None
 
     with av.open(track.path, 'r', metadata_errors='ignore') as container:
-        stream = container.streams.audio[track.index_in_source]
+        stream = container.streams.audio[track.index]
         stream.codec_context.thread_type = "FRAME"
 
         expected_channels = stream.channels or 1

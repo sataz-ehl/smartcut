@@ -27,8 +27,6 @@ class AudioTrack:
     path: str
     index: int
 
-    index_in_source: int = 0
-
     packets: list[Packet] = field(default_factory = lambda: [])
     frame_times: np.ndarray | list[int] = field(default_factory = lambda: [])
 
