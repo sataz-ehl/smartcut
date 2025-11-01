@@ -88,9 +88,7 @@ def frame_to_time(source: MediaContainer, frame_str: str, end_frame: bool = Fals
     frame_num = int(frame_str)
     if frame_num == -1:
         # Special case: frame "-1" means "the final frame of the video"
-        # (also intentionally not including the ` - source.start_time` offset, to further ensure the chosen time
-        #  is all the way at the end of the file)
-        return source.video_frame_times[len(source.video_frame_times) - 1]
+        return source.duration
     if end_frame:
         # Internal calculations in `smart_cut` function currently *exclude* the final frame if it lands
         # exactly on the specified end time, so we manually offset "end" frames by 1

@@ -26,7 +26,7 @@ class AudioTrack:
     index: int
 
     packets: list[Packet] = field(default_factory = lambda: [])
-    frame_times: np.ndarray | list[int] = field(default_factory = lambda: [])
+    frame_times: np.ndarray = field(default_factory = lambda: np.empty(()))
 
 class MediaContainer:
     av_container: InputContainer
@@ -83,6 +83,8 @@ class MediaContainer:
         self.audio_tracks = []
         stream_index_to_audio_track = {}
         for i, audio_stream in enumerate(av_container.streams.audio):
+            if audio_stream.time_base is None:
+                continue
             audio_stream.codec_context.thread_type = "FRAME"
             track = AudioTrack(self, audio_stream, path, i)
             self.audio_tracks.append(track)
@@ -142,7 +144,6 @@ class MediaContainer:
 
                 # NOTE: storing the audio packets like this keeps the whole compressed audio loaded in RAM
                 track.packets.append(packet)
-                track.frame_times.append(packet.pts)
             elif packet.stream.type == 'subtitle':
                 self.subtitle_tracks[stream_index_to_subtitle_track[packet.stream_index]].append(packet)
 
@@ -154,8 +155,7 @@ class MediaContainer:
             self.gop_start_times_pts_s = list(self.video_frame_times[self.video_keyframe_indices])
 
         for t in self.audio_tracks:
-            frame_times = np.array(t.frame_times)
-            t.frame_times = frame_times * t.av_stream.time_base
+            t.frame_times = np.array(list(map(lambda p: p.pts, t.packets))) * t.av_stream.time_base
 
     def close(self):
         self.av_container.close()
