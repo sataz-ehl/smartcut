@@ -231,6 +231,43 @@ def compare_tracks(track_orig: AudioTrack, track_modified: AudioTrack, rms_thres
 
     assert rms < rms_threshold, f"Audio contents have changed: {rms} (rms error)"
 
+def check_audio_pts_timestamps(container: MediaContainer, max_expected_duration: float, test_name: str = ""):
+    """
+    Validate that audio PTS timestamps start near 0 and end near the expected duration.
+
+    This checks that audio-only files don't have incorrectly offset PTS timestamps
+    (e.g., offset by 10 seconds due to video pre-roll extension being applied to audio-only files).
+
+    Args:
+        container: MediaContainer with audio track to check
+        max_expected_duration: Maximum expected PTS time for the last packet (in seconds)
+        test_name: Optional prefix for error messages
+    """
+    assert len(container.audio_tracks) > 0, "Container has no audio tracks"
+
+    track = container.audio_tracks[0]
+    time_base = track.av_stream.time_base
+    assert time_base is not None, "Time base should not be None"
+
+    assert len(track.packets) > 0, "Audio track has no packets"
+
+    first_packet = track.packets[0]
+    last_packet = track.packets[-1]
+
+    prefix = f"{test_name}: " if test_name else ""
+
+    # Check first packet PTS is near 0
+    assert first_packet.pts is not None, f"{prefix}First packet should have PTS"
+    first_pts_time = float(first_packet.pts * time_base)
+    assert first_pts_time < 0.5, \
+        f"{prefix}First packet PTS should be near 0, got {first_pts_time:.6f}s (PTS={first_packet.pts})"
+
+    # Check last packet PTS is within expected range
+    assert last_packet.pts is not None, f"{prefix}Last packet should have PTS"
+    last_pts_time = float(last_packet.pts * time_base)
+    assert last_pts_time < max_expected_duration + 0.5, \
+        f"{prefix}Last packet PTS should be near {max_expected_duration}s, got {last_pts_time:.6f}s (PTS={last_packet.pts})"
+
 def _median_fraction(values):
     if not values:
         return None

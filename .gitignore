@@ -46,3 +46,6 @@ distribution/flatpak/repo/
 .flatpak-builder
 
 smartcut_cpp
+
+AGENTS.md
+CLAUDE.md

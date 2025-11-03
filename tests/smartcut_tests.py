@@ -485,6 +485,21 @@ def test_vorbis_passthru():
 
     compare_tracks(source_container.audio_tracks[0], output_container.audio_tracks[0])
 
+    # Test case from bug report: export 0-2 seconds
+    prefix_output_path = test_vorbis_passthru.__name__ + '_prefix.ogg'
+    cutpoints = [0, 2]
+    segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+    segments = to_fraction_segments(segments)
+    smart_cut(source_container, segments, prefix_output_path, audio_export_info=export_info)
+    prefix_container = MediaContainer(prefix_output_path)
+
+    # Check duration is correct
+    assert prefix_container.duration > 1.9 and prefix_container.duration < 2.1, \
+        f"Expected duration ~2s, got {prefix_container.duration}s"
+
+    # Check PTS timestamps are correct (not offset by ~10 seconds)
+    check_audio_pts_timestamps(prefix_container, 2.0, "Prefix (0-2s)")
+
     # partial file i.e. suffix
     cutpoints = [15, file_duration]
     segments = list(zip(cutpoints[:-1], cutpoints[1:]))
@@ -492,9 +507,9 @@ def test_vorbis_passthru():
     smart_cut(source_container, segments, output_path, audio_export_info=export_info)
     suffix_container = MediaContainer(output_path)
     assert suffix_container.duration > 14.9 and suffix_container.duration < 15.1
-    # The cut point is not on packet boundary so the audio stream doesn't start at 0
-    first_packet = suffix_container.audio_tracks[0].packets[0]
-    assert first_packet.pts is not None and first_packet.pts < 1000, "Expected first packet pts to be near zero"
+
+    # Check PTS timestamps for suffix case
+    check_audio_pts_timestamps(suffix_container, 15.0, "Suffix (15-30s)")
 
 def test_mp3_passthru():
     filename = 'basic.mp3'
@@ -520,6 +535,21 @@ def test_mp3_passthru():
 
     compare_tracks(source_container.audio_tracks[0], output_container.audio_tracks[0])
 
+    # Test case: export 0-2 seconds
+    prefix_output_path = test_mp3_passthru.__name__ + '_prefix.mp3'
+    cutpoints = [0, 2]
+    segments = list(zip(cutpoints[:-1], cutpoints[1:]))
+    segments = to_fraction_segments(segments)
+    smart_cut(source_container, segments, prefix_output_path, audio_export_info=export_info)
+    prefix_container = MediaContainer(prefix_output_path)
+
+    # Check duration is correct
+    assert prefix_container.duration > 1.9 and prefix_container.duration < 2.1, \
+        f"Expected duration ~2s, got {prefix_container.duration}s"
+
+    # Check PTS timestamps are correct
+    check_audio_pts_timestamps(prefix_container, 2.0, "Prefix (0-2s)")
+
     # partial file i.e. suffix
     suffix_output_path = test_mp3_passthru.__name__ + '_suffix.mp3'
 
@@ -529,9 +559,9 @@ def test_mp3_passthru():
     smart_cut(source_container, segments, suffix_output_path, audio_export_info=export_info)
     suffix_container = MediaContainer(suffix_output_path)
     assert suffix_container.duration > 14.8 and suffix_container.duration < 15.1
-    # The cut point is not on packet boundary so the audio stream doesn't start at 0
-    first_packet = suffix_container.audio_tracks[0].packets[0]
-    assert first_packet.pts is not None and first_packet.pts < 1000, "Expected first packet pts to be near zero"
+
+    # Check PTS timestamps for suffix case
+    check_audio_pts_timestamps(suffix_container, 15.0, "Suffix (15-30s)")
 
 def test_mkv_with_video_and_audio_passthru():
     file_duration = 30
@@ -718,11 +748,7 @@ def test_broken_ref_vid():
 
 def test_manual():
     seed_all(1235)
-
-    filename = 'mpeg4.wmv'
-    create_test_video(filename, 30, 'mpeg4', 'yuv420p', 30, (32, 16))
-    output_path = test_wmv_smart_cut.__name__ + filename
-    run_smartcut_test(filename, output_path, n_cuts=2)
+    test_vorbis_passthru()
 
 # Real-world video tests using publicly available videos
 

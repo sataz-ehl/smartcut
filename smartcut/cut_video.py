@@ -75,12 +75,16 @@ def make_cut_segments(media_container: MediaContainer,
         ) -> list[CutSegment]:
     cut_segments = []
     if media_container.video_stream is None:
+        first_audio_track = media_container.audio_tracks[0]
+        min_time = first_audio_track.frame_times[0]
+        max_time = first_audio_track.frame_times[-1] + Fraction(1,10000)
         for p in positive_segments:
-            s = p[0]
-            while s + 20 < p[1]:
+            s = max(p[0], min_time)
+            e = min(p[1], max_time)
+            while s + 20 < e:
                 cut_segments.append(CutSegment(False, s, s + 19))
                 s += 19
-            cut_segments.append(CutSegment(False, s, p[1]))
+            cut_segments.append(CutSegment(False, s, e))
         return cut_segments
 
     source_cutpoints = [*media_container.gop_start_times_pts_s, media_container.start_time + media_container.duration + Fraction(1,10000)]
