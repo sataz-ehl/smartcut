@@ -104,7 +104,7 @@ def parse_frame_segments(source: MediaContainer, frame_str: str) -> list[tuple[F
     return list(zip(start_frames, end_frames))
 
 class Progress:
-    def __init__(self):
+    def __init__(self) -> None:
         self.first_call = True
         self.tqdm: tqdm | None = None
 

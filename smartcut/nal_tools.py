@@ -1,4 +1,4 @@
-def convert_hevc_cra_to_bla(packet_data):
+def convert_hevc_cra_to_bla(packet_data: bytes) -> bytes:
     """
     Convert CRA (Clean Random Access) frames to BLA (Broken Link Access) frames in H.265/HEVC packet data.
     CRA frames (NAL type 21) are converted to BLA_W_LP frames (NAL type 16).
@@ -57,7 +57,7 @@ def convert_hevc_cra_to_bla(packet_data):
     return bytes(data)
 
 
-def get_h265_nal_unit_type(packet_data):
+def get_h265_nal_unit_type(packet_data: bytes) -> int | None:
     """
     Extract NAL unit type from H.265/HEVC packet data.
     For packets with multiple NAL units, prioritizes picture NAL types (0-21)
@@ -134,7 +134,7 @@ def get_h265_nal_unit_type(packet_data):
     return None
 
 
-def is_safe_h264_keyframe_nal(nal_type):
+def is_safe_h264_keyframe_nal(nal_type: int | None) -> bool:
     """
     Check if an H.264 NAL type represents a safe keyframe for cutting.
 
@@ -150,7 +150,7 @@ def is_safe_h264_keyframe_nal(nal_type):
     return nal_type in [5, 6, 7, 8]
 
 
-def is_safe_h265_keyframe_nal(nal_type):
+def is_safe_h265_keyframe_nal(nal_type: int | None) -> bool:
     """
     Check if an H.265 NAL type represents a safe keyframe for cutting.
 
@@ -165,7 +165,7 @@ def is_safe_h265_keyframe_nal(nal_type):
     # Accept BLA(16,17,18), IDR(19,20), CRA(21) frames and parameter sets (32,33,34)
     return nal_type in [16, 17, 18, 19, 20, 21, 32, 33, 34]
 
-def get_h264_nal_unit_type(packet_data):
+def get_h264_nal_unit_type(packet_data: bytes) -> int | None:
     """
     Extract NAL unit type from H.264/AVC packet data.
     For packets with multiple NAL units, prioritizes picture NAL types (1-5)

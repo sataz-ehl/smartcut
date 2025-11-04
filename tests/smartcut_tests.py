@@ -50,7 +50,7 @@ av_logging.set_level(av_logging.FATAL)
 data_dir = 'test_data'
 
 # Parse command line arguments
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Smart Media Cutter Tests')
     parser.add_argument('--category', choices=['basic', 'h264', 'h265', 'codecs', 'containers', 'audio', 'mixed', 'transforms', 'long', 'external', 'real_world', 'real_world_h264', 'real_world_h265', 'real_world_av1', 'real_world_vp9', 'all'],
                        help='Run tests from specific category')
@@ -111,7 +111,7 @@ def seed_all(seed: int) -> None:
     np.random.seed(seed)
 
 
-def resolve_base_seed(args) -> int:
+def resolve_base_seed(args: argparse.Namespace | None) -> int:
     if args is None or args.seed is None:
         return DEFAULT_SEED
     return args.seed
@@ -124,18 +124,18 @@ short_h264_path = 'short_h264.mkv'
 short_h265_path = 'short_h265.mkv'
 
 
-def test_h264_cut_on_keyframes():
+def test_h264_cut_on_keyframes() -> None:
     create_test_video(short_h264_path, 30, 'h264', 'yuv420p', 30, (32, 18))
     output_path = test_h264_cut_on_keyframes.__name__ + '.mkv'
     run_cut_on_keyframes_test(short_h264_path, output_path)
 
-def test_h264_smart_cut():
+def test_h264_smart_cut() -> None:
     create_test_video(short_h264_path, 30, 'h264', 'yuv420p', 30, (32, 18))
     output_path = test_h264_smart_cut.__name__ + '.mkv'
     for c in [1, 2, 3, 10, 30, 100]:
         run_smartcut_test(short_h264_path, output_path, c)
 
-def test_h264_multiple_cuts():
+def test_h264_multiple_cuts() -> None:
     create_test_video(short_h264_path, 30, 'h264', 'yuv420p', 30, (32, 18))
     source = MediaContainer(short_h264_path)
 
@@ -151,25 +151,25 @@ def test_h264_multiple_cuts():
         result_container = MediaContainer(output_path)
         check_videos_equal(source, result_container)
 
-def test_h265_cut_on_keyframes():
+def test_h265_cut_on_keyframes() -> None:
     create_test_video(short_h265_path, 30, 'hevc', 'yuv422p10le', 60, (256, 144))
     output_path = test_h265_cut_on_keyframes.__name__ + '.mkv'
     run_cut_on_keyframes_test(short_h265_path, output_path)
 
-def test_h265_smart_cut():
+def test_h265_smart_cut() -> None:
     create_test_video(short_h265_path, 30, 'hevc', 'yuv422p10le', 60, (256, 144))
     output_path = test_h265_smart_cut.__name__ + '.mkv'
     for c in [1, 2]:
         run_smartcut_test(short_h265_path, output_path, c)
 
-def test_h265_smart_cut_large():
+def test_h265_smart_cut_large() -> None:
     input_file = 'h265_large.mkv'
     create_test_video(input_file, 17, 'hevc', 'yuv422p', 25, (1280, 720))
     output_path = test_h265_smart_cut_large.__name__ + '.mkv'
     for c in [1, 2, 5]:
         run_smartcut_test(input_file, output_path, c)
 
-def test_mkv_with_invalid_timestamps():
+def test_mkv_with_invalid_timestamps() -> None:
     """Test cutting anime_clip.mkv which has invalid timestamps."""
     url = "https://github.com/skeskinen/media-test-data/raw/refs/heads/main/anime_clip.mkv"
     anime_path = cached_download(url, "anime_clip.mkv")
@@ -179,7 +179,7 @@ def test_mkv_with_invalid_timestamps():
     # Run normal smartcut test with a few cuts
     run_smartcut_test(anime_path, output_path, n_cuts=2, audio_export_info='auto')
 
-def test_peaks_mkv_memory_usage():
+def test_peaks_mkv_memory_usage() -> None:
     """Test that peaks.mkv doesn't cause excessive memory usage and has proper GOP detection."""
     # Download peaks.mkv using cached_download utility
     url = "https://raw.githubusercontent.com/skeskinen/media-test-data/refs/heads/main/peaks.mkv"
@@ -201,7 +201,7 @@ def test_peaks_mkv_memory_usage():
     peak_memory = initial_memory
     stop_monitoring = False
 
-    def monitor_thread():
+    def monitor_thread() -> None:
         nonlocal peak_memory
         while not stop_monitoring:
             current_memory = process.memory_info().rss
@@ -249,112 +249,112 @@ def test_peaks_mkv_memory_usage():
     print(f"Peak memory increase: {memory_increase / (1024*1024):.1f} MB")
     assert memory_increase < max_allowed_memory, f"Memory usage too high: {memory_increase / (1024*1024):.1f} MB"
 
-def test_h264_24_fps_long():
+def test_h264_24_fps_long() -> None:
     filename = 'long_h264.mkv'
     # 15 mins
     create_test_video(filename, 60 * 15, 'h264', 'yuv420p', 24, (32, 18))
     output_path = test_h264_24_fps_long.__name__ + '.mkv'
     run_smartcut_test(filename, output_path, n_cuts=3)
 
-def test_h264_1080p():
+def test_h264_1080p() -> None:
     filename = '1080p_h264.mkv'
     create_test_video(filename, 15, 'h264', 'yuv420p', 30, (1920, 1080))
     output_path = test_h264_1080p.__name__ + '.mkv'
     run_smartcut_test(filename, output_path, n_cuts=3)
 
-def test_h264_profile_baseline():
+def test_h264_profile_baseline() -> None:
     filename = 'h264_baseline.mkv'
     create_test_video(filename, 15, 'h264', 'yuv420p', 30, (32, 18), profile='baseline')
     output_path = test_h264_profile_baseline.__name__ + '.mkv'
     run_smartcut_test(filename, output_path, n_cuts=3)
 
-def test_h264_profile_main():
+def test_h264_profile_main() -> None:
     filename = 'h264_main.mkv'
     create_test_video(filename, 15, 'h264', 'yuv420p', 30, (32, 18), profile='main')
     output_path = test_h264_profile_main.__name__ + '.mkv'
     run_smartcut_test(filename, output_path, n_cuts=3)
 
-def test_h264_profile_high():
+def test_h264_profile_high() -> None:
     filename = 'h264_high.mkv'
     create_test_video(filename, 15, 'h264', 'yuv420p', 30, (32, 18), profile='high')
     output_path = test_h264_profile_high.__name__ + '.mkv'
     run_smartcut_test(filename, output_path, n_cuts=3)
 
-def test_h264_profile_high10():
+def test_h264_profile_high10() -> None:
     filename = 'h264_high10.mkv'
     create_test_video(filename, 15, 'h264', 'yuv420p10le', 30, (32, 18), profile='high10')
     output_path = test_h264_profile_high10.__name__ + '.mkv'
     run_smartcut_test(filename, output_path, n_cuts=3)
 
-def test_h264_profile_high422():
+def test_h264_profile_high422() -> None:
     filename = 'h264_high422.mkv'
     create_test_video(filename, 15, 'h264', 'yuv422p', 30, (32, 18), profile='high422')
     output_path = test_h264_profile_high422.__name__ + '.mkv'
     run_smartcut_test(filename, output_path, n_cuts=3)
 
-def test_h264_profile_high444():
+def test_h264_profile_high444() -> None:
     filename = 'h264_high444.mkv'
     create_test_video(filename, 15, 'h264', 'yuv444p', 30, (32, 18), profile='high444')
     output_path = test_h264_profile_high444.__name__ + '.mkv'
     run_smartcut_test(filename, output_path, n_cuts=3)
 
-def test_mp4_cut_on_keyframe():
+def test_mp4_cut_on_keyframe() -> None:
     filename = 'basic.mp4'
     create_test_video(filename, 30, 'h264', 'yuv420p', 30, (32, 18))
     output_path = test_mp4_cut_on_keyframe.__name__ + '.mp4'
     run_cut_on_keyframes_test(filename, output_path)
 
-def test_mp4_smart_cut():
+def test_mp4_smart_cut() -> None:
     filename = 'basic.mp4'
     create_test_video(filename, 30, 'h264', 'yuv420p', 30, (32, 18))
     output_path = test_mp4_smart_cut.__name__ + '.mp4'
     for c in [1, 2, 3, 10]:
         run_smartcut_test(filename, output_path, c)
 
-def test_mp4_to_mkv_smart_cut():
+def test_mp4_to_mkv_smart_cut() -> None:
     filename = 'basic.mp4'
     create_test_video(filename, 30, 'h264', 'yuv420p', 30, (32, 18))
     output_path = test_mp4_to_mkv_smart_cut.__name__ + '.mkv'
     for c in [1, 2, 3, 10]:
         run_smartcut_test(filename, output_path, c)
 
-def test_mkv_to_mp4_smart_cut():
+def test_mkv_to_mp4_smart_cut() -> None:
     create_test_video(short_h264_path, 30, 'h264', 'yuv420p', 30, (32, 18))
     output_path = test_mkv_to_mp4_smart_cut.__name__ + '.mp4'
     for c in [1, 2, 3, 10]:
         run_smartcut_test(short_h264_path, output_path, c)
 
-def test_mp4_h265_smart_cut():
+def test_mp4_h265_smart_cut() -> None:
     filename = 'h265.mp4'
     create_test_video(filename, 30, 'hevc', 'yuv420p', 30, (256, 144))
     output_path = test_mp4_h265_smart_cut.__name__ + '.mp4'
     for c in [1, 2, 3, 10]:
         run_smartcut_test(filename, output_path, c)
 
-def test_mpg_smart_cut():
+def test_mpg_smart_cut() -> None:
     filename = cached_download('https://filesamples.com/samples/video/mpg/sample_640x360.mpg', 'mpeg640x360.mpg')
     output_path = test_mpg_smart_cut.__name__ + '.mpg'
     for c in [1, 2, 3, 10]:
         run_smartcut_test(filename, output_path, c)
 
-def test_mpg_cut_on_keyframes():
+def test_mpg_cut_on_keyframes() -> None:
     filename = cached_download('https://filesamples.com/samples/video/mpg/sample_640x360.mpg', 'mpeg640x360.mpg')
     output_path = test_mpg_cut_on_keyframes.__name__ + '.mpg'
     run_cut_on_keyframes_test(filename, output_path)
 
-def test_m2ts_mpeg2_smart_cut():
+def test_m2ts_mpeg2_smart_cut() -> None:
     filename = cached_download('https://filesamples.com/samples/video/m2ts/sample_960x540.m2ts', 'm2ts960x540.m2ts')
     output_path = test_m2ts_mpeg2_smart_cut.__name__ + '.m2ts'
     for c in [1, 2, 3, 10]:
         run_smartcut_test(filename, output_path, c)
 
-def test_m2ts_h264_smart_cut():
+def test_m2ts_h264_smart_cut() -> None:
     filename = cached_download('https://www.dwsamplefiles.com/?dl_id=311', 'm2ts_h264_636x360.m2ts')
     output_path = test_m2ts_h264_smart_cut.__name__ + '.m2ts'
     for c in [1, 2, 3, 10]:
         run_smartcut_test(filename, output_path, c)
 
-def test_ts_smart_cut():
+def test_ts_smart_cut() -> None:
     filename = cached_download('https://filesamples.com/samples/video/ts/sample_1280x720.ts', 'mpeg2.ts')
     output_path = test_ts_smart_cut.__name__ + '.ts'
     for c in [1, 2]:
@@ -364,7 +364,7 @@ def test_ts_smart_cut():
 # def test_vertical_transform():
 #     pass
 
-def test_video_recode_codec_override():
+def test_video_recode_codec_override() -> None:
     input_path = 'video_settings_in.mkv'
     file_duration = 10
     n_cuts = 5
@@ -438,7 +438,7 @@ def test_video_recode_codec_override():
 
     # assert os.path.getsize(output_path_b) > os.path.getsize(output_path_a)
 
-def test_vorbis_passthru():
+def test_vorbis_passthru() -> None:
     filename = 'basic.ogg'
     freq = 440
 
@@ -488,7 +488,7 @@ def test_vorbis_passthru():
     # Check PTS timestamps for suffix case
     check_audio_pts_timestamps(suffix_container, 15.0, "Suffix (15-30s)")
 
-def test_mp3_passthru():
+def test_mp3_passthru() -> None:
     filename = 'basic.mp3'
     freq = 440
 
@@ -540,7 +540,7 @@ def test_mp3_passthru():
     # Check PTS timestamps for suffix case
     check_audio_pts_timestamps(suffix_container, 15.0, "Suffix (15-30s)")
 
-def test_mkv_with_video_and_audio_passthru():
+def test_mkv_with_video_and_audio_passthru() -> None:
     file_duration = 30
 
     final_input = 'video_and_two_audio.mkv'
@@ -571,7 +571,7 @@ def test_mkv_with_video_and_audio_passthru():
     assert len(result_container.audio_tracks) == 1
     compare_tracks(source_container.audio_tracks[0], result_container.audio_tracks[0])
 
-def test_vp9_smart_cut():
+def test_vp9_smart_cut() -> None:
     filename = 'vp9.mkv'
 
     create_test_video(filename, 30, 'vp9', 'yuv420p', 30, (256, 144))
@@ -579,7 +579,7 @@ def test_vp9_smart_cut():
     for c in [2, 6]:
         run_smartcut_test(filename, output_path, n_cuts=c)
 
-def test_vp9_profile_1():
+def test_vp9_profile_1() -> None:
     filename = 'vp9_p1_422.mkv'
 
     create_test_video(filename, 30, 'vp9', 'yuv422p', 30, (256, 144), profile='1')
@@ -587,7 +587,7 @@ def test_vp9_profile_1():
     for c in [2, 6]:
         run_smartcut_test(filename, output_path, n_cuts=c)
 
-def test_av1_smart_cut():
+def test_av1_smart_cut() -> None:
     filename = 'av1.mkv'
 
     create_test_video(filename, 30, 'av1', 'yuv420p', 30, (256, 144))
@@ -595,7 +595,7 @@ def test_av1_smart_cut():
     for c in [1, 2]:
         run_smartcut_test(filename, output_path, n_cuts=c)
 
-def test_avi_mpeg4_smart_cut():
+def test_avi_mpeg4_smart_cut() -> None:
     filename = 'mpeg4.avi'
 
     create_test_video(filename, 30, 'mpeg4', 'yuv420p', 30, (32, 18))
@@ -603,35 +603,35 @@ def test_avi_mpeg4_smart_cut():
     for c in [2, 5, 10]:
         run_smartcut_test(filename, output_path, n_cuts=c)
 
-def test_avi_mjpeg_smart_cut():
+def test_avi_mjpeg_smart_cut() -> None:
     filename = 'mjpeg.avi'
     create_test_video(filename, 30, 'mjpeg', 'yuvj420p', 30, (32, 18))
     output_path = test_avi_mjpeg_smart_cut.__name__ + '.avi'
     for c in [2, 5, 10]:
         run_smartcut_test(filename, output_path, n_cuts=c)
 
-def test_avi_h263_smart_cut():
+def test_avi_h263_smart_cut() -> None:
     filename = 'h263.avi'
     create_test_video(filename, 30, 'h263', 'yuv420p', 30, (128, 96))
     output_path = test_avi_h263_smart_cut.__name__ + '.avi'
     for c in [2, 5, 10]:
         run_smartcut_test(filename, output_path, n_cuts=c)
 
-def test_avi_to_mkv_smart_cut():
+def test_avi_to_mkv_smart_cut() -> None:
     filename = 'h264_input.avi'
     create_test_video(filename, 30, 'h264', 'yuv420p', 30, (128, 96))
     output_path = test_avi_to_mkv_smart_cut.__name__ + '.mkv'
     for c in [2, 5, 10]:
         run_smartcut_test(filename, output_path, n_cuts=c, pixel_tolerance=50)
 
-def test_flv_smart_cut():
+def test_flv_smart_cut() -> None:
     filename = 'flv.flv'
     create_test_video(filename, 30, 'flv', 'yuv420p', 30, (32, 16))
     output_path = test_flv_smart_cut.__name__ + filename
     for c in [2, 5, 10]:
         run_smartcut_test(filename, output_path, n_cuts=c)
 
-def test_mov_smart_cut():
+def test_mov_smart_cut() -> None:
     filename = 'h264.mov'
     create_test_video(filename, 30, 'h264', 'yuv420p', 30, (32, 16))
     output_path = test_mov_smart_cut.__name__ + filename
@@ -644,7 +644,7 @@ def test_mov_smart_cut():
     for c in [2, 5]:
         run_smartcut_test(filename, output_path, n_cuts=c)
 
-def test_wmv_smart_cut():
+def test_wmv_smart_cut() -> None:
     filename = 'mpeg4.wmv'
     create_test_video(filename, 30, 'mpeg4', 'yuv420p', 30, (32, 16))
     output_path = test_wmv_smart_cut.__name__ + filename
@@ -668,21 +668,21 @@ def test_wmv_smart_cut():
     for c in [2, 3]:
         run_smartcut_test(filename, output_path, n_cuts=c, pixel_tolerance=50)
 
-def test_night_sky():
+def test_night_sky() -> None:
     os.environ["PYAV_TESTDATA_DIR"] = 'pyav_datasets'
     filename = av_datasets.curated("pexels/time-lapse-video-of-night-sky-857195.mp4")
     output_path = test_night_sky.__name__ + '.mp4'
     for c in [1, 2, 3]:
         run_smartcut_test(filename, output_path, n_cuts=c)
 
-def test_night_sky_to_mkv():
+def test_night_sky_to_mkv() -> None:
     os.environ["PYAV_TESTDATA_DIR"] = 'pyav_datasets'
     filename = av_datasets.curated("pexels/time-lapse-video-of-night-sky-857195.mp4")
     output_path = test_night_sky_to_mkv.__name__ + '.mkv'
     for c in [1, 2, 3]:
         run_smartcut_test(filename, output_path, n_cuts=c)
 
-def test_sunset():
+def test_sunset() -> None:
     os.environ["PYAV_TESTDATA_DIR"] = 'pyav_datasets'
     filename = av_datasets.curated("pexels/time-lapse-video-of-sunset-by-the-sea-854400.mp4")
     output_path = test_sunset.__name__ + '.mp4'
@@ -690,7 +690,7 @@ def test_sunset():
     for c in [1, 2, 3]:
         run_smartcut_test(filename, output_path, n_cuts=c, video_settings=video_settings)
 
-def test_seeking():
+def test_seeking() -> None:
     in_file = "seek_in.mkv"
     ref_file = "seek_ref.mkv"
     create_test_video(in_file, 600, 'h264', 'yuv420p', 30, (32, 18))
@@ -709,65 +709,65 @@ def test_seeking():
 
 # This tests cutting of interlaced video and it fails. I don't see a way to make it work.
 # Therefore interlacing is unsupported, probably forever. Leaving the test here for future reference.
-def test_fate_interlaced_crop():
+def test_fate_interlaced_crop() -> None:
     os.environ["PYAV_TESTDATA_DIR"] = 'pyav_datasets'
     filename = av_datasets.fate("h264/interlaced_crop.mp4")
     output_path = test_fate_interlaced_crop.__name__ + '.mp4'
     for c in [1, 2, 3]:
         run_smartcut_test(filename, output_path, n_cuts=c)
 
-def test_broken_ref_vid():
+def test_broken_ref_vid() -> None:
     # os.environ["PYAV_TESTDATA_DIR"] = 'pyav_datasets'
     filename = '../ref_videos/remove_mistakes_short.mkv'
     output_path = test_broken_ref_vid.__name__ + '.mkv'
     for c in [1, 2, 3]:
         run_smartcut_test(filename, output_path, n_cuts=c)
 
-def test_manual():
+def test_manual() -> None:
     seed_all(1235)
     test_vorbis_passthru()
 
 # Real-world video tests using publicly available videos
 
-def test_google_bigbuckbunny():
+def test_google_bigbuckbunny() -> None:
     """Test with Google's hosted Big Buck Bunny H.264 video (using partial segments)"""
     filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4', 'google_bigbuckbunny.mp4')
     output_base = test_google_bigbuckbunny.__name__
     run_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=4, audio_export_info='auto')
 
-def test_google_elephantsdream():
+def test_google_elephantsdream() -> None:
     """Test with Google's hosted Elephant's Dream H.264 video (using partial segments)"""
     filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4', 'google_elephantsdream.mp4')
     output_base = test_google_elephantsdream.__name__
     run_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=4, audio_export_info='auto')
 
-def test_google_forbiggerblaze():
+def test_google_forbiggerblaze() -> None:
     """Test with Google's hosted ForBiggerBlazes H.264 video (using partial segments)"""
     filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4', 'google_forbiggerblaze.mp4')
     output_path = test_google_forbiggerblaze.__name__ + '.mp4'
     for c in [1, 2, 3]:
         run_smartcut_test(filename, output_path, n_cuts=c)
 
-def test_google_forbiggeresc():
+def test_google_forbiggeresc() -> None:
     """Test with Google's hosted ForBiggerEscapes H.264 video (using partial segments)"""
     filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4', 'google_forbiggeresc.mp4')
     output_path = test_google_forbiggerblaze.__name__ + '.mp4'
     for c in [1, 2, 3]:
         run_smartcut_test(filename, output_path, n_cuts=c)
 
-def test_google_subaru():
+def test_google_subaru() -> None:
     """Test with Google's hosted Subaru Outback commercial H.264 video (using partial segments)"""
     filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/SubaruOutbackOnStreetAndDirt.mp4', 'google_subaru.mp4')
     output_base = test_google_subaru.__name__
     run_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=4, audio_export_info='auto')
 
-def test_google_tears_of_steel():
+def test_google_tears_of_steel() -> None:
     """Test with Google's hosted Tears of Steel H.264 video (using partial segments)"""
     filename = cached_download('http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4', 'google_tears_of_steel.mp4')
     output_base = test_google_tears_of_steel.__name__
     run_partial_smart_cut(filename, output_base, segment_duration=15, n_segments=4, audio_export_info='auto', pixel_tolerance=30)
 
-def test_libde265_tears_of_steel_h265():
+def test_libde265_tears_of_steel_h265() -> None:
     """Test Tears of Steel (HEVC) from libde265 bitstreams using partial segments.
 
     Downloads a long HEVC MKV sample and validates smart cut against a full
@@ -788,7 +788,7 @@ def test_libde265_tears_of_steel_h265():
         recode_codec_override='h264'
     )
 
-def test_h264_non_idr_keyframes():
+def test_h264_non_idr_keyframes() -> None:
     """
     Test that H.264 non-IDR I-frame issues are properly handled.
 
@@ -826,7 +826,7 @@ def test_h264_non_idr_keyframes():
     # Test video playback - this should work after NAL filtering is implemented
     check_videos_equal_segment(source, result, 16.5, 4, pixel_tolerance=20)
 
-def test_ts_h264_to_mp4_cut_on_keyframes():
+def test_ts_h264_to_mp4_cut_on_keyframes() -> None:
     """
     Verify TS -> MP4 remux works when cutting on keyframes only.
 
@@ -876,7 +876,7 @@ def test_ts_h264_to_mp4_cut_on_keyframes():
     assert result_video_stream.codec_context.codec_tag == 'avc1', "MP4 remux should use avc1 codec tag"
 
 
-def test_ts_h264_to_mp4_smart_cut():
+def test_ts_h264_to_mp4_smart_cut() -> None:
     """
     Verify converting H.264 in MPEG-TS to MP4 works.
 
@@ -942,7 +942,7 @@ def test_ts_h264_to_mp4_smart_cut():
     check_videos_equal(smartcut_container, recode_container, pixel_tolerance=40)
 
 
-def test_ts_h265_to_mp4_smart_cut():
+def test_ts_h265_to_mp4_smart_cut() -> None:
     """Verify converting H.265 in MPEG-TS to MP4 works through the smart-cut path."""
     ts_input = get_testvideos_jellyfish_h265_ts()
 
@@ -990,7 +990,7 @@ def test_ts_h265_to_mp4_smart_cut():
     check_videos_equal(smartcut_container, recode_container, pixel_tolerance=80, allow_failed_frames=2)
 
 
-def test_ts_h264_to_mkv_smart_cut():
+def test_ts_h264_to_mkv_smart_cut() -> None:
     """
     Verify converting H.264 in MPEG-TS to MKV works using the smart-cut pipeline.
 
@@ -1040,7 +1040,7 @@ def test_ts_h264_to_mkv_smart_cut():
     recode_container = MediaContainer(recode_output)
     check_videos_equal(smartcut_container, recode_container, pixel_tolerance=40)
 
-def test_h264_non_idr_keyframes_annexb():
+def test_h264_non_idr_keyframes_annexb() -> None:
     """
     Test that H.264 non-IDR I-frame issues are properly handled in Annex B format.
 
@@ -1079,7 +1079,7 @@ def test_h264_non_idr_keyframes_annexb():
     # Test video playback - this should work after NAL filtering is implemented
     check_videos_equal_segment(source, result, 16.5, 4, pixel_tolerance=20)
 
-def test_testvideos_bigbuckbunny_h264():
+def test_testvideos_bigbuckbunny_h264() -> None:
     """Test with test-videos.co.uk Big Buck Bunny H.264"""
     filename = cached_download('https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4', 'testvideos_bbb_h264.mp4')
     output_path = test_testvideos_bigbuckbunny_h264.__name__ + '.mp4'
@@ -1087,7 +1087,7 @@ def test_testvideos_bigbuckbunny_h264():
     for c in [1, 2]:
         run_smartcut_test(filename, output_path, n_cuts=c, video_settings=video_settings, pixel_tolerance=60)
 
-def test_testvideos_bigbuckbunny_h265():
+def test_testvideos_bigbuckbunny_h265() -> None:
     """Test with test-videos.co.uk Big Buck Bunny H.265/HEVC"""
     filename = cached_download('https://test-videos.co.uk/vids/bigbuckbunny/mp4/h265/360/Big_Buck_Bunny_360_10s_1MB.mp4', 'testvideos_bbb_h265.mp4')
     output_path = test_testvideos_bigbuckbunny_h265.__name__ + '.mp4'
@@ -1095,7 +1095,7 @@ def test_testvideos_bigbuckbunny_h265():
     for c in [1, 2]:
         run_smartcut_test(filename, output_path, n_cuts=c, video_settings=video_settings, pixel_tolerance=60)
 
-def test_testvideos_bigbuckbunny_vp9():
+def test_testvideos_bigbuckbunny_vp9() -> None:
     """Test with test-videos.co.uk Big Buck Bunny VP9"""
     filename = cached_download('https://test-videos.co.uk/vids/bigbuckbunny/webm/vp9/360/Big_Buck_Bunny_360_10s_1MB.webm', 'testvideos_bbb_vp9.webm')
     output_path = test_testvideos_bigbuckbunny_vp9.__name__ + '.webm'
@@ -1103,7 +1103,7 @@ def test_testvideos_bigbuckbunny_vp9():
     for c in [1]:
         run_smartcut_test(filename, output_path, n_cuts=c, video_settings=video_settings, pixel_tolerance=60)
 
-def test_testvideos_jellyfish_h264():
+def test_testvideos_jellyfish_h264() -> None:
     """Test with test-videos.co.uk Jellyfish H.264"""
     filename = cached_download('https://test-videos.co.uk/vids/jellyfish/mp4/h264/360/Jellyfish_360_10s_1MB.mp4', 'testvideos_jellyfish_h264.mp4')
     output_path = test_testvideos_jellyfish_h264.__name__ + '.mp4'
@@ -1111,7 +1111,7 @@ def test_testvideos_jellyfish_h264():
     for c in [1, 2]:
         run_smartcut_test(filename, output_path, n_cuts=c, video_settings=video_settings, pixel_tolerance=60)
 
-def test_testvideos_jellyfish_h265():
+def test_testvideos_jellyfish_h265() -> None:
     """Test with test-videos.co.uk Jellyfish H.265"""
     filename = cached_download('https://test-videos.co.uk/vids/jellyfish/mp4/h265/360/Jellyfish_360_10s_1MB.mp4', 'testvideos_jellyfish_h265.mp4')
     output_path = test_testvideos_jellyfish_h265.__name__ + '.mp4'
@@ -1119,7 +1119,7 @@ def test_testvideos_jellyfish_h265():
     for c in [1, 2]:
         run_smartcut_test(filename, output_path, n_cuts=c, video_settings=video_settings, pixel_tolerance=80, allow_failed_frames=10)
 
-def test_subtitle_disposition_preservation():
+def test_subtitle_disposition_preservation() -> None:
     """Test that subtitle disposition flags (especially forced) are preserved during smart_cut"""
     file_duration = 10
     input_path = make_video_with_forced_subtitle('test_subtitle_forced.mkv', file_duration)
@@ -1142,7 +1142,7 @@ def test_subtitle_disposition_preservation():
     # Verify disposition preservation
     check_stream_dispositions(input_path, output_path)
 
-def test_multiple_language_subtitles():
+def test_multiple_language_subtitles() -> None:
     """Test that multiple non-forced subtitle tracks with different languages are preserved"""
     file_duration = 10
 
@@ -1230,7 +1230,7 @@ Loppu
     check_stream_dispositions(input_path, output_path)
 
 
-def test_mkv_attachment_preservation():
+def test_mkv_attachment_preservation() -> None:
     """Verify that attachment streams are preserved during smart_cut operations."""
     input_path = make_video_with_attachment('test_mkv_with_attachment.mkv')
     output_path = test_mkv_attachment_preservation.__name__ + '.mkv'
@@ -1247,7 +1247,7 @@ def test_mkv_attachment_preservation():
     assert input_attachments == output_attachments, "Attachment streams metadata mismatch after smart_cut"
 
 
-def get_test_categories():
+def get_test_categories() -> dict[str, list]:
     """
     Returns a dictionary of test categories.
     """
@@ -1381,7 +1381,7 @@ def get_test_categories():
 
     return test_categories
 
-def run_tests(category=None, single_test=None, flaky_runs=None, base_seed=None):
+def run_tests(category: str | None = None, single_test: str | None = None, flaky_runs: int | None = None, base_seed: int | None = None) -> None:
     """
     Runs tests from specified category, single test, or all tests.
     """

@@ -158,10 +158,10 @@ class MediaContainer:
         for t in self.audio_tracks:
             t.frame_times = np.array(list(map(lambda p: p.pts, t.packets))) * t.av_stream.time_base
 
-    def close(self):
+    def close(self) -> None:
         self.av_container.close()
 
-    def get_next_frame_time(self, t):
+    def get_next_frame_time(self, t: Fraction) -> Fraction:
         t += self.start_time
         idx = np.searchsorted(self.video_frame_times, t)
         if idx == len(self.video_frame_times):

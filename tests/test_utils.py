@@ -55,7 +55,7 @@ def cached_download(url: str, name: str) -> str:
     return name
 
 
-def color_at_time(ts):
+def color_at_time(ts: float) -> np.ndarray:
     c = np.empty((3,))
     c[0] = 0.5 + 0.5 * np.sin(2 * np.pi * (0 / 3 + ts / 2.))
     c[1] = 0.5 + 0.5 * np.sin(2 * np.pi * (1 / 3 + ts / 2.))
@@ -67,10 +67,10 @@ def color_at_time(ts):
     return c
 
 
-def create_test_video(path, target_duration, codec, pixel_format, fps, resolution, x265_options=None, profile=None):
+def create_test_video(path: str, target_duration: int | float, codec: str, pixel_format: str, fps: int, resolution: tuple[int, int], x265_options: list[str] | None = None, profile: str | None = None) -> None:
     if os.path.exists(path):
         return
-    total_frames = target_duration * fps
+    total_frames = int(target_duration * fps)
 
     container = av_open(path, mode="w")
 
@@ -100,7 +100,7 @@ def create_test_video(path, target_duration, codec, pixel_format, fps, resolutio
 
     container.close()
 
-def av_write_ogg(path, wave, sample_rate):
+def av_write_ogg(path: str, wave: np.ndarray, sample_rate: int) -> None:
     with av_open(path, 'w') as out:
         stream = cast(AudioStream, out.add_stream('libvorbis', sample_rate, layout='mono'))
         wave = wave.astype(np.float32)
@@ -114,7 +114,7 @@ def av_write_ogg(path, wave, sample_rate):
         for p in packets:
             out.mux(p)
 
-def generate_sine_wave(duration, path, frequency=440, sample_rate=44100):
+def generate_sine_wave(duration: float, path: str, frequency: int = 440, sample_rate: int = 44100) -> None:
     if os.path.exists(path):
         return
 
@@ -126,7 +126,7 @@ def generate_sine_wave(duration, path, frequency=440, sample_rate=44100):
     else:
         sf.write(path, wave, sample_rate)
 
-def generate_double_sine_wave(duration, path, frequency_0=440, frequency_1=440, sample_rate=44100):
+def generate_double_sine_wave(duration: float, path: str, frequency_0: int = 440, frequency_1: int = 440, sample_rate: int = 44100) -> None:
     if os.path.exists(path):
         return
     t = np.linspace(0, duration, int(duration * sample_rate), endpoint=False)
@@ -199,7 +199,7 @@ def read_track_audio(track: AudioTrack) -> tuple[np.ndarray, int]:
     audio = np.concatenate(decoded, axis=1)
     return audio, sample_rate or fallback_rate
 
-def compare_tracks(track_orig: AudioTrack, track_modified: AudioTrack, rms_threshold=0.07):
+def compare_tracks(track_orig: AudioTrack, track_modified: AudioTrack, rms_threshold: float = 0.07) -> None:
     y_orig, _ = read_track_audio(track_orig)
     y_modified, _ = read_track_audio(track_modified)
 
@@ -233,7 +233,7 @@ def compare_tracks(track_orig: AudioTrack, track_modified: AudioTrack, rms_thres
 
     assert rms < rms_threshold, f"Audio contents have changed: {rms} (rms error)"
 
-def check_audio_pts_timestamps(container: MediaContainer, max_expected_duration: float, test_name: str = ""):
+def check_audio_pts_timestamps(container: MediaContainer, max_expected_duration: float, test_name: str = "") -> None:
     """
     Validate that audio PTS timestamps start near 0 and end near the expected duration.
 
@@ -270,7 +270,7 @@ def check_audio_pts_timestamps(container: MediaContainer, max_expected_duration:
     assert last_pts_time < max_expected_duration + 0.5, \
         f"{prefix}Last packet PTS should be near {max_expected_duration}s, got {last_pts_time:.6f}s (PTS={last_packet.pts})"
 
-def _median_fraction(values):
+def _median_fraction(values: list[Fraction]) -> Fraction | None:
     if not values:
         return None
     s = sorted(values)
@@ -281,7 +281,7 @@ def _median_fraction(values):
     return (s[mid - 1] + s[mid]) / 2
 
 
-def _infer_frame_count_anomaly(source_times, result_times):
+def _infer_frame_count_anomaly(source_times: list[Fraction], result_times: list[Fraction]) -> dict[str, Any] | None:
     """Find the largest output gap and provide nearby PTS context.
 
     Returns dict with:
@@ -309,11 +309,11 @@ def _infer_frame_count_anomaly(source_times, result_times):
         r_diffs = [result_times[i + 1] - result_times[i] for i in range(n_r - 1)]
         if not r_diffs:
             return None
-        j = int(np.argmax(r_diffs))
+        j = int(np.argmax(r_diffs))  # type: ignore[arg-type]
         gap = r_diffs[j]
 
         # Prepare PTS context around the gap in result
-        def _pts_slice(arr, center_left_idx, window=2):
+        def _pts_slice(arr: list[Fraction], center_left_idx: int, window: int = 2) -> list[tuple[int, float | Fraction]]:
             start = max(0, center_left_idx - window)
             end = min(len(arr) - 1, center_left_idx + window + 1)  # inclusive end index for frames
             vals = []
@@ -328,7 +328,7 @@ def _infer_frame_count_anomaly(source_times, result_times):
 
         # Choose a representative time inside the gap and show nearby source PTS
         mid_time = result_times[j] + gap / 2
-        k = int(np.argmin([abs(st - mid_time) for st in source_times]))
+        k = int(np.argmin([abs(st - mid_time) for st in source_times]))  # type: ignore[arg-type]
         # Build symmetric window around k
         src_start = max(0, k - 2)
         src_end = min(len(source_times) - 1, k + 2)
@@ -351,7 +351,7 @@ def _infer_frame_count_anomaly(source_times, result_times):
         return None
 
 
-def check_videos_equal(source_container: MediaContainer, result_container: MediaContainer, pixel_tolerance = 20, allow_failed_frames = 0):
+def check_videos_equal(source_container: MediaContainer, result_container: MediaContainer, pixel_tolerance: int = 20, allow_failed_frames: int = 0) -> None:
     source_stream = source_container.video_stream
     result_stream = result_container.video_stream
     assert source_stream is not None, "Source container is missing a video stream"
@@ -364,7 +364,7 @@ def check_videos_equal(source_container: MediaContainer, result_container: Media
         r = result_container.video_frame_times
         hint = _infer_frame_count_anomaly(list(s), list(r))
         if hint is not None:
-            def _fmt_pts(series):
+            def _fmt_pts(series: list[tuple[int, float | Fraction]]) -> str:
                 return ", ".join([f"{i}:{t:.6f}s" if isinstance(t, float) else f"{i}:{t}" for i, t in series])
 
             gap_note = ''
@@ -433,7 +433,7 @@ def check_videos_equal(source_container: MediaContainer, result_container: Media
             if frame_failed:
                 failed_frames += 1
 
-def check_videos_equal_segment(source_container: MediaContainer, result_container: MediaContainer, start_time: float | Fraction = 0.0, duration: float | None = None, pixel_tolerance=20):
+def check_videos_equal_segment(source_container: MediaContainer, result_container: MediaContainer, start_time: float | Fraction = 0.0, duration: float | None = None, pixel_tolerance: int = 20) -> None:
     """Fast pixel testing of small video segments instead of entire video"""
     if duration is None:
         duration = min(10, float(source_container.duration))  # Test max 10 seconds
@@ -489,7 +489,7 @@ def check_videos_equal_segment(source_container: MediaContainer, result_containe
             if frames_checked >= 100:  # Limit frames for speed
                 break
 
-def run_cut_on_keyframes_test(input_path, output_path):
+def run_cut_on_keyframes_test(input_path: str, output_path: str) -> None:
     source = MediaContainer(input_path)
     cutpoints = [*source.gop_start_times_pts_s, source.duration]
 
@@ -507,7 +507,7 @@ def run_cut_on_keyframes_test(input_path, output_path):
     result_container = MediaContainer(output_path)
     check_videos_equal(source, result_container)
 
-def run_smartcut_test(input_path: str, output_path, n_cuts, audio_export_info = None, video_settings = None, pixel_tolerance = 20, allow_failed_frames = 0):
+def run_smartcut_test(input_path: str, output_path: str, n_cuts: int, audio_export_info: AudioExportInfo | str | None = None, video_settings: VideoSettings | None = None, pixel_tolerance: int = 20, allow_failed_frames: int = 0) -> None:
     if os.path.splitext(input_path)[1] in ['.mp3', '.ogg']:
         return run_audiofile_smartcut(input_path, output_path, n_cuts)
     source = MediaContainer(input_path)
@@ -521,13 +521,15 @@ def run_smartcut_test(input_path: str, output_path, n_cuts, audio_export_info = 
         s = AudioExportSettings(codec='passthru')
         audio_export_info = AudioExportInfo(output_tracks=[s] * len(source.audio_tracks))
 
+    # Type narrowing: after the check above, audio_export_info is AudioExportInfo | None
+    assert audio_export_info is None or isinstance(audio_export_info, AudioExportInfo)
     smart_cut(source, segments, output_path,
         audio_export_info=audio_export_info, video_settings=video_settings, log_level='warning')
 
     result_container = MediaContainer(output_path)
     check_videos_equal(source, result_container, pixel_tolerance=pixel_tolerance, allow_failed_frames=allow_failed_frames)
 
-def run_audiofile_smartcut(input_path, output_path, n_cuts):
+def run_audiofile_smartcut(input_path: str, output_path: str, n_cuts: int) -> None:
     source_container = MediaContainer(input_path)
     duration = source_container.duration
     cutpoints = np.arange(duration*1000)[1:-1]
@@ -545,7 +547,17 @@ def run_audiofile_smartcut(input_path, output_path, n_cuts):
     compare_tracks(source_container.audio_tracks[0], output_container.audio_tracks[0])
 
 
-def run_partial_smart_cut(input_path: str, output_base_name: str, segment_duration=15, n_segments=2, audio_export_info=None, video_settings=None, pixel_tolerance=20, allow_failed_frames = 0, recode_codec_override: str | None = None):
+def run_partial_smart_cut(
+    input_path: str,
+    output_base_name: str,
+    segment_duration: int = 15,
+    n_segments: int = 2,
+    audio_export_info: AudioExportInfo | str | None = None,
+    video_settings: VideoSettings | None = None,
+    pixel_tolerance: int = 20,
+    allow_failed_frames: int = 0,
+    recode_codec_override: str | None = None,
+) -> None:
     """
     Test smart cutting on short segments from random positions in long videos.
 
@@ -590,6 +602,9 @@ def run_partial_smart_cut(input_path: str, output_base_name: str, segment_durati
     if audio_export_info == 'auto':
         s = AudioExportSettings(codec='passthru')
         audio_export_info = AudioExportInfo(output_tracks=[s] * len(source.audio_tracks))
+
+    # Type narrowing: after the check above, audio_export_info is AudioExportInfo | None
+    assert audio_export_info is None or isinstance(audio_export_info, AudioExportInfo)
 
     # Select multiple random non-overlapping segments
     segments = []
@@ -668,7 +683,7 @@ def run_partial_smart_cut(input_path: str, output_base_name: str, segment_durati
 
     source.close()
 
-def check_stream_dispositions(source_path, output_path):
+def check_stream_dispositions(source_path: str, output_path: str) -> None:
     """Helper function to verify that stream dispositions are preserved"""
     with av_open(source_path) as source_raw, av_open(output_path) as output_raw:
         source_container = cast(InputContainer, source_raw)
@@ -701,7 +716,7 @@ def check_stream_dispositions(source_path, output_path):
                     f"Subtitle stream {i} forced flag mismatch: source={src_forced}, output={out_forced}"
 
 
-def make_video_and_audio_mkv(path, file_duration):
+def make_video_and_audio_mkv(path: str, file_duration: float) -> None:
 
     audio_file_440 = 'tmp_440.ogg'
     # audio_file_440 = 'tmp_440.aac'
@@ -722,7 +737,7 @@ def make_video_and_audio_mkv(path, file_duration):
         .run(quiet=True)
     )
 
-def make_video_with_subtitles(path, file_duration, subtitle_configs):
+def make_video_with_subtitles(path: str, file_duration: float, subtitle_configs: list[dict[str, str]]) -> str:
     """
     Create a video with multiple subtitle tracks.
 
@@ -776,9 +791,9 @@ def make_video_with_subtitles(path, file_duration, subtitle_configs):
 
     return path
 
-def make_video_with_attachment(path, file_duration=3,
-                               attachment_filename='smartcut_attachment.txt',
-                               attachment_payload=b'SmartCutAttachmentTest'):
+def make_video_with_attachment(path: str, file_duration: int = 3,
+                               attachment_filename: str = 'smartcut_attachment.txt',
+                               attachment_payload: bytes = b'SmartCutAttachmentTest') -> str:
     """Create a small MKV file that carries a single attachment stream."""
     if os.path.exists(path):
         return path
@@ -806,7 +821,7 @@ def make_video_with_attachment(path, file_duration=3,
 
     return path
 
-def get_attachment_stream_metadata(path):
+def get_attachment_stream_metadata(path: str) -> list[dict[str, Any]]:
     """Extract attachment metadata and raw bytes using PyAV.
 
     Returns a list of dicts with keys:
@@ -839,7 +854,7 @@ def get_attachment_stream_metadata(path):
     attachments.sort(key=lambda info: info.get('filename') or '')
     return attachments
 
-def make_video_with_forced_subtitle(path, file_duration):
+def make_video_with_forced_subtitle(path: str, file_duration: float) -> str:
     """Legacy function - creates video with single forced subtitle for backward compatibility"""
     subtitle_content = """1
 00:00:01,000 --> 00:00:03,000
@@ -863,7 +878,7 @@ Final entry
 
     return make_video_with_subtitles(path, file_duration, subtitle_configs)
 
-def get_tears_of_steel_annexb():
+def get_tears_of_steel_annexb() -> str:
     """
     Get Tears of Steel in Annex B format (TS container) for testing H.264 NAL parsing.
     Converts from MP4 to TS to force Annex B NAL format.
@@ -887,7 +902,7 @@ def get_tears_of_steel_annexb():
     return ts_filename
 
 
-def get_testvideos_jellyfish_h265_ts():
+def get_testvideos_jellyfish_h265_ts() -> str:
     """Fetch Jellyfish HEVC sample and convert it to Annex B in an MPEG-TS container."""
     mp4_filename = cached_download(
         'https://test-videos.co.uk/vids/jellyfish/mp4/h265/360/Jellyfish_360_10s_1MB.mp4',
