@@ -316,7 +316,8 @@ class RecodeAudioCutter:
             )
             self.encoder.sample_rate = sample_rate
             self.encoder.layout = in_layout
-            self.encoder.format = self.track.av_stream.codec_context.format
+            # Use floating point planar format for better fade processing
+            self.encoder.format = 'fltp'
             self.encoder.time_base = in_tb
 
             # Match source bitrate to maintain quality consistency
@@ -338,8 +339,12 @@ class RecodeAudioCutter:
 
         for pkt in self.track.packets[start_pkt_idx:end_pkt_idx]:
             for audio_frame in self.decoder.decode(pkt):
-                # Convert to numpy array
+                # Convert to numpy array (as float32 for better precision)
                 audio_arr = audio_frame.to_ndarray()
+
+                # Ensure audio_arr is float32 for fade processing
+                if audio_arr.dtype != np.float32:
+                    audio_arr = audio_arr.astype(np.float32)
 
                 # Apply fade
                 if cut_segment.fade_info is not None:
@@ -348,8 +353,9 @@ class RecodeAudioCutter:
                         start_sample, end_sample, cut_segment.fade_info
                     )
 
-                # Create new frame from modified array
-                new_frame = av.AudioFrame.from_ndarray(audio_arr, format=audio_frame.format.name, layout=audio_frame.layout.name)
+                # Create new frame from modified array in fltp format
+                layout_name = audio_frame.layout.name if audio_frame.layout is not None else str(in_layout)
+                new_frame = av.AudioFrame.from_ndarray(audio_arr.astype(np.float32), format='fltp', layout=layout_name)
                 new_frame.sample_rate = audio_frame.sample_rate
                 new_frame.pts = int(current_sample - start_sample + self.segment_start_in_output * sample_rate)
 
