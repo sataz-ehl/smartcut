@@ -386,7 +386,8 @@ class RecodeAudioCutter:
                         self.prev_dts = encoded_pkt.dts
                     packets.append(encoded_pkt)
 
-                current_sample += audio_arr.shape[0]
+                # Increment by number of samples (shape[1] for planar format (channels, samples))
+                current_sample += audio_arr.shape[1] if len(audio_arr.shape) > 1 else audio_arr.shape[0]
 
         # Flush encoder after this recoded segment to prevent stale state
         # when mixing recoded and passthrough segments
@@ -508,7 +509,7 @@ class VideoCutter:
         self.decoder = self.in_stream.codec_context
 
         if video_settings.mode == VideoExportMode.RECODE and video_settings.codec_override != 'copy':
-            self.out_stream = cast(VideoStream, output_av_container.add_stream(video_settings.codec_override, rate=self.in_stream.guessed_rate, options={'x265-params': 'log_level=error'}))
+            self.out_stream = cast(VideoStream, output_av_container.add_stream(video_settings.codec_override, rate=self.in_stream.average_rate, options={'x265-params': 'log_level=error'}))
             self.out_stream.width = self.in_stream.width
             self.out_stream.height = self.in_stream.height
             if self.in_stream.sample_aspect_ratio is not None:
@@ -536,7 +537,7 @@ class VideoCutter:
 
             if mapped_codec_name != original_codec_name:
                 # Need to create stream with mapped codec name. Can't use copy from template b/c codec name has changed
-                self.out_stream = cast(VideoStream, output_av_container.add_stream(mapped_codec_name, rate=self.in_stream.guessed_rate))
+                self.out_stream = cast(VideoStream, output_av_container.add_stream(mapped_codec_name, rate=self.in_stream.average_rate))
                 self.out_stream.width = self.in_stream.width
                 self.out_stream.height = self.in_stream.height
                 if self.in_stream.sample_aspect_ratio is not None:
@@ -891,6 +892,15 @@ class VideoCutter:
             result_packets.extend(self.enc_codec.encode(None))
             # Reset encoder to None so it can be recreated for the next segment
             self.enc_codec = None
+
+        # Fix packet durations for frames that have duration=0 (common for last frame in flushed segment)
+        # Calculate expected frame duration from the input stream's frame rate
+        # Formula: duration_in_timebase_units = 1 / (fps * timebase) = (1/timebase) / fps
+        if result_packets and self.in_stream.average_rate is not None:
+            expected_duration = int(Fraction(1) / (self.in_stream.average_rate * self.out_time_base))
+            for p in result_packets:
+                if p.duration == 0 or p.duration is None:
+                    p.duration = expected_duration
 
         if self.codec_name == 'mpeg2video':
             for p in result_packets:
