@@ -803,7 +803,17 @@ class VideoCutter:
 
             if muxing_codec.rate is not None:
                 enc_codec.rate = muxing_codec.rate
-            enc_codec.options.update(self.encoding_options)
+
+            # Use bitrate mode if source has bitrate, otherwise use CRF mode
+            # Don't mix both as they can conflict
+            if muxing_codec.bit_rate is not None:
+                # Bitrate mode - match source exactly for consistent quality
+                enc_codec.bit_rate = muxing_codec.bit_rate
+                if muxing_codec.bit_rate_tolerance is not None:
+                    enc_codec.bit_rate_tolerance = muxing_codec.bit_rate_tolerance
+            else:
+                # CRF mode - use quality settings
+                enc_codec.options.update(self.encoding_options)
 
             enc_codec.width = muxing_codec.width
             enc_codec.height = muxing_codec.height
@@ -818,10 +828,6 @@ class VideoCutter:
             #enc_codec.flags = muxing_codec.flags # This was here, but it's a bit sus. Disabling doesn't break any tests
             #enc_codec.flags ^= Flags.global_header # either doesn't help or doesn't work
 
-            if muxing_codec.bit_rate is not None:
-                enc_codec.bit_rate = muxing_codec.bit_rate
-            if muxing_codec.bit_rate_tolerance is not None:
-                enc_codec.bit_rate_tolerance = muxing_codec.bit_rate_tolerance
             enc_codec.codec_tag = muxing_codec.codec_tag
             enc_codec.thread_type = "FRAME"
             self.enc_last_pts = -1
@@ -848,7 +854,10 @@ class VideoCutter:
 
             # Apply fade effects if specified
             if s.fade_info is not None and (s.fade_info.fadein_duration is not None or s.fade_info.fadeout_duration is not None):
-                frame = self._apply_fade_to_frame(frame, frame_abs_time, s.start_time, s.end_time, s.fade_info)
+                # Use original segment boundaries for fade calculation to avoid duplicate fades across GOPs
+                fade_seg_start = s.orig_segment_start if s.orig_segment_start is not None else s.start_time
+                fade_seg_end = s.orig_segment_end if s.orig_segment_end is not None else s.end_time
+                frame = self._apply_fade_to_frame(frame, frame_abs_time, fade_seg_start, fade_seg_end, s.fade_info)
 
             out_tb = self.out_time_base if self.codec_name != 'mpeg2video' else self.enc_codec.time_base
 
@@ -1190,6 +1199,9 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                     # This avoids splitting GOPs and constantly flushing/recreating encoder
                     cut_seg.require_recode = True
                     cut_seg.fade_info = fade_info
+                    # Store original segment boundaries for correct fade calculation
+                    cut_seg.orig_segment_start = orig_seg_start
+                    cut_seg.orig_segment_end = orig_seg_end
                 else:
                     # No overlap with fade regions - passthrough
                     cut_seg.fade_info = None

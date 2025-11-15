@@ -42,3 +42,5 @@ class CutSegment:
     gop_end_dts: int = -1
     gop_index: int = -1
     fade_info: FadeInfo | None = None  # Fade information for this segment
+    orig_segment_start: Fraction | None = None  # Original segment start for fade calculation
+    orig_segment_end: Fraction | None = None  # Original segment end for fade calculation
