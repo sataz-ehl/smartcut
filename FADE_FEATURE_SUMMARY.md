@@ -129,6 +129,30 @@ smartcut input.mp4 output.mp4 --keep 50,60:fadeout
 smartcut input.mp4 output.mp4 --keep 70:fadein:1.5,80:fadeout:2.0
 ```
 
+### Using Keywords and Special Time Formats
+
+The fade syntax supports all of smartcut's time keywords and formats:
+
+```bash
+# Using "start" keyword - fade in from beginning of video
+smartcut input.mp4 output.mp4 --keep start:fadein:2,30
+
+# Using "end" keyword - fade out to end of video
+smartcut input.mp4 output.mp4 --keep 100,end:fadeout:3
+
+# Using negative time (-10 = last 10 seconds) - fade out at the end
+smartcut input.mp4 output.mp4 --keep 60,-10:fadeout:2
+
+# Keep entire video with fade-in at start and fade-out at end
+smartcut input.mp4 output.mp4 --keep start:fadein:3,end:fadeout:3
+
+# Keep last 30 seconds of video with fade-in
+smartcut input.mp4 output.mp4 --keep -30:fadein:2,end
+
+# Using HH:MM:SS time format with fades
+smartcut input.mp4 output.mp4 --keep 00:01:00:fadein:1.5,00:02:30:fadeout:2
+```
+
 ### Advanced Examples
 ```bash
 # Multiple segments with different fade configurations
@@ -137,11 +161,23 @@ smartcut input.mp4 output.mp4 \
   --keep 30:fadein,40 \
   --keep 50:fadein:2,60:fadeout:2
 
-# Using time format (HH:MM:SS)
-smartcut input.mp4 output.mp4 --keep 00:01:00:fadein,01:02:30:fadeout
+# Combine keywords and numeric times
+smartcut input.mp4 output.mp4 \
+  --keep start:fadein:3,30 \
+  --keep 60,-10:fadeout:3 \
+  --keep -5,end
 
-# Combine with special keywords
-smartcut input.mp4 output.mp4 --keep start:fadein:3,30 --keep 60,-10:fadeout:3
+# Keep middle section with fades, and opening/closing without fades
+smartcut input.mp4 output.mp4 \
+  --keep start,10 \
+  --keep 20:fadein:1,80:fadeout:1 \
+  --keep 90,end
+
+# Complex example: intro, main content with fades, outro
+smartcut input.mp4 output.mp4 \
+  --keep start,5 \
+  --keep 10:fadein:2,120:fadeout:2 \
+  --keep -10,end:fadeout:1.5
 ```
 
 ## Technical Implementation Notes
