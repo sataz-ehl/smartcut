@@ -1172,8 +1172,8 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
     cut_segments = make_cut_segments(media_container, adjusted_segment_times, video_settings.mode == VideoExportMode.KEYFRAMES)
 
     # Attach fade information to cut segments
-    # Simplified approach: if GOP overlaps with fade region, recode entire GOP
-    # This avoids encoder flush/recreate overhead from splitting segments too much
+    # If a segment has ANY fades, recode ALL its GOPs to avoid timing issues
+    # from mixing recoded and passthrough segments
     segment_idx = 0
     new_cut_segments = []
 
@@ -1185,7 +1185,7 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
         if segment_idx < len(fade_infos) and fade_infos[segment_idx] is not None:
             fade_info = fade_infos[segment_idx]
 
-            # Get the ORIGINAL segment boundaries for calculating absolute fade regions
+            # Get the ORIGINAL segment boundaries
             orig_seg_start = adjusted_segment_times[segment_idx][0]
             orig_seg_end = adjusted_segment_times[segment_idx][1]
 
@@ -1194,26 +1194,13 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             has_fadeout = fade_info.fadeout_duration is not None and fade_info.fadeout_duration > 0
 
             if has_fadein or has_fadeout:
-                # Calculate absolute fade boundaries based on ORIGINAL segment
-                fadein_end_absolute = orig_seg_start + fade_info.fadein_duration if has_fadein else orig_seg_start
-                fadeout_start_absolute = orig_seg_end - fade_info.fadeout_duration if has_fadeout else orig_seg_end
-
-                # Check if this GOP overlaps with any fade region
-                overlaps_fadein = has_fadein and cut_seg.start_time < fadein_end_absolute
-                overlaps_fadeout = has_fadeout and cut_seg.end_time > fadeout_start_absolute
-
-                if overlaps_fadein or overlaps_fadeout:
-                    # Recode entire GOP if it overlaps with any fade region
-                    # This avoids splitting GOPs and constantly flushing/recreating encoder
-                    cut_seg.require_recode = True
-                    cut_seg.fade_info = fade_info
-                    # Store original segment boundaries for correct fade calculation
-                    cut_seg.orig_segment_start = orig_seg_start
-                    cut_seg.orig_segment_end = orig_seg_end
-                else:
-                    # No overlap with fade regions - passthrough
-                    cut_seg.fade_info = None
-
+                # Recode ALL GOPs in this segment to avoid timing discontinuities
+                # when mixing recoded and passthrough segments
+                cut_seg.require_recode = True
+                cut_seg.fade_info = fade_info
+                # Store original segment boundaries for correct fade calculation
+                cut_seg.orig_segment_start = orig_seg_start
+                cut_seg.orig_segment_end = orig_seg_end
                 new_cut_segments.append(cut_seg)
             else:
                 # No fades, keep original segment
