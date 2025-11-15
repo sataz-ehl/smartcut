@@ -9,85 +9,9 @@ import sys
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import cast
 
-import av
-import numpy as np
-from av import VideoStream, AudioStream
-
-def generate_test_video(output_path: str, duration: int = 20, fps: int = 30, sample_rate: int = 48000):
-    """
-    Generate a synthetic test video with audio using PyAV.
-
-    Args:
-        output_path: Path to save the video
-        duration: Duration in seconds
-        fps: Frames per second
-        sample_rate: Audio sample rate
-    """
-    print(f"Generating test video: {output_path}")
-
-    try:
-        container = av.open(output_path, mode="w")
-
-        # Create video stream
-        video_stream = cast(VideoStream, container.add_stream('libx264', rate=fps))
-        video_stream.width = 1280
-        video_stream.height = 720
-        video_stream.pix_fmt = 'yuv420p'
-
-        # Create audio stream (layout automatically sets channels)
-        audio_stream = cast(AudioStream, container.add_stream('aac', rate=sample_rate, layout='stereo'))
-
-        total_frames = int(duration * fps)
-        audio_samples_per_frame = int(sample_rate / fps)
-
-        # Generate video frames and audio
-        for frame_i in range(total_frames):
-            # Generate video frame with changing color
-            t = frame_i / fps
-            r = int(127 + 127 * np.sin(2 * np.pi * t / 2))
-            g = int(127 + 127 * np.sin(2 * np.pi * (t / 2 + 1/3)))
-            b = int(127 + 127 * np.sin(2 * np.pi * (t / 2 + 2/3)))
-
-            img = np.full((720, 1280, 3), [r, g, b], dtype=np.uint8)
-
-            # Add frame number text indicator (simple pattern)
-            if frame_i % 10 == 0:
-                img[100:200, 100:200] = [255, 255, 255]
-
-            video_frame = av.VideoFrame.from_ndarray(img, format='rgb24')
-            for packet in video_stream.encode(video_frame):
-                container.mux(packet)
-
-            # Generate audio (sine wave)
-            t_audio = np.linspace(frame_i * audio_samples_per_frame / sample_rate,
-                                 (frame_i + 1) * audio_samples_per_frame / sample_rate,
-                                 audio_samples_per_frame, endpoint=False)
-            audio_data = np.sin(2 * np.pi * 440 * t_audio)  # 440 Hz sine wave
-            audio_data = np.stack([audio_data, audio_data])  # Stereo
-
-            audio_frame = av.AudioFrame.from_ndarray(audio_data.astype(np.float32), format='fltp', layout='stereo')
-            audio_frame.sample_rate = sample_rate
-
-            for packet in audio_stream.encode(audio_frame):
-                container.mux(packet)
-
-        # Flush streams
-        for packet in video_stream.encode():
-            container.mux(packet)
-        for packet in audio_stream.encode():
-            container.mux(packet)
-
-        container.close()
-        print(f"✓ Test video generated successfully")
-        return True
-
-    except Exception as e:
-        print(f"Error generating video: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+# Import synthetic video generator
+from generate_synthetic_video import generate_test_video
 
 def run_smartcut(input_path: str, output_path: str, keep_args: list[str]) -> bool:
     """
