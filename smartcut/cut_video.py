@@ -328,6 +328,18 @@ class RecodeAudioCutter:
         packets = []
         current_sample = start_sample
 
+        # Calculate original segment sample boundaries for fade calculation
+        # This ensures all GOPs in a segment use the same fade curve
+        if cut_segment.orig_segment_start is not None:
+            orig_start_sample = int(float(cut_segment.orig_segment_start) * sample_rate)
+        else:
+            orig_start_sample = start_sample
+
+        if cut_segment.orig_segment_end is not None:
+            orig_end_sample = int(float(cut_segment.orig_segment_end) * sample_rate)
+        else:
+            orig_end_sample = end_sample
+
         # Get packets for this segment
         if cut_segment.start_time <= 0:
             start_pkt_idx = 0
@@ -346,11 +358,11 @@ class RecodeAudioCutter:
                 if audio_arr.dtype != np.float32:
                     audio_arr = audio_arr.astype(np.float32)
 
-                # Apply fade
+                # Apply fade using ORIGINAL segment boundaries to avoid duplicate fades
                 if cut_segment.fade_info is not None:
                     audio_arr = self._apply_audio_fade(
                         audio_arr, current_sample, sample_rate,
-                        start_sample, end_sample, cut_segment.fade_info
+                        orig_start_sample, orig_end_sample, cut_segment.fade_info
                     )
 
                 # Create new frame from modified array in fltp format
