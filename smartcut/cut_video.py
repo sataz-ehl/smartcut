@@ -1203,30 +1203,21 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             has_fadeout = fade_info.fadeout_duration is not None and fade_info.fadeout_duration > 0
 
             if has_fadein or has_fadeout:
-                # Attach fade_info to ALL GOPs in this segment (audio needs this to maintain encoder state)
+                # Re-encode ALL GOPs in this segment to ensure smooth fades
+                #
+                # REASONING: We need to re-encode all GOPs (not just overlapping ones) because:
+                # 1. Prevents visual discontinuities at GOP boundaries (passthrough vs re-encoded)
+                # 2. Avoids "double fade" perception when switching from passthrough to fade
+                # 3. Ensures audio encoder maintains state across entire segment (no artifacts)
+                #
+                # Previous optimization attempt (selective GOP re-encoding) caused issues:
+                # - Visual jumps at GOP boundaries before/after fade regions
+                # - Scene changes during fades appeared as brightness "bumps"
+                # - User perceived "twice fade-in and twice fade-out" effects
+                cut_seg.require_recode = True
                 cut_seg.fade_info = fade_info
                 cut_seg.orig_segment_start = orig_seg_start
                 cut_seg.orig_segment_end = orig_seg_end
-
-                # Calculate fade region boundaries
-                fadein_end = orig_seg_start + fade_info.fadein_duration if has_fadein else orig_seg_start
-                fadeout_start = orig_seg_end - fade_info.fadeout_duration if has_fadeout else orig_seg_end
-
-                # OPTIMIZATION: Only mark GOPs that overlap with fade regions for re-encoding
-                # This speeds up video processing while audio re-encodes all GOPs (no artifacts)
-                gop_overlaps_fade = (
-                    (cut_seg.start_time < fadein_end) or   # Overlaps with fade-in region
-                    (cut_seg.end_time > fadeout_start)      # Overlaps with fade-out region
-                )
-
-                if gop_overlaps_fade:
-                    # This GOP needs re-encoding for video (contains actual fade effect)
-                    cut_seg.require_recode = True
-                else:
-                    # This GOP is in the middle - video uses passthrough (fast)
-                    # Audio will still re-encode (because fade_info is set)
-                    cut_seg.require_recode = False
-
                 new_cut_segments.append(cut_seg)
             else:
                 # No fades, keep original segment
