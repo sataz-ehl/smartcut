@@ -1203,61 +1203,20 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             has_fadeout = fade_info.fadeout_duration is not None and fade_info.fadeout_duration > 0
 
             if has_fadein or has_fadeout:
-                # Optimize: Only re-encode GOPs that actually need fading
+                # Re-encode ALL GOPs in this segment to ensure smooth audio/video
                 #
-                # PERFORMANCE VS ACCURACY TRADEOFF:
-                # ================================
-                # This optimization only re-encodes GOPs that overlap with fade regions,
-                # rather than re-encoding the entire segment. This provides significant
-                # speed improvements (typically 30-50% faster for segments with short fades).
+                # This prevents audio artifacts at GOP boundaries. The audio encoder
+                # needs to maintain state across all frames in a fade region to avoid
+                # clicks/pops. Mixing re-encoded and passthrough GOPs creates sample
+                # discontinuities that manifest as audible artifacts (clicks/pops).
                 #
-                # However, this introduces a timing imprecision:
-                # - Fade boundaries are specified in seconds (e.g., fade-in for 2 seconds)
-                # - GOPs are aligned to keyframe boundaries (~0.5-1 second apart)
-                # - When a GOP partially overlaps a fade region, the ENTIRE GOP is faded
-                #
-                # EXAMPLE:
-                # - User requests: fade-out from 27.0s to 30.0s
-                # - GOP spans: 26.9s to 27.9s (overlaps fade region)
-                # - Result: Entire GOP is faded, so fade starts at 26.9s (0.1s early)
-                #
-                # MAGNITUDE: Fades may start/end up to ~1 GOP duration early/late
-                # - Typical GOP: 0.5-1 seconds
-                # - Typical imprecision: 0-1 seconds at fade boundaries
-                #
-                # QUALITY: Fades are still smooth with no artifacts, just slightly
-                # imprecise at the exact start/end timing.
-                #
-                # ALTERNATIVE: To achieve pixel-perfect fade timing, all GOPs in the
-                # segment would need re-encoding (set require_recode=True for all GOPs),
-                # but this would be significantly slower.
-                #
-                # Calculate fade regions relative to original segment
-                fadein_end_time = orig_seg_start + fade_info.fadein_duration if has_fadein else orig_seg_start
-                fadeout_start_time = orig_seg_end - fade_info.fadeout_duration if has_fadeout else orig_seg_end
-
-                # Check if this GOP overlaps with any fade region
-                # Proper overlap: (GOP.start < fade.end) AND (GOP.end > fade.start)
-                gop_needs_fade = False
-                if has_fadein:
-                    # Fade-in region: [orig_seg_start, fadein_end_time]
-                    if cut_seg.start_time < fadein_end_time and cut_seg.end_time > orig_seg_start:
-                        gop_needs_fade = True
-                if has_fadeout:
-                    # Fade-out region: [fadeout_start_time, orig_seg_end]
-                    if cut_seg.start_time < orig_seg_end and cut_seg.end_time > fadeout_start_time:
-                        gop_needs_fade = True
-
-                # Only attach fade_info and mark for re-encoding if this GOP actually needs fading
-                if gop_needs_fade:
-                    cut_seg.require_recode = True
-                    cut_seg.fade_info = fade_info
-                    # Store original segment boundaries for correct fade calculation
-                    cut_seg.orig_segment_start = orig_seg_start
-                    cut_seg.orig_segment_end = orig_seg_end
-                else:
-                    # GOP is in segment with fades but doesn't overlap fade regions
-                    cut_seg.fade_info = None
+                # TRADEOFF: Slower than selective GOP re-encoding, but ensures
+                # perfect quality with no artifacts.
+                cut_seg.require_recode = True
+                cut_seg.fade_info = fade_info
+                # Store original segment boundaries for correct fade calculation
+                cut_seg.orig_segment_start = orig_seg_start
+                cut_seg.orig_segment_end = orig_seg_end
                 new_cut_segments.append(cut_seg)
             else:
                 # No fades, keep original segment
