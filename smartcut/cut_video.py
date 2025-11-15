@@ -1179,8 +1179,8 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
     cut_segments = make_cut_segments(media_container, adjusted_segment_times, video_settings.mode == VideoExportMode.KEYFRAMES)
 
     # Attach fade information to cut segments
-    # If a segment has ANY fades, recode ALL its GOPs to avoid timing issues
-    # from mixing recoded and passthrough segments
+    # OPTIMIZATION: Only re-encode GOPs that overlap with fade regions for VIDEO
+    # For AUDIO: Re-encode all GOPs in fade segments (to avoid encoder state artifacts)
     segment_idx = 0
     new_cut_segments = []
 
@@ -1203,20 +1203,30 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             has_fadeout = fade_info.fadeout_duration is not None and fade_info.fadeout_duration > 0
 
             if has_fadein or has_fadeout:
-                # Re-encode ALL GOPs in this segment to ensure smooth audio/video
-                #
-                # This prevents audio artifacts at GOP boundaries. The audio encoder
-                # needs to maintain state across all frames in a fade region to avoid
-                # clicks/pops. Mixing re-encoded and passthrough GOPs creates sample
-                # discontinuities that manifest as audible artifacts (clicks/pops).
-                #
-                # TRADEOFF: Slower than selective GOP re-encoding, but ensures
-                # perfect quality with no artifacts.
-                cut_seg.require_recode = True
+                # Attach fade_info to ALL GOPs in this segment (audio needs this to maintain encoder state)
                 cut_seg.fade_info = fade_info
-                # Store original segment boundaries for correct fade calculation
                 cut_seg.orig_segment_start = orig_seg_start
                 cut_seg.orig_segment_end = orig_seg_end
+
+                # Calculate fade region boundaries
+                fadein_end = orig_seg_start + fade_info.fadein_duration if has_fadein else orig_seg_start
+                fadeout_start = orig_seg_end - fade_info.fadeout_duration if has_fadeout else orig_seg_end
+
+                # OPTIMIZATION: Only mark GOPs that overlap with fade regions for re-encoding
+                # This speeds up video processing while audio re-encodes all GOPs (no artifacts)
+                gop_overlaps_fade = (
+                    (cut_seg.start_time < fadein_end) or   # Overlaps with fade-in region
+                    (cut_seg.end_time > fadeout_start)      # Overlaps with fade-out region
+                )
+
+                if gop_overlaps_fade:
+                    # This GOP needs re-encoding for video (contains actual fade effect)
+                    cut_seg.require_recode = True
+                else:
+                    # This GOP is in the middle - video uses passthrough (fast)
+                    # Audio will still re-encode (because fade_info is set)
+                    cut_seg.require_recode = False
+
                 new_cut_segments.append(cut_seg)
             else:
                 # No fades, keep original segment
