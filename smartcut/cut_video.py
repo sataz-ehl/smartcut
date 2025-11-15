@@ -344,15 +344,38 @@ class RecodeAudioCutter:
 
                 current_sample += audio_arr.shape[0]
 
+        # Flush encoder after this recoded segment to prevent stale state
+        # when mixing recoded and passthrough segments
+        if self.encoder is not None:
+            for pkt in self.encoder.encode(None):
+                pkt.stream = self.out_stream
+                if pkt.pts <= self.prev_pts:
+                    pkt.pts = self.prev_pts + 1
+                if pkt.dts is not None and pkt.dts <= self.prev_dts:
+                    pkt.dts = self.prev_dts + 1
+                self.prev_pts = pkt.pts
+                if pkt.dts is not None:
+                    self.prev_dts = pkt.dts
+                packets.append(pkt)
+            # Reset encoder so it's recreated fresh for next recoded segment
+            self.encoder = None
+
         self.segment_start_in_output += cut_segment.end_time - cut_segment.start_time
         return packets
 
     def finish(self) -> list[Packet]:
-        """Flush encoder."""
+        """Flush encoder if still active (should rarely happen with per-segment flushing)."""
         packets = []
         if self.encoder is not None:
             for pkt in self.encoder.encode(None):
                 pkt.stream = self.out_stream
+                if pkt.pts <= self.prev_pts:
+                    pkt.pts = self.prev_pts + 1
+                if pkt.dts is not None and pkt.dts <= self.prev_dts:
+                    pkt.dts = self.prev_dts + 1
+                self.prev_pts = pkt.pts
+                if pkt.dts is not None:
+                    self.prev_dts = pkt.dts
                 packets.append(pkt)
         return packets
 
