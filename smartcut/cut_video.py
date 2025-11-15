@@ -750,18 +750,11 @@ class VideoCutter:
         if fade_info is None:
             return frame
 
-        # Save original frame attributes
-        original_pts = frame.pts
-        original_time_base = frame.time_base
-        original_pix_fmt = frame.format.name
-
-        # Convert frame to numpy array for processing
-        arr = frame.to_ndarray(format='rgb24')
-        alpha = 1.0
-
         # Calculate relative time within segment
         relative_time = frame_time - segment_start
         segment_duration = segment_end - segment_start
+
+        alpha = 1.0
 
         # Apply fade-in
         if fade_info.fadein_duration is not None and relative_time < fade_info.fadein_duration:
@@ -774,17 +767,46 @@ class VideoCutter:
                 fadeout_alpha = min(1.0, float(time_from_end / fade_info.fadeout_duration))
                 alpha = min(alpha, fadeout_alpha)
 
-        # Apply alpha to frame
+        # Only apply fade if alpha < 1.0
         if alpha < 1.0:
-            arr = (arr * alpha).astype(np.uint8)
-            frame = av.VideoFrame.from_ndarray(arr, format='rgb24')
-            # Convert back to original pixel format to match encoder expectations
-            # This avoids implicit conversions that can cause playback stuttering
-            frame = frame.reformat(format=original_pix_fmt)
-            # Restore original attributes
-            frame.pts = original_pts
-            if original_time_base is not None:
-                frame.time_base = original_time_base
+            # Save original frame attributes
+            original_pts = frame.pts
+            original_time_base = frame.time_base
+            pix_fmt = frame.format.name
+
+            # Apply fade directly in YUV color space to avoid expensive RGB conversions
+            # This is much more efficient and prevents playback stuttering
+            if pix_fmt in ['yuv420p', 'yuvj420p', 'yuv422p', 'yuv444p', 'nv12', 'nv21']:
+                # Process YUV formats directly
+                # Get numpy array in native format (no conversion)
+                arr = frame.to_ndarray()
+
+                # For planar YUV formats, Y is the first plane
+                # Multiply Y plane by alpha to darken the image
+                if len(arr.shape) == 3:  # Planar format (planes, height, width)
+                    # Y plane is index 0
+                    arr[0] = (arr[0].astype(np.float32) * alpha).astype(arr.dtype)
+                    # Optionally fade chroma towards neutral (128 for 8-bit)
+                    if pix_fmt in ['yuv420p', 'yuvj420p', 'yuv422p', 'yuv444p']:
+                        neutral = 128 if arr.dtype == np.uint8 else 512  # 8-bit vs 10-bit
+                        for i in [1, 2]:  # U and V planes
+                            arr[i] = ((arr[i].astype(np.float32) - neutral) * alpha + neutral).astype(arr.dtype)
+
+                # Create new frame from modified array in native format
+                frame = av.VideoFrame.from_ndarray(arr, format=pix_fmt)
+                frame.pts = original_pts
+                if original_time_base is not None:
+                    frame.time_base = original_time_base
+            else:
+                # Fallback to RGB conversion for other pixel formats
+                arr = frame.to_ndarray(format='rgb24')
+                arr = (arr * alpha).astype(np.uint8)
+                frame = av.VideoFrame.from_ndarray(arr, format='rgb24')
+                # Convert back to original pixel format
+                frame = frame.reformat(format=pix_fmt)
+                frame.pts = original_pts
+                if original_time_base is not None:
+                    frame.time_base = original_time_base
 
         return frame
 
