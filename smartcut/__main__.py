@@ -13,6 +13,7 @@ from smartcut.cut_video import (
     smart_cut,
 )
 from smartcut.media_container import MediaContainer
+from smartcut.misc_data import FadeInfo, SegmentWithFade
 
 
 def time_to_fraction(time_str_elem: str) -> Fraction:
@@ -69,6 +70,95 @@ def resolve_time_with_duration(time_str_elem: str, duration: Fraction) -> Fracti
         return duration + parsed_time  # duration - abs(parsed_time)
 
     return parsed_time
+
+def parse_fade_from_element(elem: str) -> tuple[str, Fraction | None, str]:
+    """
+    Parse fade parameters from a time element.
+
+    Returns:
+        tuple of (time_str, fade_duration, fade_type) where:
+        - time_str: the time portion without fade parameters
+        - fade_duration: duration in seconds (None if no fade)
+        - fade_type: 'fadein', 'fadeout', or '' (empty string if no fade)
+
+    Examples:
+        "30:fadein" -> ("30", Fraction(1), "fadein")
+        "40:fadeout:2.5" -> ("40", Fraction(2.5), "fadeout")
+        "50" -> ("50", None, "")
+    """
+    parts = elem.split(':')
+
+    # Check if last part or second-to-last part is a fade keyword
+    fade_type = ''
+    fade_duration = None
+    time_parts = []
+
+    i = 0
+    while i < len(parts):
+        if parts[i].lower() in ['fadein', 'fadeout']:
+            fade_type = parts[i].lower()
+            # Check if next part is a duration
+            if i + 1 < len(parts) and parts[i + 1] not in ['fadein', 'fadeout']:
+                try:
+                    fade_duration = Fraction(parts[i + 1])
+                    i += 2  # Skip both fade keyword and duration
+                except (ValueError, ZeroDivisionError):
+                    fade_duration = Fraction(1)  # Default 1 second
+                    i += 1
+            else:
+                fade_duration = Fraction(1)  # Default 1 second
+                i += 1
+        else:
+            time_parts.append(parts[i])
+            i += 1
+
+    time_str = ':'.join(time_parts)
+    return time_str, fade_duration, fade_type
+
+def parse_segments_with_fades(keep_args: list[str], duration: Fraction) -> list[SegmentWithFade]:
+    """
+    Parse multiple --keep arguments with fade parameters.
+
+    Args:
+        keep_args: List of --keep argument strings
+        duration: Media duration in seconds
+
+    Returns:
+        List of SegmentWithFade objects
+
+    Examples:
+        ["10,20"] -> [SegmentWithFade(10, 20, FadeInfo(None, None))]
+        ["30:fadein,40"] -> [SegmentWithFade(30, 40, FadeInfo(1, None))]
+        ["50,60:fadeout:2.0"] -> [SegmentWithFade(50, 60, FadeInfo(None, 2.0))]
+    """
+    segments = []
+
+    for keep_arg in keep_args:
+        elements = keep_arg.split(',')
+        if len(elements) % 2 != 0:
+            raise ValueError("You must provide an even number of time points for segments.")
+
+        # Process pairs of start,end
+        for i in range(0, len(elements), 2):
+            start_elem = elements[i]
+            end_elem = elements[i + 1]
+
+            # Parse start time with optional fade-in
+            start_time_str, start_fade_duration, start_fade_type = parse_fade_from_element(start_elem)
+            start_time = resolve_time_with_duration(start_time_str, duration)
+
+            # Parse end time with optional fade-out
+            end_time_str, end_fade_duration, end_fade_type = parse_fade_from_element(end_elem)
+            end_time = resolve_time_with_duration(end_time_str, duration)
+
+            # Construct FadeInfo
+            fadein_duration = start_fade_duration if start_fade_type == 'fadein' else None
+            fadeout_duration = end_fade_duration if end_fade_type == 'fadeout' else None
+
+            fade_info = FadeInfo(fadein_duration, fadeout_duration)
+            segments.append(SegmentWithFade(start_time, end_time, fade_info))
+
+    return segments
 
 def parse_time_segments(time_str: str) -> list[tuple[Fraction, Fraction]]:
     times = list(map(time_to_fraction, time_str.split(',')))
@@ -168,8 +258,11 @@ def restore_negative_numbers(args: argparse.Namespace) -> None:
     Returns:
         None (modifies args in place)
     """
-    if args.keep and args.keep.startswith('NEG_MARK_'):
-        args.keep = '-' + args.keep[9:]  # Remove 'NEG_MARK_' and restore '-'
+    if args.keep:
+        # args.keep is now a list due to action='append'
+        for i in range(len(args.keep)):
+            if args.keep[i].startswith('NEG_MARK_'):
+                args.keep[i] = '-' + args.keep[i][9:]  # Remove 'NEG_MARK_' and restore '-'
 
     if args.cut and args.cut.startswith('NEG_MARK_'):
         args.cut = '-' + args.cut[9:]   # Remove 'NEG_MARK_' and restore '-'
@@ -225,11 +318,13 @@ time formats:
                        help="Input media file (MP4, MKV, AVI, MOV, etc.)")
     parser.add_argument('output', metavar='OUTPUT', type=str,
                        help="Output media file path")
-    parser.add_argument('-k', '--keep', metavar='SEGMENTS', type=str,
+    parser.add_argument('-k', '--keep', metavar='SEGMENTS', type=str, action='append',
                        help="Keep specified time segments. Format: start1,end1,start2,end2,... "
                             "Times can be in seconds (10), MM:SS (01:30), HH:MM:SS (01:30:45), "
                             "subseconds (48.799, 01:30.123, 01:30:45.678), negative times from end (-5), "
-                            "or keywords: s/start (beginning), e/end/-0 (end of file)")
+                            "or keywords: s/start (beginning), e/end/-0 (end of file). "
+                            "Fade effects: start:fadein,end or start,end:fadeout or start:fadein:1.5,end:fadeout:2.0. "
+                            "Multiple --keep options are supported")
     parser.add_argument('-c', '--cut', metavar='SEGMENTS', type=str,
                        help="Remove specified time segments (opposite of --keep). "
                             "Same time format as --keep option")
@@ -253,17 +348,24 @@ time formats:
 
     source = MediaContainer(args.input)
 
+    # Parse segments with fade information
     if args.keep:
-        segments = parse_frame_segments(source, args.keep) if args.frames else parse_time_segments_with_duration(args.keep, source.duration)
+        if args.frames:
+            raise ValueError("--frames mode is not compatible with fade effects. Use time-based segments instead.")
+        # Parse all --keep arguments with fade support
+        segments_with_fade = parse_segments_with_fades(args.keep, source.duration)
     elif args.cut:
+        # --cut mode doesn't support fades yet
         cut_segments = parse_frame_segments(source, args.cut) if args.frames else parse_time_segments_with_duration(args.cut, source.duration)
-        segments = [(Fraction(0), source.duration)]
+        segments_basic = [(Fraction(0), source.duration)]
         for c_start, c_end in cut_segments:
-            last_segment = segments.pop()
+            last_segment = segments_basic.pop()
             if c_start > last_segment[0]:
-                segments.append((last_segment[0], c_start))
+                segments_basic.append((last_segment[0], c_start))
             if c_end < last_segment[1]:
-                segments.append((c_end, last_segment[1]))
+                segments_basic.append((c_end, last_segment[1]))
+        # Convert to SegmentWithFade with no fades
+        segments_with_fade = [SegmentWithFade(s[0], s[1], FadeInfo(None, None)) for s in segments_basic]
     else:
         raise ValueError("You must specify either --keep or --cut.")
 
@@ -279,7 +381,7 @@ time formats:
     # TODO: Fix av.logging import when PyAV version is updated
     pass
 
-    exception_value = smart_cut(source, segments, args.output,
+    exception_value = smart_cut(source, segments_with_fade, args.output,
                                 audio_export_info=export_info,
                                 video_settings=video_settings,
                                 progress=progress, log_level=args.log_level)
