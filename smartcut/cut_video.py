@@ -1,5 +1,6 @@
 import heapq
 import os
+import sys
 from collections.abc import Generator
 from dataclasses import dataclass
 from fractions import Fraction
@@ -18,7 +19,7 @@ from av.video.frame import PictureType, VideoFrame
 
 from smartcut.media_container import MediaContainer
 from smartcut.media_utils import VideoExportMode, VideoExportQuality, get_crf_for_quality
-from smartcut.misc_data import AudioExportInfo, AudioExportSettings, CutSegment
+from smartcut.misc_data import AudioExportInfo, AudioExportSettings, CutSegment, FadeInfo, SegmentWithFade
 from smartcut.nal_tools import convert_hevc_cra_to_bla
 
 
@@ -165,6 +166,241 @@ class PassthruAudioCutter:
 
     def finish(self) -> list[Packet]:
         return []
+
+class RecodeAudioCutter:
+    """Audio cutter that re-encodes audio with fade effects."""
+
+    def __init__(self, media_container: MediaContainer, output_av_container: OutputContainer,
+                track_index: int, export_settings: AudioExportSettings) -> None:
+        self.track = media_container.audio_tracks[track_index]
+        self.media_container = media_container
+
+        # Create output stream
+        self.out_stream = output_av_container.add_stream_from_template(self.track.av_stream, options={'x265-params': 'log_level=error'})
+        self.out_stream.metadata.update(self.track.av_stream.metadata)
+        self.out_stream.disposition = cast(Disposition, self.track.av_stream.disposition.value)
+
+        self.segment_start_in_output = 0
+        self.prev_dts = -100_000
+        self.prev_pts = -100_000
+
+        # Decoder
+        self.decoder = self.track.av_stream.codec_context
+
+        # Encoder will be created on demand
+        self.encoder = None
+
+    def _apply_audio_fade(self, audio_arr: np.ndarray, sample_idx: int, samples_per_second: int,
+                         segment_start_sample: int, segment_end_sample: int, fade_info: FadeInfo | None) -> np.ndarray:
+        """
+        Apply fade-in/out to audio samples.
+
+        Args:
+            audio_arr: Audio array (samples x channels)
+            sample_idx: Global sample index (start of this chunk)
+            samples_per_second: Sample rate
+            segment_start_sample: Start sample of segment
+            segment_end_sample: End sample of segment
+            fade_info: Fade information
+
+        Returns:
+            Audio array with fade applied
+
+        Environment Variables:
+            SMARTCUT_DEBUG_AUDIO_FADE: Set to '1' to enable debug output showing
+                                       amplitude reduction during fades
+        """
+        if fade_info is None:
+            return audio_arr
+
+        # Debug mode: capture original amplitude for comparison
+        debug_mode = os.environ.get('SMARTCUT_DEBUG_AUDIO_FADE') == '1'
+        if debug_mode:
+            orig_peak = np.max(np.abs(audio_arr))
+
+        num_samples = audio_arr.shape[0]
+        result = audio_arr.copy()
+
+        for i in range(num_samples):
+            current_sample = sample_idx + i
+            alpha = 1.0
+
+            # Fade-in
+            if fade_info.fadein_duration is not None:
+                fadein_samples = int(float(fade_info.fadein_duration) * samples_per_second)
+                samples_from_start = current_sample - segment_start_sample
+                if samples_from_start < fadein_samples:
+                    alpha = min(1.0, samples_from_start / fadein_samples)
+
+            # Fade-out
+            if fade_info.fadeout_duration is not None:
+                fadeout_samples = int(float(fade_info.fadeout_duration) * samples_per_second)
+                samples_from_end = segment_end_sample - current_sample
+                if samples_from_end < fadeout_samples:
+                    fadeout_alpha = min(1.0, samples_from_end / fadeout_samples)
+                    alpha = min(alpha, fadeout_alpha)
+
+            # Apply fade
+            if alpha < 1.0:
+                result[i] = result[i] * alpha
+
+        # Debug output: show amplitude reduction
+        if debug_mode:
+            result_peak = np.max(np.abs(result))
+            reduction_pct = (1 - result_peak / orig_peak) * 100 if orig_peak > 0 else 0
+            time_in_segment = (sample_idx - segment_start_sample) / samples_per_second
+            print(f"[AUDIO_FADE] t={time_in_segment:.3f}s | fade_info={fade_info} | "
+                  f"orig_peak={orig_peak:.6f} → result_peak={result_peak:.6f} "
+                  f"({reduction_pct:.1f}% reduction)", file=sys.stderr)
+
+        return result
+
+    def segment(self, cut_segment: CutSegment) -> list[Packet]:
+        """Process a segment with optional fade effects."""
+        in_tb = cast(Fraction, self.track.av_stream.time_base)
+
+        # Calculate sample indices
+        sample_rate = self.track.av_stream.codec_context.sample_rate
+        if sample_rate is None:
+            sample_rate = 48000  # Default
+
+        start_sample = int(float(cut_segment.start_time) * sample_rate) if cut_segment.start_time > 0 else 0
+        end_sample = int(float(cut_segment.end_time) * sample_rate)
+
+        # Check if we need to recode for fades
+        needs_fade = (cut_segment.fade_info is not None and
+                     (cut_segment.fade_info.fadein_duration is not None or
+                      cut_segment.fade_info.fadeout_duration is not None))
+
+        if not needs_fade:
+            # No fade - use passthrough
+            if cut_segment.start_time <= 0:
+                start = 0
+            else:
+                start_pts = round(cut_segment.start_time / in_tb)
+                start = np.searchsorted(self.track.frame_times_pts, start_pts)
+            end_pts = round(cut_segment.end_time / in_tb)
+            end = np.searchsorted(self.track.frame_times_pts, end_pts)
+            in_packets = self.track.packets[start : end]
+            packets = []
+            for p in in_packets:
+                if p.dts is None or p.pts is None:
+                    continue
+                packet = copy_packet(p)
+                packet.stream = self.out_stream
+                packet.pts = int(p.pts + (self.segment_start_in_output - cut_segment.start_time) / in_tb)
+                packet.dts = int(p.dts + (self.segment_start_in_output - cut_segment.start_time) / in_tb)
+                if packet.pts <= self.prev_pts:
+                    packet.pts = self.prev_pts + 1
+                if packet.dts <= self.prev_dts:
+                    packet.dts = self.prev_dts + 1
+                self.prev_pts = packet.pts
+                self.prev_dts = packet.dts
+                packets.append(packet)
+
+            self.segment_start_in_output += cut_segment.end_time - cut_segment.start_time
+            return packets
+
+        # Recode with fade effects
+        # Initialize encoder if needed
+        if self.encoder is None:
+            # Get channel layout
+            in_layout = self.track.av_stream.codec_context.layout
+            if in_layout is None:
+                # Default to stereo if no layout specified
+                in_layout = 'stereo' if self.track.av_stream.codec_context.channels == 2 else 'mono'
+
+            self.encoder = av.codec.CodecContext.create(
+                self.track.av_stream.codec_context.name,
+                'w'
+            )
+            self.encoder.sample_rate = sample_rate
+            self.encoder.layout = in_layout
+            self.encoder.format = self.track.av_stream.codec_context.format
+            self.encoder.time_base = in_tb
+
+            # Match source bitrate to maintain quality consistency
+            if self.track.av_stream.bit_rate:
+                self.encoder.bit_rate = self.track.av_stream.bit_rate
+
+        # Decode, apply fade, and re-encode
+        packets = []
+        current_sample = start_sample
+
+        # Get packets for this segment
+        if cut_segment.start_time <= 0:
+            start_pkt_idx = 0
+        else:
+            start_pts = round(cut_segment.start_time / in_tb)
+            start_pkt_idx = np.searchsorted(self.track.frame_times_pts, start_pts)
+        end_pts = round(cut_segment.end_time / in_tb)
+        end_pkt_idx = np.searchsorted(self.track.frame_times_pts, end_pts)
+
+        for pkt in self.track.packets[start_pkt_idx:end_pkt_idx]:
+            for audio_frame in self.decoder.decode(pkt):
+                # Convert to numpy array
+                audio_arr = audio_frame.to_ndarray()
+
+                # Apply fade
+                if cut_segment.fade_info is not None:
+                    audio_arr = self._apply_audio_fade(
+                        audio_arr, current_sample, sample_rate,
+                        start_sample, end_sample, cut_segment.fade_info
+                    )
+
+                # Create new frame from modified array
+                new_frame = av.AudioFrame.from_ndarray(audio_arr, format=audio_frame.format.name, layout=audio_frame.layout.name)
+                new_frame.sample_rate = audio_frame.sample_rate
+                new_frame.pts = int(current_sample - start_sample + self.segment_start_in_output * sample_rate)
+
+                # Encode
+                for encoded_pkt in self.encoder.encode(new_frame):
+                    encoded_pkt.stream = self.out_stream
+                    if encoded_pkt.pts <= self.prev_pts:
+                        encoded_pkt.pts = self.prev_pts + 1
+                    if encoded_pkt.dts is not None and encoded_pkt.dts <= self.prev_dts:
+                        encoded_pkt.dts = self.prev_dts + 1
+                    self.prev_pts = encoded_pkt.pts
+                    if encoded_pkt.dts is not None:
+                        self.prev_dts = encoded_pkt.dts
+                    packets.append(encoded_pkt)
+
+                current_sample += audio_arr.shape[0]
+
+        # Flush encoder after this recoded segment to prevent stale state
+        # when mixing recoded and passthrough segments
+        if self.encoder is not None:
+            for pkt in self.encoder.encode(None):
+                pkt.stream = self.out_stream
+                if pkt.pts <= self.prev_pts:
+                    pkt.pts = self.prev_pts + 1
+                if pkt.dts is not None and pkt.dts <= self.prev_dts:
+                    pkt.dts = self.prev_dts + 1
+                self.prev_pts = pkt.pts
+                if pkt.dts is not None:
+                    self.prev_dts = pkt.dts
+                packets.append(pkt)
+            # Reset encoder so it's recreated fresh for next recoded segment
+            self.encoder = None
+
+        self.segment_start_in_output += cut_segment.end_time - cut_segment.start_time
+        return packets
+
+    def finish(self) -> list[Packet]:
+        """Flush encoder if still active (should rarely happen with per-segment flushing)."""
+        packets = []
+        if self.encoder is not None:
+            for pkt in self.encoder.encode(None):
+                pkt.stream = self.out_stream
+                if pkt.pts <= self.prev_pts:
+                    pkt.pts = self.prev_pts + 1
+                if pkt.dts is not None and pkt.dts <= self.prev_dts:
+                    pkt.dts = self.prev_dts + 1
+                self.prev_pts = pkt.pts
+                if pkt.dts is not None:
+                    self.prev_dts = pkt.dts
+                packets.append(pkt)
+        return packets
 
 class SubtitleCutter:
     def __init__(self, media_container: MediaContainer, output_av_container: OutputContainer, subtitle_track_index: int) -> None:
@@ -496,6 +732,58 @@ class VideoCutter:
 
         return packets
 
+    def _apply_fade_to_frame(self, frame: VideoFrame, frame_time: Fraction, segment_start: Fraction,
+                            segment_end: Fraction, fade_info: FadeInfo | None) -> VideoFrame:
+        """
+        Apply fade-in/out effects to a frame.
+
+        Args:
+            frame: The video frame to apply fade to
+            frame_time: The absolute time of this frame in the segment
+            segment_start: Start time of the segment
+            segment_end: End time of the segment
+            fade_info: Fade information (None if no fade)
+
+        Returns:
+            The frame with fade applied (may modify in place)
+        """
+        if fade_info is None:
+            return frame
+
+        # Save original frame attributes
+        original_pts = frame.pts
+        original_time_base = frame.time_base
+
+        # Convert frame to numpy array for processing
+        arr = frame.to_ndarray(format='rgb24')
+        alpha = 1.0
+
+        # Calculate relative time within segment
+        relative_time = frame_time - segment_start
+        segment_duration = segment_end - segment_start
+
+        # Apply fade-in
+        if fade_info.fadein_duration is not None and relative_time < fade_info.fadein_duration:
+            alpha = min(1.0, float(relative_time / fade_info.fadein_duration))
+
+        # Apply fade-out
+        if fade_info.fadeout_duration is not None:
+            time_from_end = segment_duration - relative_time
+            if time_from_end < fade_info.fadeout_duration:
+                fadeout_alpha = min(1.0, float(time_from_end / fade_info.fadeout_duration))
+                alpha = min(alpha, fadeout_alpha)
+
+        # Apply alpha to frame
+        if alpha < 1.0:
+            arr = (arr * alpha).astype(np.uint8)
+            frame = av.VideoFrame.from_ndarray(arr, format='rgb24')
+            # Restore original attributes
+            frame.pts = original_pts
+            if original_time_base is not None:
+                frame.time_base = original_time_base
+
+        return frame
+
     def recode_segment(self, s: CutSegment) -> list[Packet]:
         if not self.encoder_inited:
             self.init_encoder()
@@ -543,10 +831,16 @@ class VideoCutter:
         for frame in self.fetch_frame(s.gop_start_dts, s.gop_end_dts, s.end_time, start_override):
             assert frame.pts is not None, "Frame pts should not be None after decoding"
             in_tb = frame.time_base if frame.time_base is not None else self.in_time_base
-            if frame.pts * in_tb < s.start_time:
+            frame_abs_time = frame.pts * in_tb
+
+            if frame_abs_time < s.start_time:
                 continue
-            if frame.pts * in_tb >= s.end_time:
+            if frame_abs_time >= s.end_time:
                 break
+
+            # Apply fade effects if specified
+            if s.fade_info is not None and (s.fade_info.fadein_duration is not None or s.fade_info.fadeout_duration is not None):
+                frame = self._apply_fade_to_frame(frame, frame_abs_time, s.start_time, s.end_time, s.fade_info)
 
             out_tb = self.out_time_base if self.codec_name != 'mpeg2video' else self.enc_codec.time_base
 
@@ -813,14 +1107,126 @@ class VideoCutter:
                 # Frame is outside time range, stop processing (leave it in buffer)
                 break
 
-def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fraction, Fraction]],
+def expand_segments_with_fades(segments_with_fade: list[SegmentWithFade]) -> tuple[list[tuple[Fraction, Fraction]], list[FadeInfo | None]]:
+    """
+    Expand segments with fade information into basic segments and their corresponding fade info.
+
+    This function doesn't split segments for minimal re-encoding yet - that will be done
+    at the CutSegment level. It just prepares the data structure.
+
+    Args:
+        segments_with_fade: List of segments with fade information
+
+    Returns:
+        Tuple of (basic_segments, fade_infos) where fade_infos[i] corresponds to basic_segments[i]
+    """
+    basic_segments = []
+    fade_infos = []
+
+    for seg in segments_with_fade:
+        basic_segments.append((seg.start_time, seg.end_time))
+        fade_infos.append(seg.fade_info)
+
+    return basic_segments, fade_infos
+
+def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fraction, Fraction]] | list[SegmentWithFade],
               out_path: str, audio_export_info: AudioExportInfo | None = None, log_level: str | None = None, progress: ProgressCallback | None = None,
               video_settings: VideoSettings | None = None, segment_mode: bool = False, cancel_object: CancelObject | None = None) -> Exception | None:
     if video_settings is None:
         video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.NORMAL)
 
-    adjusted_segment_times = make_adjusted_segment_times(positive_segments, media_container)
+    # Handle both legacy tuple format and new SegmentWithFade format
+    if positive_segments and isinstance(positive_segments[0], SegmentWithFade):
+        basic_segments, fade_infos = expand_segments_with_fades(positive_segments)
+    else:
+        # Legacy format - no fades
+        basic_segments = positive_segments
+        fade_infos = [None] * len(positive_segments)
+
+    adjusted_segment_times = make_adjusted_segment_times(basic_segments, media_container)
     cut_segments = make_cut_segments(media_container, adjusted_segment_times, video_settings.mode == VideoExportMode.KEYFRAMES)
+
+    # Attach fade information to cut segments and split for minimal re-encoding
+    segment_idx = 0
+    new_cut_segments = []
+
+    for i, cut_seg in enumerate(cut_segments):
+        # Find which original segment this cut_segment belongs to
+        while segment_idx < len(adjusted_segment_times) and cut_seg.start_time >= adjusted_segment_times[segment_idx][1]:
+            segment_idx += 1
+
+        if segment_idx < len(fade_infos) and fade_infos[segment_idx] is not None:
+            fade_info = fade_infos[segment_idx]
+
+            # Check if this segment has fades
+            has_fadein = fade_info.fadein_duration is not None and fade_info.fadein_duration > 0
+            has_fadeout = fade_info.fadeout_duration is not None and fade_info.fadeout_duration > 0
+
+            if has_fadein or has_fadeout:
+                # Split segment for minimal re-encoding
+                seg_duration = cut_seg.end_time - cut_seg.start_time
+                segments_to_add = []
+
+                current_time = cut_seg.start_time
+
+                # Fade-in portion (needs re-encoding)
+                if has_fadein:
+                    fadein_end = min(cut_seg.start_time + fade_info.fadein_duration, cut_seg.end_time)
+                    fadein_seg = CutSegment(
+                        require_recode=True,
+                        start_time=current_time,
+                        end_time=fadein_end,
+                        gop_start_dts=cut_seg.gop_start_dts,
+                        gop_end_dts=cut_seg.gop_end_dts,
+                        gop_index=cut_seg.gop_index,
+                        fade_info=FadeInfo(fadein_duration=fade_info.fadein_duration, fadeout_duration=None)
+                    )
+                    segments_to_add.append(fadein_seg)
+                    current_time = fadein_end
+
+                # Middle portion (passthrough if possible)
+                fadeout_start = cut_seg.end_time
+                if has_fadeout:
+                    fadeout_start = max(cut_seg.end_time - fade_info.fadeout_duration, current_time)
+
+                if current_time < fadeout_start:
+                    # There's a middle portion that doesn't need fading
+                    middle_seg = CutSegment(
+                        require_recode=cut_seg.require_recode,  # Keep original recode status
+                        start_time=current_time,
+                        end_time=fadeout_start,
+                        gop_start_dts=cut_seg.gop_start_dts,
+                        gop_end_dts=cut_seg.gop_end_dts,
+                        gop_index=cut_seg.gop_index,
+                        fade_info=None  # No fade for middle portion
+                    )
+                    segments_to_add.append(middle_seg)
+                    current_time = fadeout_start
+
+                # Fade-out portion (needs re-encoding)
+                if has_fadeout and current_time < cut_seg.end_time:
+                    fadeout_seg = CutSegment(
+                        require_recode=True,
+                        start_time=current_time,
+                        end_time=cut_seg.end_time,
+                        gop_start_dts=cut_seg.gop_start_dts,
+                        gop_end_dts=cut_seg.gop_end_dts,
+                        gop_index=cut_seg.gop_index,
+                        fade_info=FadeInfo(fadein_duration=None, fadeout_duration=fade_info.fadeout_duration)
+                    )
+                    segments_to_add.append(fadeout_seg)
+
+                new_cut_segments.extend(segments_to_add)
+            else:
+                # No fades, keep original segment
+                cut_seg.fade_info = None
+                new_cut_segments.append(cut_seg)
+        else:
+            # No fade info for this segment
+            cut_seg.fade_info = None
+            new_cut_segments.append(cut_seg)
+
+    cut_segments = new_cut_segments
 
     if video_settings.mode == VideoExportMode.RECODE:
         for c in cut_segments:
@@ -869,10 +1275,19 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             if media_container.video_stream is not None and include_video:
                 generators.append(VideoCutter(media_container, output_av_container, video_settings, log_level))
 
+            # Check if any segment has fades - if so, we need to use RecodeAudioCutter
+            has_any_fades = any(seg.fade_info is not None and
+                               (seg.fade_info.fadein_duration is not None or seg.fade_info.fadeout_duration is not None)
+                               for seg in cut_segments if seg.fade_info is not None)
+
             if audio_export_info is not None:
                 for track_i, track_export_settings in enumerate(audio_export_info.output_tracks):
                     if track_export_settings is not None and  track_export_settings.codec == 'passthru':
-                        generators.append(PassthruAudioCutter(media_container, output_av_container, track_i, track_export_settings))
+                        # Use RecodeAudioCutter if fades are present, otherwise use PassthruAudioCutter
+                        if has_any_fades:
+                            generators.append(RecodeAudioCutter(media_container, output_av_container, track_i, track_export_settings))
+                        else:
+                            generators.append(PassthruAudioCutter(media_container, output_av_container, track_i, track_export_settings))
 
             for sub_track_i in range(len(media_container.subtitle_tracks)):
                 generators.append(SubtitleCutter(media_container, output_av_container, sub_track_i))
