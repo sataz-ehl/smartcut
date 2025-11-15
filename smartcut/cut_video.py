@@ -772,41 +772,17 @@ class VideoCutter:
             # Save original frame attributes
             original_pts = frame.pts
             original_time_base = frame.time_base
-            pix_fmt = frame.format.name
 
-            # Apply fade directly in YUV color space to avoid expensive RGB conversions
-            # This is much more efficient and prevents playback stuttering
-            if pix_fmt in ['yuv420p', 'yuvj420p', 'yuv422p', 'yuv444p', 'nv12', 'nv21']:
-                # Process YUV formats directly
-                # Get numpy array in native format (no conversion)
-                arr = frame.to_ndarray()
+            # Convert to RGB24, apply fade, and let encoder handle conversion to output format
+            # The encoder is configured for YUV output but accepts RGB24 input
+            # and performs the conversion internally, which avoids stuttering
+            img = frame.to_ndarray(format='rgb24')
+            img = (img.astype(np.float32) * alpha).clip(0, 255).astype(np.uint8)
 
-                # For planar YUV formats, Y is the first plane
-                # Multiply Y plane by alpha to darken the image
-                if len(arr.shape) == 3:  # Planar format (planes, height, width)
-                    # Y plane is index 0
-                    arr[0] = (arr[0].astype(np.float32) * alpha).astype(arr.dtype)
-                    # Optionally fade chroma towards neutral (128 for 8-bit)
-                    if pix_fmt in ['yuv420p', 'yuvj420p', 'yuv422p', 'yuv444p']:
-                        neutral = 128 if arr.dtype == np.uint8 else 512  # 8-bit vs 10-bit
-                        for i in [1, 2]:  # U and V planes
-                            arr[i] = ((arr[i].astype(np.float32) - neutral) * alpha + neutral).astype(arr.dtype)
-
-                # Create new frame from modified array in native format
-                frame = av.VideoFrame.from_ndarray(arr, format=pix_fmt)
-                frame.pts = original_pts
-                if original_time_base is not None:
-                    frame.time_base = original_time_base
-            else:
-                # Fallback to RGB conversion for other pixel formats
-                arr = frame.to_ndarray(format='rgb24')
-                arr = (arr * alpha).astype(np.uint8)
-                frame = av.VideoFrame.from_ndarray(arr, format='rgb24')
-                # Convert back to original pixel format
-                frame = frame.reformat(format=pix_fmt)
-                frame.pts = original_pts
-                if original_time_base is not None:
-                    frame.time_base = original_time_base
+            frame = av.VideoFrame.from_ndarray(img, format='rgb24')
+            frame.pts = original_pts
+            if original_time_base is not None:
+                frame.time_base = original_time_base
 
         return frame
 
