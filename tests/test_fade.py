@@ -13,7 +13,7 @@ from pathlib import Path
 # Import synthetic video generator
 from generate_synthetic_video import generate_test_video
 
-def run_smartcut(input_path: str, output_path: str, keep_args: list[str]) -> bool:
+def run_smartcut(input_path: str, output_path: str, keep_args: list[str]) -> None:
     """
     Run smartcut with the given arguments.
 
@@ -22,8 +22,8 @@ def run_smartcut(input_path: str, output_path: str, keep_args: list[str]) -> boo
         output_path: Output video path
         keep_args: List of --keep arguments
 
-    Returns:
-        True if successful, False otherwise
+    Raises:
+        AssertionError if smartcut fails
     """
     cmd = [sys.executable, '-m', 'smartcut', input_path, output_path]
     for keep_arg in keep_args:
@@ -32,26 +32,23 @@ def run_smartcut(input_path: str, output_path: str, keep_args: list[str]) -> boo
     print(f"Running: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True)
 
-    if result.returncode != 0:
-        print(f"Error running smartcut: {result.stderr}")
-        return False
+    assert result.returncode == 0, f"Smartcut failed: {result.stderr}"
 
     print(f"✓ Smartcut completed successfully")
-    return True
 
-def check_video_exists(path: str, min_size: int = 1000) -> bool:
-    """Check if video file exists and has reasonable size."""
-    if not os.path.exists(path):
-        print(f"✗ Output file does not exist: {path}")
-        return False
+def check_video_exists(path: str, min_size: int = 1000) -> None:
+    """
+    Check if video file exists and has reasonable size.
+
+    Raises:
+        AssertionError if video doesn't exist or is too small
+    """
+    assert os.path.exists(path), f"Output file does not exist: {path}"
 
     size = os.path.getsize(path)
-    if size < min_size:
-        print(f"✗ Output file too small: {size} bytes")
-        return False
+    assert size >= min_size, f"Output file too small: {size} bytes"
 
     print(f"✓ Output file exists ({size} bytes)")
-    return True
 
 def test_no_fade():
     """Test basic cutting without fades (baseline)."""
@@ -63,17 +60,13 @@ def test_no_fade():
         input_video = os.path.join(tmpdir, "input.mp4")
         output_video = os.path.join(tmpdir, "output_no_fade.mp4")
 
-        if not generate_test_video(input_video, duration=10):
-            return False
+        assert generate_test_video(input_video, duration=10), "Failed to generate test video"
 
-        if not run_smartcut(input_video, output_video, ['5,8']):
-            return False
+        run_smartcut(input_video, output_video, ['5,8'])
 
-        if not check_video_exists(output_video):
-            return False
+        check_video_exists(output_video)
 
         print("✓ TEST PASSED: No fade")
-        return True
 
 def test_fadein_only():
     """Test fade-in only."""
@@ -85,17 +78,13 @@ def test_fadein_only():
         input_video = os.path.join(tmpdir, "input.mp4")
         output_video = os.path.join(tmpdir, "output_fadein.mp4")
 
-        if not generate_test_video(input_video, duration=10):
-            return False
+        assert generate_test_video(input_video, duration=10), "Failed to generate test video"
 
-        if not run_smartcut(input_video, output_video, ['5:fadein,8']):
-            return False
+        run_smartcut(input_video, output_video, ['5:fadein,8'])
 
-        if not check_video_exists(output_video):
-            return False
+        check_video_exists(output_video)
 
         print("✓ TEST PASSED: Fade-in only")
-        return True
 
 def test_fadeout_only():
     """Test fade-out only."""
@@ -107,17 +96,13 @@ def test_fadeout_only():
         input_video = os.path.join(tmpdir, "input.mp4")
         output_video = os.path.join(tmpdir, "output_fadeout.mp4")
 
-        if not generate_test_video(input_video, duration=10):
-            return False
+        assert generate_test_video(input_video, duration=10), "Failed to generate test video"
 
-        if not run_smartcut(input_video, output_video, ['5,8:fadeout']):
-            return False
+        run_smartcut(input_video, output_video, ['5,8:fadeout'])
 
-        if not check_video_exists(output_video):
-            return False
+        check_video_exists(output_video)
 
         print("✓ TEST PASSED: Fade-out only")
-        return True
 
 def test_both_fades():
     """Test both fade-in and fade-out."""
@@ -129,17 +114,13 @@ def test_both_fades():
         input_video = os.path.join(tmpdir, "input.mp4")
         output_video = os.path.join(tmpdir, "output_both_fades.mp4")
 
-        if not generate_test_video(input_video, duration=10):
-            return False
+        assert generate_test_video(input_video, duration=10), "Failed to generate test video"
 
-        if not run_smartcut(input_video, output_video, ['5:fadein,8:fadeout']):
-            return False
+        run_smartcut(input_video, output_video, ['5:fadein,8:fadeout'])
 
-        if not check_video_exists(output_video):
-            return False
+        check_video_exists(output_video)
 
         print("✓ TEST PASSED: Both fades")
-        return True
 
 def test_custom_fade_duration():
     """Test custom fade durations."""
@@ -151,17 +132,13 @@ def test_custom_fade_duration():
         input_video = os.path.join(tmpdir, "input.mp4")
         output_video = os.path.join(tmpdir, "output_custom_duration.mp4")
 
-        if not generate_test_video(input_video, duration=15):
-            return False
+        assert generate_test_video(input_video, duration=15), "Failed to generate test video"
 
-        if not run_smartcut(input_video, output_video, ['5:fadein:1.5,12:fadeout:2.0']):
-            return False
+        run_smartcut(input_video, output_video, ['5:fadein:1.5,12:fadeout:2.0'])
 
-        if not check_video_exists(output_video):
-            return False
+        check_video_exists(output_video)
 
         print("✓ TEST PASSED: Custom fade durations")
-        return True
 
 def test_multiple_segments():
     """Test multiple segments with different fade configurations."""
@@ -173,18 +150,14 @@ def test_multiple_segments():
         input_video = os.path.join(tmpdir, "input.mp4")
         output_video = os.path.join(tmpdir, "output_multiple.mp4")
 
-        if not generate_test_video(input_video, duration=20):
-            return False
+        assert generate_test_video(input_video, duration=20), "Failed to generate test video"
 
         # First segment: no fade, second segment: fade-in only, third segment: both fades
-        if not run_smartcut(input_video, output_video, ['2,4', '8:fadein,10', '15:fadein,18:fadeout']):
-            return False
+        run_smartcut(input_video, output_video, ['2,4', '8:fadein,10', '15:fadein,18:fadeout'])
 
-        if not check_video_exists(output_video):
-            return False
+        check_video_exists(output_video)
 
         print("✓ TEST PASSED: Multiple segments")
-        return True
 
 def create_demo_video():
     """Create a demo video saved to tests folder for manual inspection."""
