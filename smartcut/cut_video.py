@@ -1254,7 +1254,7 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                 #
                 # AUDIO: All GOPs in fade segments are re-encoded for audio (regardless
                 # of video passthrough) to maintain encoder state and prevent artifacts.
-                    cut_seg.require_recode = False
+                cut_seg.require_recode = False
 
                 new_cut_segments.append(cut_seg)
             else:
