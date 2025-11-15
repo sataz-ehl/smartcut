@@ -1154,7 +1154,9 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
     adjusted_segment_times = make_adjusted_segment_times(basic_segments, media_container)
     cut_segments = make_cut_segments(media_container, adjusted_segment_times, video_settings.mode == VideoExportMode.KEYFRAMES)
 
-    # Attach fade information to cut segments and split for minimal re-encoding
+    # Attach fade information to cut segments
+    # Simplified approach: if GOP overlaps with fade region, recode entire GOP
+    # This avoids encoder flush/recreate overhead from splitting segments too much
     segment_idx = 0
     new_cut_segments = []
 
@@ -1179,58 +1181,20 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                 fadein_end_absolute = orig_seg_start + fade_info.fadein_duration if has_fadein else orig_seg_start
                 fadeout_start_absolute = orig_seg_end - fade_info.fadeout_duration if has_fadeout else orig_seg_end
 
-                # Split segment for minimal re-encoding based on overlap with fade regions
-                segments_to_add = []
-                current_time = cut_seg.start_time
+                # Check if this GOP overlaps with any fade region
+                overlaps_fadein = has_fadein and cut_seg.start_time < fadein_end_absolute
+                overlaps_fadeout = has_fadeout and cut_seg.end_time > fadeout_start_absolute
 
-                # Fade-in portion (only if this cut_seg overlaps with absolute fadein region)
-                if has_fadein and cut_seg.start_time < fadein_end_absolute:
-                    fadein_end = min(fadein_end_absolute, cut_seg.end_time)
-                    fadein_seg = CutSegment(
-                        require_recode=True,
-                        start_time=current_time,
-                        end_time=fadein_end,
-                        gop_start_dts=cut_seg.gop_start_dts,
-                        gop_end_dts=cut_seg.gop_end_dts,
-                        gop_index=cut_seg.gop_index,
-                        fade_info=FadeInfo(fadein_duration=fade_info.fadein_duration, fadeout_duration=None)
-                    )
-                    segments_to_add.append(fadein_seg)
-                    current_time = fadein_end
+                if overlaps_fadein or overlaps_fadeout:
+                    # Recode entire GOP if it overlaps with any fade region
+                    # This avoids splitting GOPs and constantly flushing/recreating encoder
+                    cut_seg.require_recode = True
+                    cut_seg.fade_info = fade_info
+                else:
+                    # No overlap with fade regions - passthrough
+                    cut_seg.fade_info = None
 
-                # Middle portion (no fade)
-                middle_start = max(current_time, fadein_end_absolute)
-                middle_end = min(cut_seg.end_time, fadeout_start_absolute)
-
-                if middle_start < middle_end:
-                    middle_seg = CutSegment(
-                        require_recode=cut_seg.require_recode,  # Keep original recode status
-                        start_time=middle_start,
-                        end_time=middle_end,
-                        gop_start_dts=cut_seg.gop_start_dts,
-                        gop_end_dts=cut_seg.gop_end_dts,
-                        gop_index=cut_seg.gop_index,
-                        fade_info=None  # No fade for middle portion
-                    )
-                    segments_to_add.append(middle_seg)
-                    current_time = middle_end
-
-                # Fade-out portion (only if this cut_seg overlaps with absolute fadeout region)
-                if has_fadeout and cut_seg.end_time > fadeout_start_absolute:
-                    fadeout_start = max(fadeout_start_absolute, current_time)
-                    if fadeout_start < cut_seg.end_time:
-                        fadeout_seg = CutSegment(
-                            require_recode=True,
-                            start_time=fadeout_start,
-                            end_time=cut_seg.end_time,
-                            gop_start_dts=cut_seg.gop_start_dts,
-                            gop_end_dts=cut_seg.gop_end_dts,
-                            gop_index=cut_seg.gop_index,
-                            fade_info=FadeInfo(fadein_duration=None, fadeout_duration=fade_info.fadeout_duration)
-                        )
-                        segments_to_add.append(fadeout_seg)
-
-                new_cut_segments.extend(segments_to_add)
+                new_cut_segments.append(cut_seg)
             else:
                 # No fades, keep original segment
                 cut_seg.fade_info = None
