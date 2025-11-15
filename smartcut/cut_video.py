@@ -753,6 +753,7 @@ class VideoCutter:
         # Save original frame attributes
         original_pts = frame.pts
         original_time_base = frame.time_base
+        original_pix_fmt = frame.format.name
 
         # Convert frame to numpy array for processing
         arr = frame.to_ndarray(format='rgb24')
@@ -777,6 +778,9 @@ class VideoCutter:
         if alpha < 1.0:
             arr = (arr * alpha).astype(np.uint8)
             frame = av.VideoFrame.from_ndarray(arr, format='rgb24')
+            # Convert back to original pixel format to match encoder expectations
+            # This avoids implicit conversions that can cause playback stuttering
+            frame = frame.reformat(format=original_pix_fmt)
             # Restore original attributes
             frame.pts = original_pts
             if original_time_base is not None:
