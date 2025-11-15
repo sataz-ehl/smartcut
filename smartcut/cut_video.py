@@ -316,7 +316,8 @@ class RecodeAudioCutter:
             )
             self.encoder.sample_rate = sample_rate
             self.encoder.layout = in_layout
-            self.encoder.format = self.track.av_stream.codec_context.format
+            # Use floating point planar format for better fade processing
+            self.encoder.format = 'fltp'
             self.encoder.time_base = in_tb
 
             # Match source bitrate to maintain quality consistency
@@ -338,8 +339,12 @@ class RecodeAudioCutter:
 
         for pkt in self.track.packets[start_pkt_idx:end_pkt_idx]:
             for audio_frame in self.decoder.decode(pkt):
-                # Convert to numpy array
+                # Convert to numpy array (as float32 for better precision)
                 audio_arr = audio_frame.to_ndarray()
+
+                # Ensure audio_arr is float32 for fade processing
+                if audio_arr.dtype != np.float32:
+                    audio_arr = audio_arr.astype(np.float32)
 
                 # Apply fade
                 if cut_segment.fade_info is not None:
@@ -348,8 +353,9 @@ class RecodeAudioCutter:
                         start_sample, end_sample, cut_segment.fade_info
                     )
 
-                # Create new frame from modified array
-                new_frame = av.AudioFrame.from_ndarray(audio_arr, format=audio_frame.format.name, layout=audio_frame.layout.name)
+                # Create new frame from modified array in fltp format
+                layout_name = audio_frame.layout.name if audio_frame.layout is not None else str(in_layout)
+                new_frame = av.AudioFrame.from_ndarray(audio_arr.astype(np.float32), format='fltp', layout=layout_name)
                 new_frame.sample_rate = audio_frame.sample_rate
                 new_frame.pts = int(current_sample - start_sample + self.segment_start_in_output * sample_rate)
 
@@ -1160,20 +1166,26 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
         if segment_idx < len(fade_infos) and fade_infos[segment_idx] is not None:
             fade_info = fade_infos[segment_idx]
 
+            # Get the ORIGINAL segment boundaries for calculating absolute fade regions
+            orig_seg_start = adjusted_segment_times[segment_idx][0]
+            orig_seg_end = adjusted_segment_times[segment_idx][1]
+
             # Check if this segment has fades
             has_fadein = fade_info.fadein_duration is not None and fade_info.fadein_duration > 0
             has_fadeout = fade_info.fadeout_duration is not None and fade_info.fadeout_duration > 0
 
             if has_fadein or has_fadeout:
-                # Split segment for minimal re-encoding
-                seg_duration = cut_seg.end_time - cut_seg.start_time
-                segments_to_add = []
+                # Calculate absolute fade boundaries based on ORIGINAL segment
+                fadein_end_absolute = orig_seg_start + fade_info.fadein_duration if has_fadein else orig_seg_start
+                fadeout_start_absolute = orig_seg_end - fade_info.fadeout_duration if has_fadeout else orig_seg_end
 
+                # Split segment for minimal re-encoding based on overlap with fade regions
+                segments_to_add = []
                 current_time = cut_seg.start_time
 
-                # Fade-in portion (needs re-encoding)
-                if has_fadein:
-                    fadein_end = min(cut_seg.start_time + fade_info.fadein_duration, cut_seg.end_time)
+                # Fade-in portion (only if this cut_seg overlaps with absolute fadein region)
+                if has_fadein and cut_seg.start_time < fadein_end_absolute:
+                    fadein_end = min(fadein_end_absolute, cut_seg.end_time)
                     fadein_seg = CutSegment(
                         require_recode=True,
                         start_time=current_time,
@@ -1186,37 +1198,37 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                     segments_to_add.append(fadein_seg)
                     current_time = fadein_end
 
-                # Middle portion (passthrough if possible)
-                fadeout_start = cut_seg.end_time
-                if has_fadeout:
-                    fadeout_start = max(cut_seg.end_time - fade_info.fadeout_duration, current_time)
+                # Middle portion (no fade)
+                middle_start = max(current_time, fadein_end_absolute)
+                middle_end = min(cut_seg.end_time, fadeout_start_absolute)
 
-                if current_time < fadeout_start:
-                    # There's a middle portion that doesn't need fading
+                if middle_start < middle_end:
                     middle_seg = CutSegment(
                         require_recode=cut_seg.require_recode,  # Keep original recode status
-                        start_time=current_time,
-                        end_time=fadeout_start,
+                        start_time=middle_start,
+                        end_time=middle_end,
                         gop_start_dts=cut_seg.gop_start_dts,
                         gop_end_dts=cut_seg.gop_end_dts,
                         gop_index=cut_seg.gop_index,
                         fade_info=None  # No fade for middle portion
                     )
                     segments_to_add.append(middle_seg)
-                    current_time = fadeout_start
+                    current_time = middle_end
 
-                # Fade-out portion (needs re-encoding)
-                if has_fadeout and current_time < cut_seg.end_time:
-                    fadeout_seg = CutSegment(
-                        require_recode=True,
-                        start_time=current_time,
-                        end_time=cut_seg.end_time,
-                        gop_start_dts=cut_seg.gop_start_dts,
-                        gop_end_dts=cut_seg.gop_end_dts,
-                        gop_index=cut_seg.gop_index,
-                        fade_info=FadeInfo(fadein_duration=None, fadeout_duration=fade_info.fadeout_duration)
-                    )
-                    segments_to_add.append(fadeout_seg)
+                # Fade-out portion (only if this cut_seg overlaps with absolute fadeout region)
+                if has_fadeout and cut_seg.end_time > fadeout_start_absolute:
+                    fadeout_start = max(fadeout_start_absolute, current_time)
+                    if fadeout_start < cut_seg.end_time:
+                        fadeout_seg = CutSegment(
+                            require_recode=True,
+                            start_time=fadeout_start,
+                            end_time=cut_seg.end_time,
+                            gop_start_dts=cut_seg.gop_start_dts,
+                            gop_end_dts=cut_seg.gop_end_dts,
+                            gop_index=cut_seg.gop_index,
+                            fade_info=FadeInfo(fadein_duration=None, fadeout_duration=fade_info.fadeout_duration)
+                        )
+                        segments_to_add.append(fadeout_seg)
 
                 new_cut_segments.extend(segments_to_add)
             else:
