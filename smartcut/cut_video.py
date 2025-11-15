@@ -1214,9 +1214,20 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             has_fadeout = fade_info.fadeout_duration is not None and fade_info.fadeout_duration > 0
 
             if has_fadein or has_fadeout:
-                # Recode ALL GOPs in this segment to avoid timing discontinuities
-                # when mixing recoded and passthrough segments
-                cut_seg.require_recode = True
+                # Optimize: Only re-encode GOPs that actually need fading
+                # Calculate fade regions relative to original segment
+                fadein_end_time = orig_seg_start + fade_info.fadein_duration if has_fadein else orig_seg_start
+                fadeout_start_time = orig_seg_end - fade_info.fadeout_duration if has_fadeout else orig_seg_end
+
+                # Check if this GOP overlaps with any fade region
+                gop_needs_fade = False
+                if has_fadein and cut_seg.start_time < fadein_end_time:
+                    gop_needs_fade = True  # GOP overlaps with fade-in region
+                if has_fadeout and cut_seg.end_time > fadeout_start_time:
+                    gop_needs_fade = True  # GOP overlaps with fade-out region
+
+                # Only mark for re-encoding if this GOP actually needs fading
+                cut_seg.require_recode = gop_needs_fade
                 cut_seg.fade_info = fade_info
                 # Store original segment boundaries for correct fade calculation
                 cut_seg.orig_segment_start = orig_seg_start
