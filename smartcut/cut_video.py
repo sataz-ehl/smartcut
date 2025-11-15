@@ -324,6 +324,9 @@ class RecodeAudioCutter:
             if self.track.av_stream.bit_rate:
                 self.encoder.bit_rate = self.track.av_stream.bit_rate
 
+            # Open encoder before use (required in PyAV)
+            self.encoder.open()
+
         # Decode, apply fade, and re-encode
         packets = []
         current_sample = start_sample
@@ -881,6 +884,11 @@ class VideoCutter:
 
             frame.pict_type = PictureType.NONE
             result_packets.extend(self.enc_codec.encode(frame))
+
+        # Flush encoder after each segment to prevent frame buffering issues
+        # This is especially important for fade segments to avoid stuttering
+        if self.enc_codec is not None:
+            result_packets.extend(self.enc_codec.encode(None))
 
         if self.codec_name == 'mpeg2video':
             for p in result_packets:
