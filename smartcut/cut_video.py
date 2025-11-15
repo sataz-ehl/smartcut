@@ -328,6 +328,18 @@ class RecodeAudioCutter:
         packets = []
         current_sample = start_sample
 
+        # Calculate original segment sample boundaries for fade calculation
+        # This ensures all GOPs in a segment use the same fade curve
+        if cut_segment.orig_segment_start is not None:
+            orig_start_sample = int(float(cut_segment.orig_segment_start) * sample_rate)
+        else:
+            orig_start_sample = start_sample
+
+        if cut_segment.orig_segment_end is not None:
+            orig_end_sample = int(float(cut_segment.orig_segment_end) * sample_rate)
+        else:
+            orig_end_sample = end_sample
+
         # Get packets for this segment
         if cut_segment.start_time <= 0:
             start_pkt_idx = 0
@@ -346,11 +358,11 @@ class RecodeAudioCutter:
                 if audio_arr.dtype != np.float32:
                     audio_arr = audio_arr.astype(np.float32)
 
-                # Apply fade
+                # Apply fade using ORIGINAL segment boundaries to avoid duplicate fades
                 if cut_segment.fade_info is not None:
                     audio_arr = self._apply_audio_fade(
                         audio_arr, current_sample, sample_rate,
-                        start_sample, end_sample, cut_segment.fade_info
+                        orig_start_sample, orig_end_sample, cut_segment.fade_info
                     )
 
                 # Create new frame from modified array in fltp format
@@ -804,16 +816,8 @@ class VideoCutter:
             if muxing_codec.rate is not None:
                 enc_codec.rate = muxing_codec.rate
 
-            # Use bitrate mode if source has bitrate, otherwise use CRF mode
-            # Don't mix both as they can conflict
-            if muxing_codec.bit_rate is not None:
-                # Bitrate mode - match source exactly for consistent quality
-                enc_codec.bit_rate = muxing_codec.bit_rate
-                if muxing_codec.bit_rate_tolerance is not None:
-                    enc_codec.bit_rate_tolerance = muxing_codec.bit_rate_tolerance
-            else:
-                # CRF mode - use quality settings
-                enc_codec.options.update(self.encoding_options)
+            # Always set encoding options (CRF, profile, codec-specific params)
+            enc_codec.options.update(self.encoding_options)
 
             enc_codec.width = muxing_codec.width
             enc_codec.height = muxing_codec.height
@@ -828,6 +832,10 @@ class VideoCutter:
             #enc_codec.flags = muxing_codec.flags # This was here, but it's a bit sus. Disabling doesn't break any tests
             #enc_codec.flags ^= Flags.global_header # either doesn't help or doesn't work
 
+            if muxing_codec.bit_rate is not None:
+                enc_codec.bit_rate = muxing_codec.bit_rate
+            if muxing_codec.bit_rate_tolerance is not None:
+                enc_codec.bit_rate_tolerance = muxing_codec.bit_rate_tolerance
             enc_codec.codec_tag = muxing_codec.codec_tag
             enc_codec.thread_type = "FRAME"
             self.enc_last_pts = -1
