@@ -889,6 +889,8 @@ class VideoCutter:
         # This is especially important for fade segments to avoid stuttering
         if self.enc_codec is not None:
             result_packets.extend(self.enc_codec.encode(None))
+            # Reset encoder to None so it can be recreated for the next segment
+            self.enc_codec = None
 
         if self.codec_name == 'mpeg2video':
             for p in result_packets:
