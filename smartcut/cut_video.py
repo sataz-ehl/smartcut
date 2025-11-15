@@ -804,16 +804,8 @@ class VideoCutter:
             if muxing_codec.rate is not None:
                 enc_codec.rate = muxing_codec.rate
 
-            # Use bitrate mode if source has bitrate, otherwise use CRF mode
-            # Don't mix both as they can conflict
-            if muxing_codec.bit_rate is not None:
-                # Bitrate mode - match source exactly for consistent quality
-                enc_codec.bit_rate = muxing_codec.bit_rate
-                if muxing_codec.bit_rate_tolerance is not None:
-                    enc_codec.bit_rate_tolerance = muxing_codec.bit_rate_tolerance
-            else:
-                # CRF mode - use quality settings
-                enc_codec.options.update(self.encoding_options)
+            # Always set encoding options (CRF, profile, codec-specific params)
+            enc_codec.options.update(self.encoding_options)
 
             enc_codec.width = muxing_codec.width
             enc_codec.height = muxing_codec.height
@@ -828,6 +820,10 @@ class VideoCutter:
             #enc_codec.flags = muxing_codec.flags # This was here, but it's a bit sus. Disabling doesn't break any tests
             #enc_codec.flags ^= Flags.global_header # either doesn't help or doesn't work
 
+            if muxing_codec.bit_rate is not None:
+                enc_codec.bit_rate = muxing_codec.bit_rate
+            if muxing_codec.bit_rate_tolerance is not None:
+                enc_codec.bit_rate_tolerance = muxing_codec.bit_rate_tolerance
             enc_codec.codec_tag = muxing_codec.codec_tag
             enc_codec.thread_type = "FRAME"
             self.enc_last_pts = -1
