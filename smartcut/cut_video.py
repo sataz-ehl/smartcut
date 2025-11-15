@@ -1,5 +1,6 @@
 import heapq
 import os
+import sys
 from collections.abc import Generator
 from dataclasses import dataclass
 from fractions import Fraction
@@ -204,9 +205,18 @@ class RecodeAudioCutter:
 
         Returns:
             Audio array with fade applied
+
+        Environment Variables:
+            SMARTCUT_DEBUG_AUDIO_FADE: Set to '1' to enable debug output showing
+                                       amplitude reduction during fades
         """
         if fade_info is None:
             return audio_arr
+
+        # Debug mode: capture original amplitude for comparison
+        debug_mode = os.environ.get('SMARTCUT_DEBUG_AUDIO_FADE') == '1'
+        if debug_mode:
+            orig_peak = np.max(np.abs(audio_arr))
 
         num_samples = audio_arr.shape[0]
         result = audio_arr.copy()
@@ -233,6 +243,15 @@ class RecodeAudioCutter:
             # Apply fade
             if alpha < 1.0:
                 result[i] = result[i] * alpha
+
+        # Debug output: show amplitude reduction
+        if debug_mode:
+            result_peak = np.max(np.abs(result))
+            reduction_pct = (1 - result_peak / orig_peak) * 100 if orig_peak > 0 else 0
+            time_in_segment = (sample_idx - segment_start_sample) / samples_per_second
+            print(f"[AUDIO_FADE] t={time_in_segment:.3f}s | fade_info={fade_info} | "
+                  f"orig_peak={orig_peak:.6f} → result_peak={result_peak:.6f} "
+                  f"({reduction_pct:.1f}% reduction)", file=sys.stderr)
 
         return result
 

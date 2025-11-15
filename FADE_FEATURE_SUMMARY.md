@@ -96,7 +96,35 @@ Demo video files created for manual inspection:
 - `tests/test_input_fade.mp4` - Input video with audio
 - `tests/test_output_fade_demo.mp4` - Output with 2-second fade-in and fade-out
 
-### 5. Windows Support
+### 5. Audio Fade Verification
+
+To verify that audio fades are working correctly, you can enable debug mode:
+
+```bash
+# Enable debug output to see amplitude reduction in real-time
+export SMARTCUT_DEBUG_AUDIO_FADE=1
+smartcut input.mp4 output.mp4 --keep 2:fadein:2,8
+```
+
+Debug output shows:
+```
+[AUDIO_FADE] t=0.000s | fade_info=FadeInfo(fadein_duration=Fraction(2, 1), fadeout_duration=None) |
+              orig_peak=0.948950 → result_peak=0.000010 (100.0% reduction)
+[AUDIO_FADE] t=0.021s | fade_info=FadeInfo(fadein_duration=Fraction(2, 1), fadeout_duration=None) |
+              orig_peak=0.950377 → result_peak=0.000208 (100.0% reduction)
+[AUDIO_FADE] t=1.500s | fade_info=FadeInfo(fadein_duration=Fraction(2, 1), fadeout_duration=None) |
+              orig_peak=0.949982 → result_peak=0.711887 (25.1% reduction)
+...
+```
+
+This confirms:
+- **Fade-in**: Audio starts at near-zero amplitude (100% reduction) and gradually increases to full volume
+- **Fade-out**: Audio starts at full volume and gradually decreases to near-zero
+- The linear alpha blending is applied correctly to each audio frame
+
+Alternative verification tool: `python tests/verify_audio_fade.py`
+
+### 6. Windows Support
 
 Created setup scripts and requirements for Windows users:
 
