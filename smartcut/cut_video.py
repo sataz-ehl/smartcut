@@ -319,6 +319,10 @@ class RecodeAudioCutter:
             self.encoder.format = self.track.av_stream.codec_context.format
             self.encoder.time_base = in_tb
 
+            # Match source bitrate to maintain quality consistency
+            if self.track.av_stream.bit_rate:
+                self.encoder.bit_rate = self.track.av_stream.bit_rate
+
         # Decode, apply fade, and re-encode
         packets = []
         current_sample = start_sample
