@@ -345,8 +345,10 @@ smartcut input.mp4 output.mp4 \
   - Ideal for audio ducking/crossfades
 
 - **Mixed fades**:
-  - Only the specified media type is re-encoded
-  - Example: `videofadein` + `audiofadeout` re-encodes both, but only in fade regions
+  - Each media type is re-encoded according to its strategy
+  - Example: `videofadein` + `audiofadeout`:
+    - Video: Only GOPs overlapping with fade-in region are re-encoded (selective)
+    - Audio: Entire segment is re-encoded (full, maintains encoder state)
 
 ### GOP-Level Optimization (Video Fades)
 - **Selective re-encoding**: Only GOPs (Group of Pictures) overlapping with video fade regions are re-encoded
