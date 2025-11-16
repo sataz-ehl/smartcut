@@ -156,6 +156,13 @@ def parse_segments_with_fades(keep_args: list[str], duration: Fraction) -> list[
             end_time_str, end_fade_duration, end_fade_type = parse_fade_from_element(end_elem)
             end_time = resolve_time_with_duration(end_time_str, duration)
 
+            # Validate: start time must be before end time
+            if start_time >= end_time:
+                raise ValueError(
+                    f"Invalid segment: start time ({float(start_time):.2f}s) must be before "
+                    f"end time ({float(end_time):.2f}s). Got segment: {start_elem},{end_elem}"
+                )
+
             # Construct FadeInfo with support for independent video/audio control
             video_fadein = None
             audio_fadein = None
@@ -185,13 +192,30 @@ def parse_segments_with_fades(keep_args: list[str], duration: Fraction) -> list[
             fade_info = FadeInfo(video_fadein, video_fadeout, audio_fadein, audio_fadeout)
             segments.append(SegmentWithFade(start_time, end_time, fade_info))
 
+    # Auto-sort segments by start time to ensure chronological order
+    segments.sort(key=lambda seg: seg.start_time)
+
     return segments
 
 def parse_time_segments(time_str: str) -> list[tuple[Fraction, Fraction]]:
     times = list(map(time_to_fraction, time_str.split(',')))
     if len(times) % 2 != 0:
         raise ValueError("You must provide an even number of time points for segments.")
-    return list(zip(times[::2], times[1::2]))
+
+    segments = list(zip(times[::2], times[1::2]))
+
+    # Validate: start < end for each segment
+    for start, end in segments:
+        if start >= end:
+            raise ValueError(
+                f"Invalid segment: start time ({float(start):.2f}s) must be before "
+                f"end time ({float(end):.2f}s)"
+            )
+
+    # Auto-sort segments by start time
+    segments.sort(key=lambda seg: seg[0])
+
+    return segments
 
 def parse_time_segments_with_duration(time_str: str, duration: Fraction) -> list[tuple[Fraction, Fraction]]:
     """Parse time segments resolving special keywords and negative timestamps."""
@@ -199,7 +223,21 @@ def parse_time_segments_with_duration(time_str: str, duration: Fraction) -> list
     times = [resolve_time_with_duration(elem, duration) for elem in time_elements]
     if len(times) % 2 != 0:
         raise ValueError("You must provide an even number of time points for segments.")
-    return list(zip(times[::2], times[1::2]))
+
+    segments = list(zip(times[::2], times[1::2]))
+
+    # Validate: start < end for each segment
+    for i, (start, end) in enumerate(segments):
+        if start >= end:
+            raise ValueError(
+                f"Invalid segment: start time ({float(start):.2f}s) must be before "
+                f"end time ({float(end):.2f}s). Got: {time_elements[i*2]},{time_elements[i*2+1]}"
+            )
+
+    # Auto-sort segments by start time
+    segments.sort(key=lambda seg: seg[0])
+
+    return segments
 
 def frame_to_time(source: MediaContainer, frame_str: str, end_frame: bool = False) -> Fraction:
     frame_num = int(frame_str)
@@ -218,7 +256,22 @@ def parse_frame_segments(source: MediaContainer, frame_str: str) -> list[tuple[F
         raise ValueError("You must provide an even number of frames for segments.")
     start_frames = list(map(lambda f: frame_to_time(source, f), all_frames[::2]))
     end_frames = list(map(lambda f: frame_to_time(source, f, True), all_frames[1::2]))
-    return list(zip(start_frames, end_frames))
+
+    segments = list(zip(start_frames, end_frames))
+
+    # Validate: start < end for each segment
+    for i, (start, end) in enumerate(segments):
+        if start >= end:
+            raise ValueError(
+                f"Invalid segment: start frame must be before end frame. "
+                f"Got frames: {all_frames[i*2]},{all_frames[i*2+1]} "
+                f"(times: {float(start):.2f}s to {float(end):.2f}s)"
+            )
+
+    # Auto-sort segments by start time
+    segments.sort(key=lambda seg: seg[0])
+
+    return segments
 
 class Progress:
     def __init__(self) -> None:

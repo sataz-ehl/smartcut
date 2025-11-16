@@ -187,6 +187,13 @@ def process(
         if end is None:
             end = float(media_container.duration)
 
+        # Validate: start must be before end
+        if start >= end:
+            raise ValueError(
+                f"Invalid segment: start time ({start:.2f}s) must be before "
+                f"end time ({end:.2f}s)"
+            )
+
         # Create segment config
         segment = CutSegmentConfig(
             start=start,
@@ -258,7 +265,11 @@ def process(
 
         return error is None
 
+    except ValueError:
+        # Re-raise validation errors (user input errors)
+        raise
     except Exception as e:
+        # Catch other exceptions and return False for user-friendly behavior
         print(f"Error processing video: {e}")
         import traceback
         traceback.print_exc()
@@ -327,6 +338,17 @@ def process_segments(
 
             segments_with_fade.append(segment_config.to_segment_with_fade())
 
+        # Validate: start < end for each segment
+        for i, seg in enumerate(segments_with_fade):
+            if seg.start_time >= seg.end_time:
+                raise ValueError(
+                    f"Invalid segment {i+1}: start time ({float(seg.start_time):.2f}s) must be before "
+                    f"end time ({float(seg.end_time):.2f}s)"
+                )
+
+        # Auto-sort segments by start time to ensure chronological order
+        segments_with_fade.sort(key=lambda seg: seg.start_time)
+
         # Setup audio export (passthrough all tracks)
         audio_export_info = AudioExportInfo(
             mix_info=None,
@@ -381,7 +403,11 @@ def process_segments(
 
         return error is None
 
+    except ValueError:
+        # Re-raise validation errors (user input errors)
+        raise
     except Exception as e:
+        # Catch other exceptions and return False for user-friendly behavior
         print(f"Error processing video: {e}")
         import traceback
         traceback.print_exc()
