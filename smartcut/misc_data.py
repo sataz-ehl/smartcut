@@ -22,9 +22,15 @@ class AudioExportInfo:
 
 @dataclass
 class FadeInfo:
-    """Information about fade-in and fade-out effects for a segment."""
-    fadein_duration: Fraction | None = None  # None means no fade-in
-    fadeout_duration: Fraction | None = None  # None means no fade-out
+    """Information about fade-in and fade-out effects for a segment.
+
+    Supports independent control of video and audio fades.
+    When video_* or audio_* fields are None, no fade is applied to that media type.
+    """
+    video_fadein_duration: Fraction | None = None  # None means no video fade-in
+    video_fadeout_duration: Fraction | None = None  # None means no video fade-out
+    audio_fadein_duration: Fraction | None = None  # None means no audio fade-in
+    audio_fadeout_duration: Fraction | None = None  # None means no audio fade-out
 
 @dataclass
 class SegmentWithFade:

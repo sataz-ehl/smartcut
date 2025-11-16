@@ -79,26 +79,30 @@ def parse_fade_from_element(elem: str) -> tuple[str, Fraction | None, str]:
         tuple of (time_str, fade_duration, fade_type) where:
         - time_str: the time portion without fade parameters
         - fade_duration: duration in seconds (None if no fade)
-        - fade_type: 'fadein', 'fadeout', or '' (empty string if no fade)
+        - fade_type: 'fadein', 'fadeout', 'videofadein', 'videofadeout',
+                     'audiofadein', 'audiofadeout', or '' (empty string if no fade)
 
     Examples:
         "30:fadein" -> ("30", Fraction(1), "fadein")
         "40:fadeout:2.5" -> ("40", Fraction(2.5), "fadeout")
+        "30:videofadein:2" -> ("30", Fraction(2), "videofadein")
+        "40:audiofadeout:3" -> ("40", Fraction(3), "audiofadeout")
         "50" -> ("50", None, "")
     """
     parts = elem.split(':')
 
     # Check if last part or second-to-last part is a fade keyword
+    fade_keywords = ['fadein', 'fadeout', 'videofadein', 'videofadeout', 'audiofadein', 'audiofadeout']
     fade_type = ''
     fade_duration = None
     time_parts = []
 
     i = 0
     while i < len(parts):
-        if parts[i].lower() in ['fadein', 'fadeout']:
+        if parts[i].lower() in fade_keywords:
             fade_type = parts[i].lower()
             # Check if next part is a duration
-            if i + 1 < len(parts) and parts[i + 1] not in ['fadein', 'fadeout']:
+            if i + 1 < len(parts) and parts[i + 1].lower() not in fade_keywords:
                 try:
                     fade_duration = Fraction(parts[i + 1])
                     i += 2  # Skip both fade keyword and duration
@@ -127,9 +131,10 @@ def parse_segments_with_fades(keep_args: list[str], duration: Fraction) -> list[
         List of SegmentWithFade objects
 
     Examples:
-        ["10,20"] -> [SegmentWithFade(10, 20, FadeInfo(None, None))]
-        ["30:fadein,40"] -> [SegmentWithFade(30, 40, FadeInfo(1, None))]
-        ["50,60:fadeout:2.0"] -> [SegmentWithFade(50, 60, FadeInfo(None, 2.0))]
+        ["10,20"] -> [SegmentWithFade(10, 20, FadeInfo(None, None, None, None))]
+        ["30:fadein,40"] -> [SegmentWithFade(30, 40, FadeInfo(1, None, 1, None))]  # Both video and audio
+        ["30:videofadein:2,40"] -> [SegmentWithFade(30, 40, FadeInfo(2, None, None, None))]  # Video only
+        ["30,40:audiofadeout:3"] -> [SegmentWithFade(30, 40, FadeInfo(None, None, None, 3))]  # Audio only
     """
     segments = []
 
@@ -151,11 +156,33 @@ def parse_segments_with_fades(keep_args: list[str], duration: Fraction) -> list[
             end_time_str, end_fade_duration, end_fade_type = parse_fade_from_element(end_elem)
             end_time = resolve_time_with_duration(end_time_str, duration)
 
-            # Construct FadeInfo
-            fadein_duration = start_fade_duration if start_fade_type == 'fadein' else None
-            fadeout_duration = end_fade_duration if end_fade_type == 'fadeout' else None
+            # Construct FadeInfo with support for independent video/audio control
+            video_fadein = None
+            audio_fadein = None
+            video_fadeout = None
+            audio_fadeout = None
 
-            fade_info = FadeInfo(fadein_duration, fadeout_duration)
+            # Handle fade-in
+            if start_fade_type == 'fadein':
+                # Legacy: apply to both video and audio
+                video_fadein = start_fade_duration
+                audio_fadein = start_fade_duration
+            elif start_fade_type == 'videofadein':
+                video_fadein = start_fade_duration
+            elif start_fade_type == 'audiofadein':
+                audio_fadein = start_fade_duration
+
+            # Handle fade-out
+            if end_fade_type == 'fadeout':
+                # Legacy: apply to both video and audio
+                video_fadeout = end_fade_duration
+                audio_fadeout = end_fade_duration
+            elif end_fade_type == 'videofadeout':
+                video_fadeout = end_fade_duration
+            elif end_fade_type == 'audiofadeout':
+                audio_fadeout = end_fade_duration
+
+            fade_info = FadeInfo(video_fadein, video_fadeout, audio_fadein, audio_fadeout)
             segments.append(SegmentWithFade(start_time, end_time, fade_info))
 
     return segments
@@ -365,7 +392,7 @@ time formats:
             if c_end < last_segment[1]:
                 segments_basic.append((c_end, last_segment[1]))
         # Convert to SegmentWithFade with no fades
-        segments_with_fade = [SegmentWithFade(s[0], s[1], FadeInfo(None, None)) for s in segments_basic]
+        segments_with_fade = [SegmentWithFade(s[0], s[1], FadeInfo(None, None, None, None)) for s in segments_basic]
     else:
         raise ValueError("You must specify either --keep or --cut.")
 
