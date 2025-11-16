@@ -24,6 +24,7 @@ In contrast, [Smart Media Cutter](https://smartmediacutter.com) is fully-feature
 - **Efficient Cutting**: `smartcut` only recodes around the cutpoints, preserving the majority of the original video quality.
 - **Flexible Input**: Supports a wide range of video/audio formats and codecs.
 - **Flexible cutting**: Allows for both "keep" and "cut" operations based on specified input times.
+- **Fade Effects**: Independent video and audio fade-in/fade-out effects with optimized performance.
 - **Audio Export**: Includes all audio tracks by default with nearly lossless passthrough.
 
 ## Installation
@@ -93,6 +94,49 @@ The CLI requires the input and output file paths as positional arguments. You ca
 - **Specify log level**:
 
   `smartcut.exe input.mp4 output.mp4 --keep 10,20 --log-level info`
+
+### Fade Effects
+
+`smartcut` supports fade-in and fade-out effects with independent control over video and audio fading.
+
+- **Basic fade (both video and audio)**:
+
+  `smartcut input.mp4 output.mp4 --keep 10:fadein:2,30:fadeout:3`
+
+  This keeps the segment from 10s to 30s with a 2-second fade-in and 3-second fade-out applied to both video and audio.
+
+- **Video-only fade**:
+
+  `smartcut input.mp4 output.mp4 --keep 10:videofadein:2,30:videofadeout:3`
+
+  Applies fade effects only to video. Audio remains unchanged (passthrough, very fast).
+
+- **Audio-only fade**:
+
+  `smartcut input.mp4 output.mp4 --keep 10:audiofadein:2,30:audiofadeout:3`
+
+  Applies fade effects only to audio. Video remains unchanged (passthrough, fast).
+
+- **Mixed fade effects**:
+
+  `smartcut input.mp4 output.mp4 --keep 10:videofadein:2,30:audiofadeout:3`
+
+  Video fades in at the start, audio fades out at the end. You can mix any combination of video/audio fade-in/out.
+
+**Available fade keywords**:
+- `fadein` / `fadeout` - Apply to both video and audio (backward compatible)
+- `videofadein` / `videofadeout` - Apply to video only
+- `audiofadein` / `audiofadeout` - Apply to audio only
+
+**Default fade duration**: If you don't specify a duration, the default is 1 second:
+```bash
+smartcut input.mp4 output.mp4 --keep 10:fadein,20:fadeout    # 1 second fades
+```
+
+**Performance notes**:
+- Audio-only fades are ~17x faster than video fades (video uses passthrough)
+- Video-only fades save audio processing time
+- Fades may start/end up to ~1 second early/late due to GOP alignment (typically 0.5-1s imprecision)
 
 ### Audio Export
 
