@@ -1318,9 +1318,9 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             if media_container.video_stream is not None and include_video:
                 generators.append(VideoCutter(media_container, output_av_container, video_settings, log_level))
 
-            # Check if any segment has fades - if so, we need to use RecodeAudioCutter
+            # Check if any segment has audio fades - if so, we need to use RecodeAudioCutter
             has_any_fades = any(seg.fade_info is not None and
-                               (seg.fade_info.fadein_duration is not None or seg.fade_info.fadeout_duration is not None)
+                               (seg.fade_info.audio_fadein_duration is not None or seg.fade_info.audio_fadeout_duration is not None)
                                for seg in cut_segments if seg.fade_info is not None)
 
             if audio_export_info is not None:
