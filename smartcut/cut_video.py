@@ -225,16 +225,16 @@ class RecodeAudioCutter:
             current_sample = sample_idx + i
             alpha = 1.0
 
-            # Fade-in
-            if fade_info.fadein_duration is not None:
-                fadein_samples = int(float(fade_info.fadein_duration) * samples_per_second)
+            # Audio fade-in
+            if fade_info.audio_fadein_duration is not None:
+                fadein_samples = int(float(fade_info.audio_fadein_duration) * samples_per_second)
                 samples_from_start = current_sample - segment_start_sample
                 if samples_from_start < fadein_samples:
                     alpha = min(1.0, samples_from_start / fadein_samples)
 
-            # Fade-out
-            if fade_info.fadeout_duration is not None:
-                fadeout_samples = int(float(fade_info.fadeout_duration) * samples_per_second)
+            # Audio fade-out
+            if fade_info.audio_fadeout_duration is not None:
+                fadeout_samples = int(float(fade_info.audio_fadeout_duration) * samples_per_second)
                 samples_from_end = segment_end_sample - current_sample
                 if samples_from_end < fadeout_samples:
                     fadeout_alpha = min(1.0, samples_from_end / fadeout_samples)
@@ -267,10 +267,10 @@ class RecodeAudioCutter:
         start_sample = int(float(cut_segment.start_time) * sample_rate) if cut_segment.start_time > 0 else 0
         end_sample = int(float(cut_segment.end_time) * sample_rate)
 
-        # Check if we need to recode for fades
+        # Check if we need to recode for audio fades
         needs_fade = (cut_segment.fade_info is not None and
-                     (cut_segment.fade_info.fadein_duration is not None or
-                      cut_segment.fade_info.fadeout_duration is not None))
+                     (cut_segment.fade_info.audio_fadein_duration is not None or
+                      cut_segment.fade_info.audio_fadeout_duration is not None))
 
         if not needs_fade:
             # No fade - use passthrough
@@ -765,15 +765,15 @@ class VideoCutter:
 
         alpha = 1.0
 
-        # Apply fade-in
-        if fade_info.fadein_duration is not None and relative_time < fade_info.fadein_duration:
-            alpha = min(1.0, float(relative_time / fade_info.fadein_duration))
+        # Apply video fade-in
+        if fade_info.video_fadein_duration is not None and relative_time < fade_info.video_fadein_duration:
+            alpha = min(1.0, float(relative_time / fade_info.video_fadein_duration))
 
-        # Apply fade-out
-        if fade_info.fadeout_duration is not None:
+        # Apply video fade-out
+        if fade_info.video_fadeout_duration is not None:
             time_from_end = segment_duration - relative_time
-            if time_from_end < fade_info.fadeout_duration:
-                fadeout_alpha = min(1.0, float(time_from_end / fade_info.fadeout_duration))
+            if time_from_end < fade_info.video_fadeout_duration:
+                fadeout_alpha = min(1.0, float(time_from_end / fade_info.video_fadeout_duration))
                 alpha = min(alpha, fadeout_alpha)
 
         # Only apply fade if alpha < 1.0
@@ -851,8 +851,8 @@ class VideoCutter:
             if frame_abs_time >= s.end_time:
                 break
 
-            # Apply fade effects if specified
-            if s.fade_info is not None and (s.fade_info.fadein_duration is not None or s.fade_info.fadeout_duration is not None):
+            # Apply video fade effects if specified
+            if s.fade_info is not None and (s.fade_info.video_fadein_duration is not None or s.fade_info.video_fadeout_duration is not None):
                 # Use original segment boundaries for fade calculation to avoid duplicate fades across GOPs
                 fade_seg_start = s.orig_segment_start if s.orig_segment_start is not None else s.start_time
                 fade_seg_end = s.orig_segment_end if s.orig_segment_end is not None else s.end_time
@@ -1198,19 +1198,22 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             orig_seg_start = basic_segments[segment_idx][0]
             orig_seg_end = basic_segments[segment_idx][1]
 
-            # Check if this segment has fades
-            has_fadein = fade_info.fadein_duration is not None and fade_info.fadein_duration > 0
-            has_fadeout = fade_info.fadeout_duration is not None and fade_info.fadeout_duration > 0
+            # Check if this segment has any fades (video or audio)
+            has_video_fadein = fade_info.video_fadein_duration is not None and fade_info.video_fadein_duration > 0
+            has_video_fadeout = fade_info.video_fadeout_duration is not None and fade_info.video_fadeout_duration > 0
+            has_audio_fadein = fade_info.audio_fadein_duration is not None and fade_info.audio_fadein_duration > 0
+            has_audio_fadeout = fade_info.audio_fadeout_duration is not None and fade_info.audio_fadeout_duration > 0
 
-            if has_fadein or has_fadeout:
+            if has_video_fadein or has_video_fadeout or has_audio_fadein or has_audio_fadeout:
                 # Attach fade_info to ALL GOPs in this segment (audio needs this to maintain encoder state)
                 cut_seg.fade_info = fade_info
                 cut_seg.orig_segment_start = orig_seg_start
                 cut_seg.orig_segment_end = orig_seg_end
 
-                # Calculate fade region boundaries
-                fadein_end = orig_seg_start + fade_info.fadein_duration if has_fadein else orig_seg_start
-                fadeout_start = orig_seg_end - fade_info.fadeout_duration if has_fadeout else orig_seg_end
+                # Calculate fade region boundaries for VIDEO (used for selective GOP re-encoding)
+                # Audio will re-encode all GOPs regardless
+                video_fadein_end = orig_seg_start + fade_info.video_fadein_duration if has_video_fadein else orig_seg_start
+                video_fadeout_start = orig_seg_end - fade_info.video_fadeout_duration if has_video_fadeout else orig_seg_end
 
                 # OPTIMIZATION: Only mark GOPs that overlap with fade regions for re-encoding
                 #
@@ -1243,17 +1246,17 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                 #
                 # AUDIO: All GOPs in fade segments are re-encoded for audio (regardless
                 # of video passthrough) to maintain encoder state and prevent artifacts.
-                gop_overlaps_fade = (
-                    (cut_seg.start_time < fadein_end) or   # Overlaps with fade-in region
-                    (cut_seg.end_time > fadeout_start)      # Overlaps with fade-out region
+                gop_overlaps_video_fade = (
+                    (cut_seg.start_time < video_fadein_end) or   # Overlaps with video fade-in region
+                    (cut_seg.end_time > video_fadeout_start)      # Overlaps with video fade-out region
                 )
 
-                if gop_overlaps_fade:
+                if gop_overlaps_video_fade:
                     # This GOP needs re-encoding for video (contains actual fade effect)
                     cut_seg.require_recode = True
                 else:
                     # This GOP is in the middle - video uses passthrough (fast)
-                    # Audio will still re-encode (because fade_info is set)
+                    # Audio will still re-encode if audio fades are present (because fade_info is set)
                     cut_seg.require_recode = False
 
                 new_cut_segments.append(cut_seg)
