@@ -1,15 +1,15 @@
-# Per-Segment Fade-In/Fade-Out Feature - Implementation Summary
+# Per-Segment Fade-In/Fade-Out Feature
 
 ## Overview
-This document summarizes the implementation of per-segment fade-in/fade-out effects for the smartcut CLI application.
+Optional fade-in and fade-out effects at the start and/or end of individual kept segments, with independent
+control of video and audio. By default no fading is applied.
 
-## Feature Description
-Added support for optional fade-in and fade-out effects at the start and/or end of individual kept segments in the final video output. This feature is selectively enabled per segment — by default, no fading is applied unless explicitly specified.
+This fork (`sataz-ehl/smartcut`) adds the feature on top of upstream `skeskinen/smartcut`. It was ported to
+upstream's 2.0 module layout in Oct 2026 (see "Implementation" below); the original implementation lived in
+the old `cut_video.py`.
 
-## Implementation Details
-
-### 1. Enhanced CLI Syntax
-The `--keep` option now supports fade parameters with independent control over video and audio fading:
+## CLI Syntax
+The `--keep` option supports fade parameters with independent control over video and audio fading:
 
 - **No fade** (default):
   ```bash
@@ -23,12 +23,12 @@ The `--keep` option now supports fade parameters with independent control over v
   --keep 70:fadein:1.5,80:fadeout:2.0  # Custom durations
   ```
 
-- **Video-only fades** (audio passthrough, ~17x faster):
+- **Video-only fades** (audio is copied):
   ```bash
   --keep 10:videofadein:2,30:videofadeout:3
   ```
 
-- **Audio-only fades** (video passthrough):
+- **Audio-only fades**:
   ```bash
   --keep 10:audiofadein:2,30:audiofadeout:3
   ```
@@ -48,175 +48,100 @@ The `--keep` option now supports fade parameters with independent control over v
 - `videofadein` / `videofadeout` - Apply to video only
 - `audiofadein` / `audiofadeout` - Apply to audio only
 
-**Default fade duration**: 1 second if not specified
+**Default fade duration**: 1 second if not specified.
 
-### 2. Modified Files
+Segments are validated (start must be before end) and sorted by start time. Fades can't be combined with
+`--frames` mode, and `--cut` mode doesn't support fades.
 
-#### `smartcut/misc_data.py`
-- Added `FadeInfo` dataclass with independent control for video and audio fades:
-  - `video_fadein_duration`: Video fade-in duration (None = no fade)
-  - `video_fadeout_duration`: Video fade-out duration (None = no fade)
-  - `audio_fadein_duration`: Audio fade-in duration (None = no fade)
-  - `audio_fadeout_duration`: Audio fade-out duration (None = no fade)
-- Added `SegmentWithFade` dataclass to represent a segment with fade information
-- Extended `CutSegment` dataclass to include optional `fade_info` field
+## Python API (`smartcut/__init__.py`)
+High-level API for programmatic use (Gradio, web apps):
+- `process()`: one segment with optional independent video/audio fades
+- `process_segments()`: several segments, each with its own fades (dicts or `CutSegmentConfig`)
+- `CutSegmentConfig`: segment configuration; `end=None` means the end of the video
 
-#### `smartcut/__main__.py`
-- Implemented `parse_fade_from_element()` to parse fade parameters from time elements
-  - Supports all fade keywords: `fadein`, `fadeout`, `videofadein`, `videofadeout`, `audiofadein`, `audiofadeout`
-- Implemented `parse_segments_with_fades()` to parse multiple `--keep` arguments with fade support
-  - **Validation**: Ensures start time < end time for each segment (raises ValueError if invalid)
-  - **Auto-sorting**: Automatically sorts segments by start time for chronological order
-- Modified argument parser to accept multiple `--keep` options (`action='append'`)
-- Updated `main()` function to pass `SegmentWithFade` objects to `smart_cut()`
-- Updated help text to document fade syntax
+Both validate that start < end (raising `ValueError` with "Invalid segment ..."), sort segments by start time,
+report progress as `progress_callback(current, total)` (counted in internal cut pieces, i.e. GOPs, not user
+segments), and honour `cancel_check()`: it is polled before every GOP, processing stops, the partial output is
+removed and the call returns `False`. The input file is always closed afterwards.
 
-#### `smartcut/cut_video.py`
-- Implemented `expand_segments_with_fades()` to convert `SegmentWithFade` to basic segments
-- Updated `smart_cut()` signature to accept both legacy tuples and new `SegmentWithFade` objects
-- Added intelligent GOP-level fade logic:
-  - **Video fades**: Only re-encode GOPs that overlap with video fade regions (selective re-encoding)
-  - **Audio fades**: Re-encode all GOPs in segments with audio fades (maintains encoder state, prevents artifacts)
-  - **Video-only fades**: Audio uses passthrough (no re-encoding, ~17x faster)
-  - **Audio-only fades**: Video uses passthrough (no re-encoding)
-- Implemented `VideoCutter._apply_fade_to_frame()` to apply video fade effects to frames
-  - Checks for `video_fadein_duration` and `video_fadeout_duration` independently
-- Modified `VideoCutter.recode_segment()` to apply fade effects when processing frames
-- Implemented `RecodeAudioCutter` class to handle audio with fade effects:
-  - Decodes audio frames
-  - Applies fade-in/out to audio samples based on `audio_fadein_duration` and `audio_fadeout_duration`
-  - Re-encodes audio with fades
-- Updated `smart_cut()` to use `RecodeAudioCutter` when segments have audio fades
+```python
+import smartcut
 
-#### `smartcut/__init__.py` (Public API)
-- Created high-level API for programmatic use (Gradio, web apps, etc.):
-  - `process()`: Process single segment with optional independent video/audio fades
-  - `process_segments()`: Process multiple segments with independent fade configurations
-  - `CutSegmentConfig`: Configuration class for segment parameters
-- **Validation**: Both API functions validate that start < end (raises ValueError)
-- **Auto-sorting**: Segments are automatically sorted by start time
-- **Gradio-compatible**: Progress callback wrapper for Gradio's Progress API
-- **Example usage**:
-  ```python
-  import smartcut
+# Single segment with video-only fade
+smartcut.process("in.mp4", "out.mp4", start=10, end=20, video_fadein=2, video_fadeout=3)
 
-  # Single segment with video-only fade
-  smartcut.process("in.mp4", "out.mp4", start=10, end=20,
-                   video_fadein=2, video_fadeout=3)
+# Multiple segments with mixed fades
+smartcut.process_segments("in.mp4", "out.mp4", [
+    {"start": 10, "end": 20, "video_fadein": 2},
+    {"start": 30, "end": 40, "audio_fadeout": 2},
+], progress_callback=lambda cur, tot: print(f"{cur}/{tot}"), cancel_check=lambda: False)
+```
 
-  # Multiple segments with mixed fades
-  smartcut.process_segments("in.mp4", "out.mp4", [
-      {"start": 10, "end": 20, "video_fadein": 2},
-      {"start": 30, "end": 40, "audio_fadeout": 2},
-  ])
-  ```
+## Implementation
+| File | Fade-related code |
+|---|---|
+| `misc_data.py` | `FadeInfo` (video/audio fade-in/out durations), `SegmentWithFade`; `CutSegment.fade_info`, `orig_segment_start/end` |
+| `smart_cut.py` | `smart_cut()` accepts `SegmentWithFade` lists; attaches fade info to the cut pieces and marks the GOPs that overlap a video fade for re-encoding; picks `RecodeAudioCutter` when any segment has an audio fade |
+| `video_cutter.py` | `VideoCutter._apply_fade_to_frame()` / `_fade_yuv_frame()`: per-frame video fade in the re-encode path; faster VP9/AV1 encoder settings |
+| `track_cutters.py` | `RecodeAudioCutter` + `create_recode_audio_output_stream()`: audio fades |
+| `__main__.py` | CLI parsing of the fade keywords, multiple `--keep` |
+| `__init__.py` | High-level API above |
 
-### 3. Key Technical Decisions
+## How It Works
 
-1. **Independent Video/Audio Fade Control**:
-   - Video and audio can fade independently using specific keywords
-   - **Video-only fades** (`videofadein`/`videofadeout`): Audio uses passthrough (no re-encoding, ~17x faster)
-   - **Audio-only fades** (`audiofadein`/`audiofadeout`): Video uses passthrough (no re-encoding)
-   - **Mixed fades**: Can apply video fade-in with audio fade-out, or any combination
-   - Legacy `fadein`/`fadeout` keywords apply to both media types for backward compatibility
+### Video
+- Only GOPs that overlap a video fade region are re-encoded, in addition to the partial GOPs at cut points that
+  every smart cut re-encodes. GOPs between the fades are copied untouched.
+- The fade is computed per frame from the original segment bounds, so fade timing is frame-exact even when a
+  segment spans several GOPs: `alpha = t / fadein` at the start, `alpha = (length - t) / fadeout` at the end.
+- Frames are faded directly in YUV: luma towards the black level and chroma towards neutral, through one lookup
+  table each (8/10/12-bit planar, limited or full range). The result goes into a new frame, because the decoder
+  may still use the decoded frame as a reference. Other pixel formats (e.g. NV12) fall back to fading in RGB24.
+  At 1080p this takes ~14 ms per frame, against ~39 ms for the earlier RGB round trip.
 
-2. **Selective GOP Re-encoding** (Performance Optimization):
-   - **For VIDEO**: Only re-encode GOPs (Group of Pictures) that overlap with video fade regions
-   - **For AUDIO**: Re-encode all GOPs in segments with audio fades (maintains encoder state, prevents artifacts)
-   - **Trade-off**: Fades may start/end up to ~0.5-1 second early/late due to GOP boundaries (acceptable for most use cases)
-   - **Example**: 20-second segment with 2s video fade-in and 2s fade-out:
-     - Only ~4-6 seconds re-encoded (GOPs overlapping fades)
-     - ~14-16 seconds passthrough (lossless)
-     - **Result**: 70-80% passthrough vs 0% without optimization
+### Audio
+- If any segment has an audio fade, each audio track is decoded and re-encoded **as a whole** by one continuous
+  encoder; otherwise audio is copied. Mixing re-encoded packets (faded segments) with copied packets (others) in
+  one track left the encoder's buffered samples misplaced at the joins (an audible tick) and flushed at the end.
+- The output stream is created from the encoder rather than copied from the source, so the stream header matches
+  the packets: AAC and HE-AAC sources become AAC-LC (FFmpeg can't encode HE-AAC) at the source bitrate but at
+  least 128 kbps. Other codecs are re-encoded with their own encoder when FFmpeg has one, else AAC.
+- Audio is cut sample-accurately to each cut piece and kept locked to the video timeline (silence is inserted
+  where the source has no audio). After a jump the decoder restarts two packets early, so the first kept samples
+  decode cleanly.
+- The gain is a per-sample linear ramp (vectorised with numpy).
+- Cost: roughly 1.3 s per minute of kept audio on a desktop CPU with FFmpeg's default AAC coder. The `fast` AAC
+  coder was evaluated (about 1.8x faster) and rejected: it left audible holes in the treble.
 
-3. **Input Validation and Auto-Sorting**:
-   - Validates that start time < end time for each segment (raises clear error if invalid)
-   - Automatically sorts segments by start time (allows specifying segments in any order)
-   - Prevents silent corruption (previously created 261-byte corrupted files)
+### VP9 / AV1
+- Re-encoded GOPs use `cpu-used=5` (VP9) and `cpu-used=8` (libaom-av1), plus `row-mt`. On one CPU core this made
+  AV1 smart cuts ~16x and VP9 ~2x faster, for ~1.7 dB / ~0.7 dB lower PSNR on the re-encoded GOPs only.
+- AV1 output streams keep the source's pixel format and colour signalling (10-bit sources stay 10-bit).
+- 10/12-bit VP9 (profile 2/3) can't be re-encoded and fails.
 
-4. **Backward Compatibility**: The implementation maintains full backward compatibility with existing `--keep` and `--cut` syntax.
-
-5. **Frame-mode Incompatibility**: Fade effects are incompatible with `--frames` mode and will raise an error if used together.
-
-### 4. Testing
-
-Created comprehensive test suites:
-
-#### `tests/test_fade.py` - Original fade tests:
-- ✓ No fade (baseline test)
-- ✓ Fade-in only
-- ✓ Fade-out only
-- ✓ Both fade-in and fade-out
-- ✓ Custom fade durations
-- ✓ Multiple segments with different fades
-
-All tests pass successfully (6/6).
-
-#### `tests/test_api.py` - Independent fade control API tests:
-- ✓ Video-only fade (audio passthrough, fast)
-- ✓ Audio-only fade (video passthrough)
-- ✓ Legacy fadein/fadeout (both media types)
-- ✓ Mixed fade effects (video fadein + audio fadeout)
-- ✓ Multiple segments with dict configuration
-- ✓ Multiple segments with CutSegmentConfig objects
-
-All tests pass successfully (6/6).
-
-#### `tests/test_validation.py` - Input validation and auto-sorting tests:
-- ✓ CLI validation (reversed segment detection)
-- ✓ CLI auto-sort (wrong chronological order)
-- ✓ API validation (reversed segment detection)
-- ✓ API auto-sort (wrong chronological order)
-
-All tests pass successfully (4/4).
-
-Demo video files created for manual inspection:
-- `tests/test_input_fade.mp4` - Input video with audio
-- `tests/test_output_fade_demo.mp4` - Output with 2-second fade-in and fade-out
-
-### 5. Audio Fade Verification
-
-To verify that audio fades are working correctly, you can enable debug mode:
-
+## Debugging Audio Fades
 ```bash
-# Enable debug output to see amplitude reduction in real-time
 export SMARTCUT_DEBUG_AUDIO_FADE=1
 smartcut input.mp4 output.mp4 --keep 2:fadein:2,8
 ```
-
-Debug output shows:
+Prints one line per faded cut piece to stderr:
 ```
-[AUDIO_FADE] t=0.000s | fade_info=FadeInfo(fadein_duration=Fraction(2, 1), fadeout_duration=None) |
-              orig_peak=0.948950 → result_peak=0.000010 (100.0% reduction)
-[AUDIO_FADE] t=0.021s | fade_info=FadeInfo(fadein_duration=Fraction(2, 1), fadeout_duration=None) |
-              orig_peak=0.950377 → result_peak=0.000208 (100.0% reduction)
-[AUDIO_FADE] t=1.500s | fade_info=FadeInfo(fadein_duration=Fraction(2, 1), fadeout_duration=None) |
-              orig_peak=0.949982 → result_peak=0.711887 (25.1% reduction)
-...
+[AUDIO_FADE] t=0.000..1.999s | gain 0.000..1.000 | peak 0.250000 → 0.249850 (0.1% reduction)
 ```
+Alternative verification tool: `python smartcut/tests/verify_audio_fade.py`
 
-This confirms:
-- **Fade-in**: Audio starts at near-zero amplitude (100% reduction) and gradually increases to full volume
-- **Fade-out**: Audio starts at full volume and gradually decreases to near-zero
-- The linear alpha blending is applied correctly to each audio frame
+## Testing
+Run from the repo root (tests live in `smartcut/tests/`):
 
-Alternative verification tool: `python tests/verify_audio_fade.py`
-
-### 6. Windows Support
-
-Created setup scripts and requirements for Windows users:
-
-#### `requirements.txt`
-Lists all core dependencies:
-- numpy
-- av==16.0.1
-- tqdm
-
-#### `setup_windows.bat`
-Automated setup script for Windows that:
-- Creates Python virtual environment using `C:\Python310\python.exe`
-- Provides options to install from requirements.txt or package
-- Includes helpful usage examples and documentation
+| Script | Checks |
+|---|---|
+| `test_fade.py` | No fade, fade-in, fade-out, both, custom durations, multiple segments (CLI) |
+| `test_fade_keywords.py` | Fades with `start`/`end`/negative times |
+| `test_api.py` | `process()` / `process_segments()` with video-only, audio-only, legacy, mixed and multi-segment fades |
+| `test_validation.py` | Reversed segments rejected, out-of-order segments sorted (CLI and API) |
+| `test_audio_parameters.py` | Re-encoded audio keeps sample rate / channels; mixed and multi-segment cases |
+| `verify_audio_fade.py` | Measured audio level ramps for fade-in, fade-out, both |
+| `regression/` | Measurement-based regression harness, test media generator and diagnostic tools (see its README) |
 
 ## Usage Examples
 
@@ -237,10 +162,10 @@ smartcut input.mp4 output.mp4 --keep 70:fadein:1.5,80:fadeout:2.0
 
 ### Independent Video/Audio Fade Examples
 ```bash
-# Video-only fade (audio passthrough, ~17x faster)
+# Video-only fade (audio copied)
 smartcut input.mp4 output.mp4 --keep 10:videofadein:2,30:videofadeout:3
 
-# Audio-only fade (video passthrough, fast)
+# Audio-only fade
 smartcut input.mp4 output.mp4 --keep 10:audiofadein:2,30:audiofadeout:3
 
 # Mixed fade effects: video fades in, audio fades out
@@ -254,9 +179,6 @@ smartcut input.mp4 output.mp4 --keep 10:videofadein:2,30:videofadeout:2:audiofad
 ```
 
 ### Using Keywords and Special Time Formats
-
-The fade syntax supports all of smartcut's time keywords and formats:
-
 ```bash
 # Using "start" keyword - fade in from beginning of video
 smartcut input.mp4 output.mp4 --keep start:fadein:2,30
@@ -279,8 +201,7 @@ smartcut input.mp4 output.mp4 --keep 00:01:00:fadein:1.5,00:02:30:fadeout:2
 
 ### Advanced Examples
 ```bash
-# Multiple segments with different fade configurations
-# Note: Segments can be in any order - they are auto-sorted!
+# Multiple segments with different fade configurations (any order: they are sorted)
 smartcut input.mp4 output.mp4 \
   --keep 50:fadein:2,60:fadeout:2 \
   --keep 10,20 \
@@ -297,95 +218,15 @@ smartcut input.mp4 output.mp4 \
   --keep start:videofadein:3,30 \
   --keep 60,-10:audiofadeout:3 \
   --keep -5,end
-
-# Keep middle section with fades, and opening/closing without fades
-smartcut input.mp4 output.mp4 \
-  --keep start,10 \
-  --keep 20:videofadein:1,80:videofadeout:1 \
-  --keep 90,end
-
-# Complex example: intro, main content with mixed fades, outro
-smartcut input.mp4 output.mp4 \
-  --keep start,5 \
-  --keep 10:videofadein:2,120:audiofadeout:2 \
-  --keep -10,end:fadeout:1.5
 ```
 
-## Technical Implementation Notes
-
-### Video Fade Algorithm
-1. For each frame in a segment with fades:
-   - Calculate relative time within segment
-   - If within fade-in duration: `alpha = time / fadein_duration`
-   - If within fade-out duration: `alpha = time_remaining / fadeout_duration`
-   - Apply alpha blending: `frame_pixels = frame_pixels * alpha`
-
-### Audio Fade Algorithm
-1. For each audio sample in a segment with fades:
-   - Calculate sample position within segment
-   - If within fade-in samples: `alpha = sample_pos / fadein_samples`
-   - If within fade-out samples: `alpha = samples_remaining / fadeout_samples`
-   - Apply fade: `sample_value = sample_value * alpha`
-
-## Platform Support
-- ✓ Linux: Fully supported and tested
-- ✓ Windows: Supported with provided setup script (`setup_windows.bat`)
-
-## Performance Considerations
-
-### Independent Video/Audio Fade Performance
-- **Video-only fades** (`videofadein`/`videofadeout`):
-  - Audio uses passthrough (no re-encoding)
-  - ~17x faster than fading both video and audio
-  - Ideal for visual-only transitions
-
-- **Audio-only fades** (`audiofadein`/`audiofadeout`):
-  - Video uses passthrough (no re-encoding)
-  - Significantly faster than video fades
-  - Ideal for audio ducking/crossfades
-
-- **Mixed fades**:
-  - Each media type is re-encoded according to its strategy
-  - Example: `videofadein` + `audiofadeout`:
-    - Video: Only GOPs overlapping with fade-in region are re-encoded (selective)
-    - Audio: Entire segment is re-encoded (full, maintains encoder state)
-
-### GOP-Level Optimization (Video Fades)
-- **Selective re-encoding**: Only GOPs (Group of Pictures) overlapping with video fade regions are re-encoded
-- **Trade-off**: Fades may start/end up to ~0.5-1 second early/late due to GOP boundaries
-- **Example Performance** (20-second segment with 2s video fade-in and 2s fade-out):
-  - Only ~4-6 seconds re-encoded (GOPs overlapping fades) = 20-30%
-  - ~14-16 seconds passthrough (lossless) = 70-80%
-  - vs. 20s re-encoded (100%) without optimization
-
-### Audio Re-encoding Strategy
-- **Audio fades**: Re-encode ALL GOPs in segments with audio fades
-- **Reason**: Maintains encoder state, prevents clicks/pops/artifacts
-- **Trade-off**: Cannot use selective GOP re-encoding for audio (quality vs performance)
-- Minimal quality impact due to high bitrate AAC encoding
-
-### Overall Performance
-- **Video-only fade**: ~17x faster (10-15 seconds vs 3 minutes for typical video)
-- **Audio-only fade**: ~5x faster (video passthrough saves significant time)
-- **Both fades (legacy)**: Baseline performance
-- **Input validation**: Instant detection of invalid segments (prevents wasted processing)
+## Windows Support
+- `requirements.txt`: numpy, av==16.0.1, tqdm
+- `setup_windows.bat`: creates a virtual environment and installs the requirements
 
 ## Future Enhancements (Not Implemented)
 - Fade curve customization (linear, exponential, etc.)
 - Cross-fade between segments
-- Support for fade effects in `--cut` mode
-- GPU-accelerated fade rendering
-
-## Conclusion
-The per-segment fade feature has been successfully implemented with independent video/audio control, intelligent GOP-level optimization, and comprehensive testing. Key achievements:
-
-- ✅ **Independent fade control**: Video and audio can fade independently for maximum flexibility
-- ✅ **Performance optimized**: Video-only fades are ~17x faster via passthrough audio
-- ✅ **GOP-level optimization**: Selective re-encoding minimizes quality loss (70-80% passthrough)
-- ✅ **Input validation**: Automatic detection and sorting of invalid/non-chronological segments
-- ✅ **High-level API**: Clean Python API for Gradio and web app integration
-- ✅ **Backward compatible**: Legacy `fadein`/`fadeout` syntax still works
-- ✅ **Comprehensive testing**: 16 tests across 3 test suites (all passing)
-- ✅ **Windows support**: Includes setup scripts and documentation
-
-The feature provides professional-grade fade effects with minimal quality impact and maximum performance.
+- Fade effects in `--cut` mode
+- Splicing re-encoded AAC-LC audio around fades into copied audio (faster than re-encoding the whole track, but
+  impossible for HE-AAC and risky at the splice points)
