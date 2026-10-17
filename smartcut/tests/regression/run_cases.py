@@ -357,24 +357,24 @@ def main():
     def f(x, nd=2):
         return "-" if x is None else (f"{x:.{nd}f}" if isinstance(x, float) else str(x))
 
-    print(f"\n{'case':<16}{'verdict':<9}{'sec':>7}{'dur/exp':>13}{'stream':>7}{'frames/exp':>12}{'gap':>5}{'same':>5}{'A-V ms':>8}"
+    print(f"\n{'case':<20}{'verdict':<9}{'sec':>7}{'dur/exp':>13}{'stream':>7}{'frames/exp':>12}{'gap':>5}{'same':>5}{'A-V ms':>8}"
           f"{'vFadeErr':>9}{'aFadeErr':>9}{'aFlat min/max':>15}  notes")
     failures = 0
     for case, r in results.items():
         if "skipped" in r:
-            print(f"{case:<16}{'skip':<9}  {r['skipped']}")
+            print(f"{case:<20}{'skip':<9}  {r['skipped']}")
             continue
         expected_fail = case in EXPECTED_FAILURES
         if "expected_s" not in r:
             verdict = "XFAIL" if expected_fail and not r["ok"] else "FAIL"
             failures += verdict == "FAIL"
-            print(f"{case:<16}{verdict:<9}{r['seconds']:>7.1f}  {r.get('error') or r.get('analysis_error') or 'returned False'}")
+            print(f"{case:<20}{verdict:<9}{r['seconds']:>7.1f}  {r.get('error') or r.get('analysis_error') or 'returned False'}")
             continue
         verdict = "PASS" if not r["problems"] else "FAIL"
         if expected_fail:  # XPASS: started working, update EXPECTED_FAILURES
             verdict = "XFAIL" if r["problems"] else "XPASS"
         failures += verdict == "FAIL"
-        print(f"{case:<16}{verdict:<9}{r['seconds']:>7.1f}{r['v_duration']:>7.2f}/{r['expected_s']:<5.1f}{f(r['v_stream_s']):>7}"
+        print(f"{case:<20}{verdict:<9}{r['seconds']:>7.1f}{r['v_duration']:>7.2f}/{r['expected_s']:<5.1f}{f(r['v_stream_s']):>7}"
               f"{r['v_frames']:>6}/{r['v_frames_expected']:<5}{f(r['v_max_gap_frames'], 1):>5}{r['v_identical_frames']:>5}"
               f"{r['av_diff_ms']:>8.0f}{f(r['v_fade_max_err']):>9}{f(r['a_fade_max_err']):>9}"
               f"{f(r['a_flat_min_gain']):>8}/{f(r['a_flat_max_gain'])}  {', '.join(r['problems'] + [f'dips {d}' for d in r.get('a_dips_at', [])][:1] + other_tracks(r))}")
