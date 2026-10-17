@@ -184,6 +184,54 @@ def _is_mpegts_hevc_tag(codec_tag: str) -> bool:
     return codec_tag in ('HEVC', '\x24\x00\x00\x00')
 
 
+# Planar YUV pixel formats that fades can process without an RGB round trip: name -> bits per sample
+_PLANAR_YUV_BITS = {
+    'yuv420p': 8, 'yuv422p': 8, 'yuv444p': 8, 'yuv440p': 8, 'yuv411p': 8, 'yuv410p': 8,
+    'yuvj420p': 8, 'yuvj422p': 8, 'yuvj444p': 8, 'yuvj440p': 8,
+    'yuv420p10le': 10, 'yuv422p10le': 10, 'yuv444p10le': 10,
+    'yuv420p12le': 12, 'yuv422p12le': 12, 'yuv444p12le': 12,
+}
+_AVCOL_RANGE_JPEG = 2  # full-range ("PC") YUV
+
+
+def _fade_yuv_frame(frame: VideoFrame, alpha: float) -> VideoFrame | None:
+    """
+    Fade a planar YUV frame towards black without leaving YUV: luma towards the black level and chroma
+    towards neutral, through one lookup table each. Keeps the source bit depth and avoids two colour
+    conversions per frame. Returns None for other pixel formats.
+
+    Writes into a new frame: the decoder may still use the decoded frame as a reference picture.
+    """
+    fmt = frame.format.name
+    bits = _PLANAR_YUV_BITS.get(fmt)
+    if bits is None:
+        return None
+    dtype = np.dtype(np.uint8) if bits == 8 else np.dtype('<u2')
+    max_value = (1 << bits) - 1
+    black = 0 if fmt.startswith('yuvj') or frame.color_range == _AVCOL_RANGE_JPEG else 16 << (bits - 8)
+    neutral = 1 << (bits - 1)
+    values = np.arange(max_value + 1, dtype=np.float32)
+    luma_lut = np.clip(np.rint(black + (values - black) * alpha), 0, max_value).astype(dtype)
+    chroma_lut = np.clip(np.rint(neutral + (values - neutral) * alpha), 0, max_value).astype(dtype)
+
+    faded = VideoFrame(frame.width, frame.height, fmt)
+    for i, (src, dst) in enumerate(zip(frame.planes, faded.planes)):
+        lut = luma_lut if i == 0 else chroma_lut
+        src_px = np.frombuffer(src, dtype).reshape(src.height, src.line_size // dtype.itemsize)[:, :src.width]
+        if bits > 8:
+            src_px = np.minimum(src_px, max_value)  # guard the table lookup against out-of-range samples
+        dst_px = np.zeros((dst.height, dst.line_size // dtype.itemsize), dtype)
+        dst_px[:, :dst.width] = lut[src_px]
+        dst.update(dst_px)
+
+    faded.pts = frame.pts
+    if frame.time_base is not None:  # decoded frames often have none
+        faded.time_base = frame.time_base
+    faded.color_range = frame.color_range
+    faded.colorspace = frame.colorspace
+    return faded
+
+
 class VideoCutter:
     def __init__(
         self,
@@ -479,7 +527,7 @@ class VideoCutter:
             fade_info: Fade information (None if no fade)
 
         Returns:
-            The frame with fade applied (may modify in place)
+            The faded frame (a new frame; the input is left unchanged)
         """
         if fade_info is None:
             return frame
@@ -501,23 +549,22 @@ class VideoCutter:
                 fadeout_alpha = min(1.0, float(time_from_end / fade_info.video_fadeout_duration))
                 alpha = min(alpha, fadeout_alpha)
 
-        # Only apply fade if alpha < 1.0
-        if alpha < 1.0:
-            # Save original frame attributes
-            original_pts = frame.pts
-            original_time_base = frame.time_base
+        if alpha >= 1.0:
+            return frame
 
-            # Convert to RGB24, apply fade, and let encoder handle conversion to output format
-            # The encoder is configured for YUV output but accepts RGB24 input
-            # and performs the conversion internally, which avoids stuttering
-            img = frame.to_ndarray(format='rgb24')
-            img = (img.astype(np.float32) * alpha).clip(0, 255).astype(np.uint8)
+        faded = _fade_yuv_frame(frame, alpha)
+        if faded is not None:
+            return faded
 
-            frame = av.VideoFrame.from_ndarray(img, format='rgb24')
-            frame.pts = original_pts
-            if original_time_base is not None:
-                frame.time_base = original_time_base
-
+        # Other pixel formats: fade in RGB24 and let the encoder convert back to its pixel format
+        original_pts = frame.pts
+        original_time_base = frame.time_base
+        img = frame.to_ndarray(format='rgb24')
+        img = (img.astype(np.float32) * alpha).clip(0, 255).astype(np.uint8)
+        frame = av.VideoFrame.from_ndarray(img, format='rgb24')
+        frame.pts = original_pts
+        if original_time_base is not None:
+            frame.time_base = original_time_base
         return frame
 
     def recode_segment(self, s: CutSegment) -> list[Packet]:
