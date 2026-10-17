@@ -60,6 +60,7 @@ class CancelObject:
 # thousand times longer than copying one, so a progress object that also has emit_fraction(fraction) gets the
 # share of the estimated work done. Re-encoded frames count when the encoder outputs them: encoders with
 # lookahead (libaom, libvpx, x264) take in their first frames instantly and finish the last ones in a flush.
+# The same per-frame hook stops a re-encoded piece midway when cancel_object is set, with or without progress.
 # Cost in seconds on one desktop core, measured with tests/regression/progress_timeline.py --one-core --calibrate
 # (Oct 2026, 360p and 720p clips; hevc is an estimate). Only the ratios matter.
 _RECODE_COST_PER_MEGAPIXEL_FRAME = {'h264': 0.04, 'hevc': 0.15, 'vp9': 0.075, 'av1': 0.18}
@@ -73,7 +74,7 @@ class _Cancelled(Exception):
 
 
 class _WorkProgress:
-    def __init__(self, progress: WorkProgressCallback, cancel_object: CancelObject | None, media_container: MediaContainer,
+    def __init__(self, progress: WorkProgressCallback | None, cancel_object: CancelObject | None, media_container: MediaContainer,
                  cut_segments: list[CutSegment], recode_audio: bool) -> None:
         self.progress = progress
         self.cancel_object = cancel_object
@@ -120,8 +121,13 @@ class _WorkProgress:
         self.pieces_done += self.piece_weights[index]
         self._emit()
 
+    def done(self) -> None:
+        if self.progress is not None:
+            self.progress.emit_fraction(1.0)  # the frame estimate can be a few frames off
+
     def _emit(self) -> None:
-        self.progress.emit_fraction(min(1.0, (min(self.video_done, self.video_total) + self.pieces_done) / self.total))
+        if self.progress is not None:
+            self.progress.emit_fraction(min(1.0, (min(self.video_done, self.video_total) + self.pieces_done) / self.total))
 
 
 def make_adjusted_segment_times(positive_segments: list[tuple[Fraction, Fraction]], media_container: MediaContainer) -> list[tuple[Fraction, Fraction]]:
@@ -281,9 +287,10 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                           (seg.fade_info.audio_fadein_duration is not None or seg.fade_info.audio_fadeout_duration is not None)
                           for seg in cut_segments)
     work = None
-    if isinstance(progress, WorkProgressCallback):
+    if isinstance(progress, WorkProgressCallback) or cancel_object is not None:
         recode_audio = has_audio_fades and audio_export_info is not None and len(media_container.audio_tracks) > 0
-        work = _WorkProgress(progress, cancel_object, media_container, cut_segments, recode_audio)
+        work = _WorkProgress(progress if isinstance(progress, WorkProgressCallback) else None, cancel_object,
+                             media_container, cut_segments, recode_audio)
     previously_done_segments = 0
     for output_path_segment in output_files:
         if cancel_object is not None and cancel_object.cancelled:
@@ -360,6 +367,10 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                     break  # cancelled midway through a re-encoded piece; the partial output is removed below
                 if work is not None:
                     work.piece_done(piece_index)
+            if cancel_object is not None and cancel_object.cancelled:
+                for g in generators:  # don't drain the encoder into a file that is removed (fork addition)
+                    if isinstance(g, VideoCutter):
+                        g.enc_codec = None
             if work is not None:
                 work.finishing = True
             for g in generators:
@@ -378,7 +389,7 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             if os.path.exists(last_file_path):
                 os.remove(last_file_path)
         elif work is not None and output_path_segment is output_files[-1]:
-            work.progress.emit_fraction(1.0)  # the frame estimate can be a few frames off
+            work.done()
 
 
 # Re-export commonly used types for convenience

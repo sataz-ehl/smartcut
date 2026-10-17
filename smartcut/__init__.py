@@ -140,14 +140,20 @@ def _exact(seconds: float | Fraction) -> Fraction:
 
 class _CallbackCancel(CancelObject):
     """CancelObject whose ``cancelled`` flag asks a callback. smart_cut checks it before every GOP and after
-    every re-encoded frame, stops, and removes the partial output file."""
+    every re-encoded frame, stops, and removes the partial output file.
+
+    Once the callback returned True the flag stays True without asking again: smart_cut reads it several times
+    while stopping, and a callback that answered True only once left a truncated output reported as a success."""
 
     def __init__(self, cancel_check: Callable[[], bool]) -> None:
         self._cancel_check = cancel_check
+        self.requested = False
 
     @property
     def cancelled(self) -> bool:  # type: ignore[override]
-        return bool(self._cancel_check())
+        if not self.requested:
+            self.requested = bool(self._cancel_check())
+        return self.requested
 
 
 class _ProgressAdapter:
@@ -203,7 +209,8 @@ def process(
         progress_callback: Optional callback(current, total): the estimated work done, in thousandths
             (total is 1000), called whenever it changes, including during re-encoding
         cancel_check: Optional callback() -> bool; processing stops when it returns True (checked before every
-            cut piece and after every re-encoded frame)
+            cut piece and after every re-encoded frame, also without progress_callback; not called again once it
+            returned True)
 
     Returns:
         True if successful, False if an error occurred or processing was cancelled
@@ -268,7 +275,8 @@ def process_segments(
         progress_callback: Optional callback(current, total): the estimated work done, in thousandths
             (total is 1000), called whenever it changes, including during re-encoding
         cancel_check: Optional callback() -> bool; processing stops when it returns True (checked before every
-            cut piece and after every re-encoded frame) and the partial output file is removed
+            cut piece and after every re-encoded frame, also without progress_callback; not called again once it
+            returned True) and the partial output file is removed
 
     Returns:
         True if successful, False if an error occurred or processing was cancelled
@@ -342,7 +350,7 @@ def process_segments(
             cancel_object=cancel_object,
         )
 
-        if cancel_object is not None and cancel_object.cancelled:
+        if cancel_object is not None and cancel_object.requested:  # not asking again: the output is complete otherwise
             return False  # smart_cut stopped early and removed the partial output
         return error is None
 

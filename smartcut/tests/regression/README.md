@@ -61,8 +61,8 @@ join are easy to check by eye too.
 
 These need no test media and run like the other test scripts (`python smartcut/tests/test_yuv_fade.py`):
 - `smartcut/tests/test_yuv_fade.py`: YUV fade values.
-- `smartcut/tests/test_cancel.py`: cancellation, also midway through a re-encoded piece; steady progress; input
-  file closed.
+- `smartcut/tests/test_cancel.py`: cancellation, also midway through a re-encoded piece (with and without a
+  progress callback; deterministic on any number of cores); steady progress; input file closed.
 - `smartcut/tests/test_last_frame.py`: cuts keep their last frame (H.264 with and without B-frames, VP9, AV1,
   fades, MP4 and MKV), counted as FFmpeg decodes them; inputs without audio.
 

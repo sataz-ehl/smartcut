@@ -64,8 +64,10 @@ and report progress as `progress_callback(current, total)`: thousandths of the e
 Re-encoding a GOP can take a thousand times longer than copying one, so `smart_cut()` weighs re-encoded frames
 by measured per-codec costs, copied frames and re-encoded audio far less, and counts re-encoded frames as the
 encoder outputs them (`_WorkProgress` in `smart_cut.py`). They honour `cancel_check()`: it is polled before every
-GOP and after every re-encoded frame, processing stops, the partial output is removed and the call returns
-`False`. The input file is always closed afterwards.
+GOP and after every re-encoded frame (also without a progress callback), processing stops, the partial output is
+removed and the call returns `False`. Once it returned True it isn't polled again, so True once is enough, and the
+encoder's buffered frames are dropped rather than encoded into the removed file. The input file is always closed
+afterwards.
 
 ```python
 import smartcut
@@ -149,6 +151,7 @@ Run from the repo root (tests live in `smartcut/tests/`):
 | `test_validation.py` | Reversed segments rejected, out-of-order segments sorted (CLI and API) |
 | `test_audio_parameters.py` | Re-encoded audio keeps sample rate / channels; mixed and multi-segment cases |
 | `verify_audio_fade.py` | Measured audio level ramps for fade-in, fade-out, both |
+| `test_cancel.py` | Cancelling (also midway through re-encoding, with and without progress), steady progress, input closed |
 | `test_last_frame.py` | Cuts keep their last frame, also when they end with re-encoded frames (H.264, VP9, AV1, fades) |
 | `regression/` | Measurement-based regression harness, test media generator and diagnostic tools (see its README) |
 
