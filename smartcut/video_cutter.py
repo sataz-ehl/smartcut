@@ -1,5 +1,5 @@
 import heapq
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import cast
@@ -322,6 +322,10 @@ class VideoCutter:
         # Track decoder continuity between GOPs: last GOP end DTS consumed
         self._last_fetch_end_dts: int | None = None
 
+        # Called after every frame fed to the encoder and after every encoder flush, with the number of frames
+        # the encoder output: progress within a re-encoded piece, and cancelling midway (fork addition)
+        self.on_frames_encoded: Callable[[int], None] | None = None
+
     def init_encoder(self) -> None:
         self.encoder_inited = True
         # v_codec = self.in_stream.codec_context
@@ -635,7 +639,10 @@ class VideoCutter:
 
             frame.pict_type = PictureType.NONE
             frame = self._scale_frame_if_needed(frame)
-            result_packets.extend(self.enc_codec.encode(frame))
+            encoded = self.enc_codec.encode(frame)
+            result_packets.extend(encoded)
+            if self.on_frames_encoded is not None:
+                self.on_frames_encoded(len(encoded))
 
         if self.codec_name == 'mpeg2video':
             for p in result_packets:
@@ -748,7 +755,10 @@ class VideoCutter:
             self.enc_last_pts = frame.pts
 
             frame.pict_type = PictureType.NONE
-            result_packets.extend(self.enc_codec.encode(frame))
+            encoded = self.enc_codec.encode(frame)
+            result_packets.extend(encoded)
+            if self.on_frames_encoded is not None:
+                self.on_frames_encoded(len(encoded))
 
         result_packets.extend(self.flush_encoder())
 
@@ -790,6 +800,8 @@ class VideoCutter:
                 p.time_base = self.out_time_base
 
         self.enc_codec = None
+        if self.on_frames_encoded is not None:
+            self.on_frames_encoded(len(result_packets))
         return result_packets
 
     def _scale_frame_if_needed(self, frame: VideoFrame) -> VideoFrame:

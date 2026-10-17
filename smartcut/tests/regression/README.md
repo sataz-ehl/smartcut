@@ -52,12 +52,14 @@ join are easy to check by eye too.
 | `psnr_frames.py <source> <output> <out first> <count> <src first> [<output> ...]` | PSNR of re-encoded frames vs their source frames, e.g. to compare encoder settings |
 | `exp_encoder.py <config.json> <media> <out> [cases] [--one-core]` | Run the cases with another encoder / encoder options for re-encoded GOPs, without changing smartcut |
 | `bench_audio.py <repo> <video> <out dir>` | Cost of re-encoding the whole audio track (audio fades) and of FFmpeg's AAC coders |
+| `progress_timeline.py <media> <out> [cases] [--one-core] [--timeline] [--calibrate]` | How steadily `progress_callback` moves: longest stretch without an update and the largest distance from an even pace. `--calibrate` measures the per-codec costs that `smart_cut.py`'s work estimate uses |
 | `audio_coder_ab.py <out dir> <video>` | Listening files, "what was lost" difference files and spectrograms for AAC default vs fast coder |
 
 ## Unit tests next to this folder
 
 `smartcut/tests/test_yuv_fade.py` (YUV fade values, no media) and `smartcut/tests/test_cancel.py`
-(cancellation, input file closed) run like the other test scripts:
+(cancellation, also midway through a re-encoded piece; steady progress; input file closed) run like the other
+test scripts:
 `python smartcut/tests/test_yuv_fade.py`.
 
 ## Windows notes

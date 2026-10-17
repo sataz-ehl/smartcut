@@ -60,9 +60,12 @@ High-level API for programmatic use (Gradio, web apps):
 - `CutSegmentConfig`: segment configuration; `end=None` means the end of the video
 
 Both validate that start < end (raising `ValueError` with "Invalid segment ..."), sort segments by start time,
-report progress as `progress_callback(current, total)` (counted in internal cut pieces, i.e. GOPs, not user
-segments), and honour `cancel_check()`: it is polled before every GOP, processing stops, the partial output is
-removed and the call returns `False`. The input file is always closed afterwards.
+and report progress as `progress_callback(current, total)`: thousandths of the estimated work (total is 1000).
+Re-encoding a GOP can take a thousand times longer than copying one, so `smart_cut()` weighs re-encoded frames
+by measured per-codec costs, copied frames and re-encoded audio far less, and counts re-encoded frames as the
+encoder outputs them (`_WorkProgress` in `smart_cut.py`). They honour `cancel_check()`: it is polled before every
+GOP and after every re-encoded frame, processing stops, the partial output is removed and the call returns
+`False`. The input file is always closed afterwards.
 
 ```python
 import smartcut

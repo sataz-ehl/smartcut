@@ -4,6 +4,7 @@ from fractions import Fraction
 from typing import Protocol, TypeAlias
 
 import av
+import numpy as np
 from av.container.output import OutputContainer
 from av.packet import Packet
 
@@ -45,6 +46,74 @@ StreamGeneratorFactory: TypeAlias = Callable[[OutputContainer], StreamGenerator]
 
 class CancelObject:
     cancelled: bool = False
+
+
+# Progress by estimated work (fork addition). emit() counts cut pieces, but re-encoding a piece can take a
+# thousand times longer than copying one, so a progress object that also has emit_fraction(fraction) gets the
+# share of the estimated work done. Re-encoded frames count when the encoder outputs them: encoders with
+# lookahead (libaom, libvpx, x264) take in their first frames instantly and finish the last ones in a flush.
+# Cost in seconds on one desktop core, measured with tests/regression/progress_timeline.py --calibrate
+# (Oct 2026, 360p and 720p clips; hevc is an estimate). Only the ratios matter.
+_RECODE_COST_PER_MEGAPIXEL_FRAME = {'h264': 0.015, 'hevc': 0.06, 'vp9': 0.045, 'av1': 0.125}
+_RECODE_COST_PER_MEGAPIXEL_FRAME_OTHER = 0.05
+_COPY_COST_PER_FRAME = 0.00002
+_AUDIO_RECODE_COST_PER_SECOND = 0.03
+
+
+class _Cancelled(Exception):
+    """Stops a re-encoded piece midway when the cancel object is set."""
+
+
+class _WorkProgress:
+    def __init__(self, progress: ProgressCallback, cancel_object: CancelObject | None, media_container: MediaContainer,
+                 cut_segments: list[CutSegment], recode_audio: bool) -> None:
+        self.progress = progress
+        self.cancel_object = cancel_object
+        self.frame_cost = 0.0
+        stream = media_container.video_stream
+        frame_pts = getattr(media_container, 'video_frame_times_pts', None)
+        if stream is not None:
+            ctx = stream.codec_context
+            name = ctx.name or ''
+            family = 'av1' if 'av1' in name else name  # decoder names: h264, hevc, vp9, libdav1d, ...
+            cost = _RECODE_COST_PER_MEGAPIXEL_FRAME.get(family, _RECODE_COST_PER_MEGAPIXEL_FRAME_OTHER)
+            self.frame_cost = cost * (ctx.width or 0) * (ctx.height or 0) / 1e6
+
+        media_start, media_end = media_container.start_time, media_container.start_time + media_container.duration
+        self.video_total = 0.0  # re-encoded frames, counted as the encoder outputs them
+        self.piece_weights = []  # everything else (copied frames, audio), counted when a piece is done
+        for s in cut_segments:
+            weight = 0.0
+            if stream is not None and stream.time_base is not None and frame_pts is not None and len(frame_pts):
+                frames = int(np.searchsorted(frame_pts, float(s.end_time / stream.time_base))
+                             - np.searchsorted(frame_pts, float(s.start_time / stream.time_base)))
+                if s.require_recode:
+                    self.video_total += frames * self.frame_cost
+                else:
+                    weight += frames * _COPY_COST_PER_FRAME
+            if recode_audio:  # pieces at the file edges reach 10 s past it (make_adjusted_segment_times)
+                weight += max(0.0, float(min(s.end_time, media_end) - max(s.start_time, media_start))) * _AUDIO_RECODE_COST_PER_SECOND
+            self.piece_weights.append(weight)
+        self.total = (self.video_total + sum(self.piece_weights)) or 1.0
+        self.video_done = 0.0
+        self.pieces_done = 0.0
+        self.finishing = False  # no cancelling inside the generators' finish()
+
+    def frames_encoded(self, count: int) -> None:
+        """VideoCutter calls this after every frame it feeds to its encoder and after every encoder flush,
+        with the number of frames the encoder output."""
+        if not self.finishing and self.cancel_object is not None and self.cancel_object.cancelled:
+            raise _Cancelled()
+        if count:
+            self.video_done += count * self.frame_cost
+            self._emit()
+
+    def piece_done(self, index: int) -> None:
+        self.pieces_done += self.piece_weights[index]
+        self._emit()
+
+    def _emit(self) -> None:
+        self.progress.emit_fraction(min(1.0, (min(self.video_done, self.video_total) + self.pieces_done) / self.total))
 
 
 def make_adjusted_segment_times(positive_segments: list[tuple[Fraction, Fraction]], media_container: MediaContainer) -> list[tuple[Fraction, Fraction]]:
@@ -200,6 +269,13 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
 
     else:
         output_files = [(out_path, adjusted_segment_times[-1])]
+    has_audio_fades = any(seg.fade_info is not None and
+                          (seg.fade_info.audio_fadein_duration is not None or seg.fade_info.audio_fadeout_duration is not None)
+                          for seg in cut_segments)
+    work = None
+    if progress is not None and hasattr(progress, 'emit_fraction'):
+        recode_audio = has_audio_fades and audio_export_info is not None and len(media_container.audio_tracks) > 0
+        work = _WorkProgress(progress, cancel_object, media_container, cut_segments, recode_audio)
     previously_done_segments = 0
     for output_path_segment in output_files:
         if cancel_object is not None and cancel_object.cancelled:
@@ -227,17 +303,15 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             if media_container.video_stream is not None and include_video:
                 video_stream_setup = create_video_output_stream(media_container, output_av_container, video_settings)
                 generators.append(VideoCutter(media_container, video_stream_setup, output_av_container, video_settings, log_level))
+                if work is not None:
+                    generators[-1].on_frames_encoded = work.frames_encoded
 
             if external_generator_factories:
                 for factory in external_generator_factories:
                     generators.append(factory(output_av_container))
 
-            # Any audio fade: re-encode the whole audio track with one encoder (see RecodeAudioCutter).
-            # Without audio fades the audio is copied untouched.
-            has_audio_fades = any(seg.fade_info is not None and
-                                  (seg.fade_info.audio_fadein_duration is not None or seg.fade_info.audio_fadeout_duration is not None)
-                                  for seg in cut_segments)
-
+            # Any audio fade (has_audio_fades): re-encode the whole audio track with one encoder (see
+            # RecodeAudioCutter). Without audio fades the audio is copied untouched.
             if audio_export_info is not None:
                 for track_i, track_export_settings in enumerate(audio_export_info.output_tracks):
                     if track_export_settings is not None and track_export_settings.codec == 'passthru':
@@ -263,20 +337,30 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
 
                 if progress is not None:
                     progress.emit(previously_done_segments)
+                piece_index = previously_done_segments
                 previously_done_segments += 1
                 assert s.start_time < s.end_time, f"Invalid segment: start_time {s.start_time} >= end_time {s.end_time}"
-                for g in generators:
-                    for packet in g.segment(s):
-                        if packet.dts is not None and packet.dts < -900_000:
-                            packet.dts = None
-                        if packet.dts is not None and packet.dts > 1_000_000_000_000:
-                            print(f"BAD DTS: seg {s.start_time:.3f}-{s.end_time:.3f} gop={s.gop_index} recode={s.require_recode} pts={packet.pts} dts={packet.dts}")
-                        output_av_container.mux(packet)
+                try:
+                    for g in generators:
+                        for packet in g.segment(s):
+                            if packet.dts is not None and packet.dts < -900_000:
+                                packet.dts = None
+                            if packet.dts is not None and packet.dts > 1_000_000_000_000:
+                                print(f"BAD DTS: seg {s.start_time:.3f}-{s.end_time:.3f} gop={s.gop_index} recode={s.require_recode} pts={packet.pts} dts={packet.dts}")
+                            output_av_container.mux(packet)
+                except _Cancelled:
+                    break  # cancelled midway through a re-encoded piece; the partial output is removed below
+                if work is not None:
+                    work.piece_done(piece_index)
+            if work is not None:
+                work.finishing = True
             for g in generators:
                 for packet in g.finish():
                     if packet.dts is not None and packet.dts > 1_000_000_000_000:
                         print(f"BAD DTS in finish: pts={packet.pts} dts={packet.dts}", flush=True)
                     output_av_container.mux(packet)
+            if work is not None:
+                work.finishing = False
             if progress is not None:
                 progress.emit(previously_done_segments)
 
@@ -285,6 +369,8 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
 
             if os.path.exists(last_file_path):
                 os.remove(last_file_path)
+        elif work is not None and output_path_segment is output_files[-1]:
+            progress.emit_fraction(1.0)  # the frame estimate can be a few frames off
 
 
 # Re-export commonly used types for convenience

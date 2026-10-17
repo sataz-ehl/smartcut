@@ -133,8 +133,8 @@ class CutSegmentConfig:
 
 
 class _CallbackCancel(CancelObject):
-    """CancelObject whose ``cancelled`` flag asks a callback. smart_cut checks it before every GOP,
-    stops, and removes the partial output file."""
+    """CancelObject whose ``cancelled`` flag asks a callback. smart_cut checks it before every GOP and after
+    every re-encoded frame, stops, and removes the partial output file."""
 
     def __init__(self, cancel_check: Callable[[], bool]) -> None:
         self._cancel_check = cancel_check
@@ -145,18 +145,22 @@ class _CallbackCancel(CancelObject):
 
 
 class _ProgressAdapter:
-    """smart_cut emits the total number of cut pieces first, then the progress so far.
-    Forward the progress as callback(current, total)."""
+    """Forwards smart_cut's progress as callback(current, total): thousandths of the estimated work done
+    (emit_fraction), called whenever that changes. smart_cut's piece counts (emit) are not used: every piece
+    counts the same there, so one slow re-encoded piece held the progress still."""
 
     def __init__(self, callback: Callable[[int, int], None]) -> None:
         self.callback = callback
-        self.total: Optional[int] = None
+        self.last = -1
 
     def emit(self, value: int) -> None:
-        if self.total is None:
-            self.total = value
-        else:
-            self.callback(value, self.total)
+        pass
+
+    def emit_fraction(self, fraction: float) -> None:
+        current = min(1000, max(0, round(fraction * 1000)))
+        if current != self.last:
+            self.last = current
+            self.callback(current, 1000)
 
 
 def process(
@@ -190,8 +194,10 @@ def process(
         audio_fadein: Fade-in duration for audio only in seconds
         audio_fadeout: Fade-out duration for audio only in seconds
         quality: Video quality - "normal", "high", "low", or "lossless"
-        progress_callback: Optional callback(current, total) for progress updates
-        cancel_check: Optional callback() -> bool; processing stops when it returns True
+        progress_callback: Optional callback(current, total): the estimated work done, in thousandths
+            (total is 1000), called whenever it changes, including during re-encoding
+        cancel_check: Optional callback() -> bool; processing stops when it returns True (checked before every
+            cut piece and after every re-encoded frame)
 
     Returns:
         True if successful, False if an error occurred or processing was cancelled
@@ -253,9 +259,10 @@ def process_segments(
         output_path: Path to output video file
         segments: List of segment configurations (CutSegmentConfig or dict)
         quality: Video quality - "normal", "high", "low", or "lossless"
-        progress_callback: Optional callback(current, total) for progress updates
-        cancel_check: Optional callback() -> bool; processing stops when it returns True
-            and the partial output file is removed
+        progress_callback: Optional callback(current, total): the estimated work done, in thousandths
+            (total is 1000), called whenever it changes, including during re-encoding
+        cancel_check: Optional callback() -> bool; processing stops when it returns True (checked before every
+            cut piece and after every re-encoded frame) and the partial output file is removed
 
     Returns:
         True if successful, False if an error occurred or processing was cancelled
