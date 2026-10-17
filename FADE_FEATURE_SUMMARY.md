@@ -59,7 +59,8 @@ High-level API for programmatic use (Gradio, web apps):
 - `process_segments()`: several segments, each with its own fades (dicts or `CutSegmentConfig`)
 - `CutSegmentConfig`: segment configuration; `end=None` means the end of the video
 
-Both validate that start < end (raising `ValueError` with "Invalid segment ..."), sort segments by start time,
+Both keep every audio track, like the CLI (with audio fades each one is re-encoded as a whole). They validate that
+start < end (raising `ValueError` with "Invalid segment ..."), sort segments by start time,
 and report progress as `progress_callback(current, total)`: thousandths of the estimated work (total is 1000).
 Re-encoding a GOP can take a thousand times longer than copying one, so `smart_cut()` weighs re-encoded frames
 by measured per-codec costs, copied frames and re-encoded audio far less, and counts re-encoded frames as the
@@ -154,6 +155,7 @@ Run from the repo root (tests live in `smartcut/tests/`):
 | `verify_audio_fade.py` | Measured audio level ramps for fade-in, fade-out, both |
 | `test_cancel.py` | Cancelling (also midway through re-encoding, with and without progress), steady progress, input closed |
 | `test_last_frame.py` | Cuts keep their last frame, also when they end with re-encoded frames (H.264, VP9, AV1, fades) |
+| `test_multitrack.py` | Every audio track is kept: copied without audio fades, each re-encoded as a whole with them |
 | `regression/` | Measurement-based regression harness, test media generator and diagnostic tools (see its README) |
 
 ## Usage Examples

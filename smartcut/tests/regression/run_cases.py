@@ -53,6 +53,13 @@ CASES = {
     # HE-AAC audio (Facebook's format)
     "H1_heaac_fade":   ("synth_heaac.mp4", [{"start": 3, "end": 13, "audio_fadein": 2, "audio_fadeout": 2}]),
     "H2_heaac_nofade": ("synth_heaac.mp4", [{"start": 3, "end": 13}]),
+    # Two audio tracks: AAC 440 Hz + AC-3 880 Hz at 44.1 kHz; AAC + HE-AAC (real audio); AAC + MP3 880 Hz 44.1 kHz
+    "M1_2tracks":       ("synth_2audio.mp4", [{"start": 5, "end": 9}, {"start": 12, "end": 17}]),
+    "M2_2tracks_fades": ("synth_2audio.mp4", [{"start": 3, "end": 13, "fadein": 2, "fadeout": 2}]),
+    "M3_heaac_2nd":     ("synth_2audio_heaac.mp4", [{"start": 2, "end": 8, "audio_fadein": 1.5},
+                                                    {"start": 11, "end": 18, "fadein": 1, "fadeout": 1}]),
+    "M4_mp3_fades":     ("synth_2audio_mp3.mp4", [{"start": 3, "end": 13, "fadein": 2, "fadeout": 2}]),
+    "X_mp3_copy":       ("synth_2audio_mp3.mp4", [{"start": 5, "end": 9}, {"start": 12, "end": 17}]),
     # VP9 / AV1
     "V1_vp9_cuts":   ("synth_vp9.mp4", [{"start": 5, "end": 9}, {"start": 12, "end": 17}]),
     "V2_vp9_fades":  ("synth_vp9.mp4", [{"start": 3, "end": 13, "fadein": 2, "fadeout": 2}]),
@@ -75,7 +82,9 @@ CASES = {
     "X_portrait":      ("synth_portrait.mp4", [{"start": 3, "end": 13, "fadein": 2, "fadeout": 2}]),
     "X_fb_sd_h264":    ("fb_sd_h264.mp4", [{"start": 2, "end": 8, "fadein": 1, "fadeout": 1}, {"start": 10, "end": 14}]),
 }
-EXPECTED_FAILURES = {"X_vp9_10bit"}  # smartcut can't re-encode 10/12-bit VP9 (profile 2/3)
+# X_vp9_10bit: smartcut can't re-encode 10/12-bit VP9 (profile 2/3). X_mp3_copy: copied MP3 audio has ~50 ms of
+# silence after every join (and at the start): MP3 frames borrow bits from earlier frames (the bit reservoir)
+EXPECTED_FAILURES = {"X_vp9_10bit", "X_mp3_copy"}
 
 # Verdict thresholds (correct outputs measured: fade errors <= 0.04, gaps <= 1.1 frames, |A-V| <= 20 ms)
 MAX_FADE_ERR_SYNTH, MAX_FADE_ERR_REAL = 0.08, 0.15
@@ -118,21 +127,26 @@ def ideal_gain(u, length, fin, fout):
 
 
 def read_media(path):
-    """Video luma means/hashes per frame and mono audio samples."""
+    """Video luma means/hashes per frame, and per audio track: mono samples, sample rate, start time."""
     v_t, v_mean, v_hash = [], [], []
-    a_chunks, a_rate, a_start = [], None, None
     with av.open(str(path)) as c:
         vs = c.streams.video[0] if c.streams.video else None
-        as_ = c.streams.audio[0] if c.streams.audio else None
+        audio_streams = list(c.streams.audio)
+        as_ = audio_streams[0] if audio_streams else None
+        a_chunks = {s.index: [] for s in audio_streams}
+        a_rate, a_start = {}, {}
         info = {"vcodec": vs.codec_context.name if vs else None,
                 "avg_rate": float(vs.average_rate) if vs and vs.average_rate else None,
                 "acodec": as_.codec_context.name if as_ else None, "abitrate": as_.bit_rate if as_ else None,
+                "atracks": [(s.codec_context.name, s.codec_context.profile) for s in audio_streams],
                 "start_time": (c.start_time or 0) / av.time_base,
                 # As players see it (in MP4 the edit list); None in Matroska
                 "v_stream_s": float(vs.duration * vs.time_base) if vs and vs.duration is not None and vs.time_base else None}
         # Decoding drops the frames outside an MP4 edit list, as FFmpeg and players do: the frame count is the same
         # as ffprobe -count_frames
-        for frame in c.decode(*[s for s in (vs, as_) if s is not None]):
+        decoded = ((packet.stream.index, frame) for packet in c.demux(*[s for s in (vs, *audio_streams) if s is not None])
+                   for frame in packet.decode())
+        for i, frame in decoded:
             if isinstance(frame, av.VideoFrame):
                 p = frame.planes[0]
                 if frame.format.name.endswith(("10le", "12le")):  # scale high bit depth luma to 8-bit
@@ -149,12 +163,13 @@ def read_media(path):
                         else arr.reshape(-1, len(frame.layout.channels)).astype(np.float32).mean(axis=1))
                 if np.issubdtype(arr.dtype, np.integer):
                     mono /= np.iinfo(arr.dtype).max
-                if a_start is None:
-                    a_start = float(frame.pts * frame.time_base) if frame.pts is not None else 0.0
-                a_rate = frame.sample_rate
-                a_chunks.append(mono)
-    audio = np.concatenate(a_chunks) if a_chunks else np.zeros(0, np.float32)
-    return info, np.array(v_t), np.array(v_mean), v_hash, audio, a_rate, a_start or 0.0
+                if i not in a_start:
+                    a_start[i] = float(frame.pts * frame.time_base) if frame.pts is not None else 0.0
+                a_rate[i] = frame.sample_rate
+                a_chunks[i].append(mono)
+    audios = [(np.concatenate(a_chunks[s.index]) if a_chunks[s.index] else np.zeros(0, np.float32),
+               a_rate.get(s.index), a_start.get(s.index, 0.0)) for s in audio_streams]
+    return info, np.array(v_t), np.array(v_mean), v_hash, audios
 
 
 def rms_windows(x, rate, win):
@@ -163,15 +178,42 @@ def rms_windows(x, rate, win):
     return np.sqrt((x[: k * n].reshape(k, n).astype(np.float64) ** 2).mean(axis=1))
 
 
+def measure_audio(o_track, s_track, o_offset, tone, segs, starts, lengths, v_duration):
+    """One audio track vs the same source track: length vs the video, fade curve error, gain outside fades, dips."""
+    (o_audio, o_rate, _), (s_audio, s_rate, s_astart) = o_track, s_track
+    win = 0.01 if tone else 0.05
+    o_rms, s_rms = rms_windows(o_audio, o_rate, win), rms_windows(s_audio, s_rate, win)
+    at = np.arange(len(o_rms)) * win + win / 2 + o_offset
+    a_gain, a_ideal = np.full(len(at), np.nan), np.full(len(at), np.nan)
+    for k, s in enumerate(segs):
+        _, _, ai, ao = fades_of(s)
+        m = (at >= starts[k]) & (at < starts[k] + lengths[k])
+        u = at[m] - starts[k]
+        idx = np.clip(((s["start"] + u - s_astart) / win).astype(int), 0, len(s_rms) - 1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            a_gain[m] = np.where(s_rms[idx] > 1e-3, o_rms[m] / s_rms[idx], np.nan)
+        a_ideal[m] = ideal_gain(u, lengths[k], ai, ao)
+    a_err, afade = np.abs(a_gain - a_ideal), a_ideal < 0.999
+    flat = ~afade & np.isfinite(a_gain)
+    r = {"a_duration": len(o_audio) / o_rate if o_rate else 0}
+    r["av_diff_ms"] = (r["a_duration"] - v_duration) * 1000
+    r["a_fade_max_err"] = float(np.nanmax(a_err[afade])) if afade.any() and np.isfinite(a_err[afade]).any() else None
+    r["a_flat_min_gain"] = float(np.nanmin(a_gain[flat])) if flat.any() else None
+    r["a_flat_max_gain"] = float(np.nanmax(a_gain[flat])) if flat.any() else None
+    if tone:
+        dips = at[flat & (a_gain < 0.9)]
+        r["a_dips_at"] = [round(float(x), 2) for x in dips if x > DIP_GRACE_S][:10]
+    return r, at, a_gain, a_ideal
+
+
 _sources = {}
 
 
 def analyse(media, out_dir, case, src_name, segs, out_path):
     if src_name not in _sources:
         _sources[src_name] = read_media(media / src_name)
-    s_info, s_vt, s_vmean, _, s_audio, s_rate, s_astart = _sources[src_name]
-    o_info, o_vt, o_vmean, o_hash, o_audio, o_rate, o_astart = read_media(out_path)
-    tone = src_name.startswith("synth_") and "heaac" not in src_name
+    s_info, s_vt, s_vmean, _, s_audios = _sources[src_name]
+    o_info, o_vt, o_vmean, o_hash, o_audios = read_media(out_path)
     segs = sorted(segs, key=lambda s: s["start"])
     lengths = [s["end"] - s["start"] for s in segs]
     starts = np.concatenate([[0], np.cumsum(lengths)[:-1]])
@@ -207,48 +249,49 @@ def analyse(media, out_dir, case, src_name, segs, out_path):
     res["v_fade_max_err"] = float(np.nanmax(err[fading])) if fading.any() and np.isfinite(err[fading]).any() else None
     res["v_flat_min_alpha"] = float(np.nanmin(v_alpha[~fading])) if (~fading).any() else None
 
-    # Audio: RMS relative to the matching source window
-    win = 0.01 if tone else 0.05
-    o_rms, s_rms = rms_windows(o_audio, o_rate, win), rms_windows(s_audio, s_rate, win)
-    at = np.arange(len(o_rms)) * win + win / 2 + (o_astart - t0)
-    a_gain, a_ideal = np.full(len(at), np.nan), np.full(len(at), np.nan)
-    for k, s in enumerate(segs):
-        _, _, ai, ao = fades_of(s)
-        m = (at >= starts[k]) & (at < starts[k] + lengths[k])
-        u = at[m] - starts[k]
-        idx = np.clip(((s["start"] + u - s_astart) / win).astype(int), 0, len(s_rms) - 1)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            a_gain[m] = np.where(s_rms[idx] > 1e-3, o_rms[m] / s_rms[idx], np.nan)
-        a_ideal[m] = ideal_gain(u, lengths[k], ai, ao)
-    a_err, afade = np.abs(a_gain - a_ideal), a_ideal < 0.999
-    flat = ~afade & np.isfinite(a_gain)
-    res["a_duration"] = len(o_audio) / o_rate if o_rate else 0
-    res["av_diff_ms"] = (res["a_duration"] - res["v_duration"]) * 1000
-    res["a_fade_max_err"] = float(np.nanmax(a_err[afade])) if afade.any() and np.isfinite(a_err[afade]).any() else None
-    res["a_flat_min_gain"] = float(np.nanmin(a_gain[flat])) if flat.any() else None
-    res["a_flat_max_gain"] = float(np.nanmax(a_gain[flat])) if flat.any() else None
-    if tone:
-        dips = at[flat & (a_gain < 0.9)]
-        res["a_dips_at"] = [round(float(x), 2) for x in dips if x > DIP_GRACE_S][:10]
-    np.savez(out_dir / f"{case}.npz", vt=vt, v_alpha=v_alpha, v_ideal=v_ideal, at=at, a_gain=a_gain, a_ideal=a_ideal)
-
-    max_err = MAX_FADE_ERR_SYNTH if tone else MAX_FADE_ERR_REAL
+    # Audio, every track (the first one's numbers fill the table columns): RMS relative to the same source track.
+    # Tone tracks (synthetic sources, not HE-AAC real audio) get finer windows and the dip check.
     problems = []
+    if len(o_audios) != len(s_audios):
+        problems.append(f"{len(o_audios)} of {len(s_audios)} audio tracks")
+    res.update(a_duration=0, av_diff_ms=0, a_fade_max_err=None, a_flat_min_gain=None, a_flat_max_gain=None, tracks=[])
+    for t, (o_track, s_track) in enumerate(zip(o_audios, s_audios)):
+        tone = src_name.startswith("synth_") and s_info["atracks"][t][1] != "HE-AAC"
+        tr, at, a_gain, a_ideal = measure_audio(o_track, s_track, o_track[2] - t0, tone, segs, starts, lengths,
+                                                res["v_duration"])
+        res["tracks"].append(tr)
+        if t == 0:
+            res.update(tr)
+            np.savez(out_dir / f"{case}.npz", vt=vt, v_alpha=v_alpha, v_ideal=v_ideal, at=at, a_gain=a_gain, a_ideal=a_ideal)
+        prefix = f"track {t + 1}: " if t else ""
+        if abs(tr["av_diff_ms"]) > MAX_AV_MS:
+            problems.append(prefix + "A/V length")
+        if tr["a_fade_max_err"] is not None and tr["a_fade_max_err"] > (MAX_FADE_ERR_SYNTH if tone else MAX_FADE_ERR_REAL):
+            problems.append(prefix + "a_fade_max_err")
+        if tr.get("a_dips_at"):
+            problems.append(prefix + "audio dips")
+
+    tone = src_name.startswith("synth_") and "heaac" not in src_name
+    max_err = MAX_FADE_ERR_SYNTH if tone else MAX_FADE_ERR_REAL
     if res["v_frames"] != res["v_frames_expected"]:
         problems.append("frame count")
     if res["v_stream_s"] is not None and abs(res["v_stream_s"] - res["v_duration"]) * fps > MAX_STREAM_END_FRAMES:
         problems.append("stream duration")
     if res["v_max_gap_frames"] > MAX_GAP_FRAMES or res["v_nonmonotonic"]:
         problems.append("frame timing")
-    if abs(res["av_diff_ms"]) > MAX_AV_MS:
-        problems.append("A/V length")
-    for key in ("v_fade_max_err", "a_fade_max_err"):
-        if res[key] is not None and res[key] > max_err:
-            problems.append(key)
-    if res.get("a_dips_at"):
-        problems.append("audio dips")
+    if res["v_fade_max_err"] is not None and res["v_fade_max_err"] > max_err:
+        problems.append("v_fade_max_err")
     res["problems"] = problems
     return res
+
+
+def other_tracks(r):
+    """Table notes for the audio tracks after the first: A-V ms and fade error."""
+    notes = []
+    for t, tr in enumerate(r.get("tracks", [])[1:], start=2):
+        fade = "-" if tr["a_fade_max_err"] is None else f"{tr['a_fade_max_err']:.2f}"
+        notes.append(f"track {t}: A-V {tr['av_diff_ms']:.0f} aFade {fade}")
+    return notes
 
 
 def main():
@@ -324,7 +367,7 @@ def main():
         print(f"{case:<16}{verdict:<9}{r['seconds']:>7.1f}{r['v_duration']:>7.2f}/{r['expected_s']:<5.1f}{f(r['v_stream_s']):>7}"
               f"{r['v_frames']:>6}/{r['v_frames_expected']:<5}{f(r['v_max_gap_frames'], 1):>5}{r['v_identical_frames']:>5}"
               f"{r['av_diff_ms']:>8.0f}{f(r['v_fade_max_err']):>9}{f(r['a_fade_max_err']):>9}"
-              f"{f(r['a_flat_min_gain']):>8}/{f(r['a_flat_max_gain'])}  {', '.join(r['problems'] + [f'dips {d}' for d in r.get('a_dips_at', [])][:1])}")
+              f"{f(r['a_flat_min_gain']):>8}/{f(r['a_flat_max_gain'])}  {', '.join(r['problems'] + [f'dips {d}' for d in r.get('a_dips_at', [])][:1] + other_tracks(r))}")
     return 1 if failures else 0
 
 

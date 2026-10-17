@@ -342,8 +342,8 @@ def process_segments(
             media_container=media_container,
             positive_segments=segments_with_fade,
             out_path=output_path,
-            # The first audio track, if any (asking for a track the input lacks raised IndexError)
-            audio_export_info=AudioExportInfo(output_tracks=[AudioExportSettings('passthru')] if media_container.audio_tracks else []),
+            # Every audio track, like the CLI (with audio fades each one is re-encoded as a whole)
+            audio_export_info=AudioExportInfo(output_tracks=[AudioExportSettings('passthru')] * len(media_container.audio_tracks)),
             video_settings=VideoSettings(
                 mode=VideoExportMode.SMARTCUT,
                 quality=_QUALITY_MAP.get(quality.lower(), VideoExportQuality.NORMAL),

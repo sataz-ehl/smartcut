@@ -19,7 +19,8 @@ python smartcut/tests/regression/run_cases.py --list
 ```
 
 Media the generator can't make (add it to the media dir by hand to enable those cases):
-`synth_heaac.mp4` (HE-AAC audio; see make_test_media.py for the one-line ffmpeg mux), `real_fb_vp9.mp4`
+`synth_heaac.mp4` and `synth_2audio_heaac.mp4` (HE-AAC audio; see make_test_media.py for the one-line ffmpeg
+muxes), `real_fb_vp9.mp4`
 (a Facebook VP9 + HE-AAC download), `fb_sd_h264.mp4` (a Facebook `sd` H.264 download). Real clips are
 third-party content, so they are not committed.
 
@@ -38,9 +39,13 @@ third-party content, so they are not committed.
 | `aFlat min/max` | Audio gain outside fades (should be ~1.0) | - |
 | notes / dips | Audio dips below 0.9 in untouched parts (clicks, gaps); tone sources only, first 50 ms ignored | none |
 
+The audio columns are the first track's. Every other audio track gets the same checks (`track N:` in the notes
+gives its `A-V ms` and `aFadeErr`), and the output must have as many audio tracks as the source.
+
 Results are also written to `<out>/results.json`, and per-case time series to `<out>/<case>.npz`
-(`vt, v_alpha, v_ideal, at, a_gain, a_ideal`). `X_vp9_10bit` is an expected failure (smartcut can't re-encode
-10/12-bit VP9); it reports XFAIL, or XPASS if it starts working.
+(`vt, v_alpha, v_ideal, at, a_gain, a_ideal`). Expected failures report XFAIL, or XPASS if they start working:
+`X_vp9_10bit` (smartcut can't re-encode 10/12-bit VP9) and `X_mp3_copy` (copied MP3 audio has ~50 ms of silence
+after every join: MP3 frames borrow bits from earlier frames).
 
 Synthetic clips show a frame counter and timestamp, so stutter, repeated or skipped frames and the frames at a
 join are easy to check by eye too.
@@ -65,6 +70,7 @@ These need no test media and run like the other test scripts (`python smartcut/t
   progress callback; deterministic on any number of cores); steady progress; input file closed.
 - `smartcut/tests/test_last_frame.py`: cuts keep their last frame (H.264 with and without B-frames, VP9, AV1,
   fades, MP4 and MKV), counted as FFmpeg decodes them; inputs without audio.
+- `smartcut/tests/test_multitrack.py`: every audio track is kept (AAC + AC-3), copied or re-encoded with fades.
 
 ## Windows notes
 

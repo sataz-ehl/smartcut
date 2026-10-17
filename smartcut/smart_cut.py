@@ -99,7 +99,8 @@ def _cra_leading_frames(media_container: MediaContainer, cut_segments: list[CutS
 
 class _WorkProgress:
     def __init__(self, progress: WorkProgressCallback | None, cancel_object: CancelObject | None, media_container: MediaContainer,
-                 cut_segments: list[CutSegment], recode_audio: bool, *, include_video: bool = True) -> None:
+                 cut_segments: list[CutSegment], recode_audio: int, *, include_video: bool = True) -> None:
+        """recode_audio: the number of audio tracks re-encoded as a whole (audio fades)."""
         self.progress = progress
         self.cancel_object = cancel_object
         self.frame_cost = 0.0
@@ -128,7 +129,8 @@ class _WorkProgress:
                 if leading is not None:
                     self.video_total += leading[i] * self.frame_cost
             if recode_audio:  # pieces at the file edges reach 10 s past it (make_adjusted_segment_times)
-                weight += max(0.0, float(min(s.end_time, media_end) - max(s.start_time, media_start))) * _AUDIO_RECODE_COST_PER_SECOND
+                weight += (max(0.0, float(min(s.end_time, media_end) - max(s.start_time, media_start)))
+                           * _AUDIO_RECODE_COST_PER_SECOND * recode_audio)
             self.piece_weights.append(weight)
         self.total = (self.video_total + sum(self.piece_weights)) or 1.0
         self.video_done = 0.0
@@ -314,7 +316,8 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                           (seg.fade_info.audio_fadein_duration is not None or seg.fade_info.audio_fadeout_duration is not None)
                           for seg in cut_segments)
     work = None
-    recode_audio = has_audio_fades and audio_export_info is not None and len(media_container.audio_tracks) > 0
+    recode_audio = sum(1 for t in audio_export_info.output_tracks[:len(media_container.audio_tracks)]
+                       if t is not None and t.codec == 'passthru') if has_audio_fades and audio_export_info is not None else 0
     previously_done_segments = 0
     for output_path_segment in output_files:
         if cancel_object is not None and cancel_object.cancelled:
