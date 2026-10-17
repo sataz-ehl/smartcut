@@ -77,12 +77,18 @@ DIP_GRACE_S = 0.05  # the first AAC frames of a copied stream ramp up; ignore di
 
 
 def pin_to_one_core():
+    """Run on one CPU core. FFmpeg also sizes its codec thread pools from this, as on a 1-CPU server."""
     if hasattr(os, "sched_setaffinity"):  # Linux
         os.sched_setaffinity(0, {sorted(os.sched_getaffinity(0))[0]})
     elif sys.platform == "win32":
         import ctypes
-        kernel32 = ctypes.windll.kernel32
-        kernel32.SetProcessAffinityMask(kernel32.GetCurrentProcess(), 1)
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        # Without these types ctypes truncates the process pseudo-handle and the call fails silently
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.SetProcessAffinityMask.argtypes = [wintypes.HANDLE, ctypes.c_size_t]
+        if not kernel32.SetProcessAffinityMask(kernel32.GetCurrentProcess(), 1):
+            raise OSError(ctypes.get_last_error(), "SetProcessAffinityMask failed")
 
 
 def fades_of(seg):

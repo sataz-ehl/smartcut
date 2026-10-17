@@ -52,12 +52,12 @@ class CancelObject:
 # thousand times longer than copying one, so a progress object that also has emit_fraction(fraction) gets the
 # share of the estimated work done. Re-encoded frames count when the encoder outputs them: encoders with
 # lookahead (libaom, libvpx, x264) take in their first frames instantly and finish the last ones in a flush.
-# Cost in seconds on one desktop core, measured with tests/regression/progress_timeline.py --calibrate
+# Cost in seconds on one desktop core, measured with tests/regression/progress_timeline.py --one-core --calibrate
 # (Oct 2026, 360p and 720p clips; hevc is an estimate). Only the ratios matter.
-_RECODE_COST_PER_MEGAPIXEL_FRAME = {'h264': 0.015, 'hevc': 0.06, 'vp9': 0.045, 'av1': 0.125}
-_RECODE_COST_PER_MEGAPIXEL_FRAME_OTHER = 0.05
+_RECODE_COST_PER_MEGAPIXEL_FRAME = {'h264': 0.04, 'hevc': 0.15, 'vp9': 0.075, 'av1': 0.21}
+_RECODE_COST_PER_MEGAPIXEL_FRAME_OTHER = 0.1
 _COPY_COST_PER_FRAME = 0.00002
-_AUDIO_RECODE_COST_PER_SECOND = 0.03
+_AUDIO_RECODE_COST_PER_SECOND = 0.027
 
 
 class _Cancelled(Exception):
