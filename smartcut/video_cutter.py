@@ -358,6 +358,14 @@ class VideoCutter:
         self.encoding_options = {'crf': str(crf_value)}
         if self.codec_name == 'vp9' and self.video_settings.quality == VideoExportQuality.LOSSLESS:
             self.encoding_options['lossless'] = '1'
+
+        # Speed settings for the GOPs that get re-encoded (cut points, fades). The libvpx-vp9 and especially
+        # libaom-av1 defaults are very slow: on one CPU core, AV1 smart cuts took ~16x longer than with
+        # cpu-used=8, which costs ~1.7 dB PSNR on the re-encoded GOPs only (VP9 cpu-used=5: ~2x, ~0.7 dB).
+        if self.codec_name == 'vp9':
+            self.encoding_options.update({'cpu-used': '5', 'row-mt': '1'})
+        elif self.codec_name == 'av1' and not any(x in codec_name for x in ('svt', 'rav1e')):  # libaom-av1 options
+            self.encoding_options.update({'cpu-used': '8', 'row-mt': '1'})
         # encoding_options = {}
         if profile is not None:
             self.encoding_options['profile'] = profile
