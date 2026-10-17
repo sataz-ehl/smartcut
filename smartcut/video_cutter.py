@@ -120,6 +120,17 @@ def create_video_output_stream(
             out_stream.height = in_stream.height
             if in_stream.sample_aspect_ratio is not None:
                 out_stream.sample_aspect_ratio = in_stream.sample_aspect_ratio
+            # Keep the source's pixel format (e.g. 10-bit) and colour signalling: re-encoded GOPs are spliced
+            # between copied ones, and this encoder also writes the stream header. Without it a 10-bit AV1
+            # source got 8-bit re-encoded GOPs and an 8-bit header.
+            out_stream.codec_context.pix_fmt = in_stream.codec_context.pix_fmt
+            for attr in ('color_range', 'color_primaries', 'color_trc', 'colorspace'):
+                value = getattr(in_stream.codec_context, attr, None)
+                if value is not None:
+                    try:
+                        setattr(out_stream.codec_context, attr, value)
+                    except (AttributeError, TypeError, ValueError):
+                        pass
             out_stream.metadata.update(in_stream.metadata)
             out_stream.disposition = cast(Disposition, in_stream.disposition.value)
             out_stream.time_base = in_stream.time_base
