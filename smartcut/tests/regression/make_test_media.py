@@ -18,6 +18,7 @@ keyframe interval) are always generated:
     synth_portrait.mp4        720x1280
     synth_2audio.mp4          synth_h264.mp4 + a second audio track: AC-3 880 Hz mono, 44.1 kHz
     synth_2audio_mp3.mp4      the same with an MP3 second track
+    synth_vp9_opus.webm       synth_vp9.mp4's video with the tone as Opus (for .webm outputs)
 
 --real CLIP.mp4 (any H.264 + AAC clip, e.g. a downloaded music video) additionally derives:
 
@@ -106,6 +107,8 @@ def main():
     ok["synth_vp9.mp4"] = transcode(ff, out, "synth_h264.mp4", "synth_vp9.mp4", vp9)
     ok["synth_vp9_10bit.mp4"] = transcode(ff, out, "synth_h264.mp4", "synth_vp9_10bit.mp4",
                                           [*vp9, "-pix_fmt", "yuv420p10le", "-profile:v", "2"])
+    ok["synth_vp9_opus.webm"] = run(ff, ["-i", "synth_vp9.mp4", "-c:v", "copy", "-c:a", "libopus", "-b:a", "96k",
+                                         "synth_vp9_opus.webm"], out)
     ok["synth_av1.mp4"] = transcode(ff, out, "synth_h264.mp4", "synth_av1.mp4", av1)
     ok["synth_av1_10bit.mp4"] = transcode(ff, out, "synth_h264.mp4", "synth_av1_10bit.mp4", [*av1, "-pix_fmt", "yuv420p10le"])
     ok["synth_2audio.mp4"] = add_audio_track(ff, out, "synth_h264.mp4", "synth_2audio.mp4", ["-c:a:1", "ac3", "-b:a:1", "192k"])

@@ -112,6 +112,9 @@ smartcut.process_segments("in.mp4", "out.mp4", [
 - The output stream is created from the encoder rather than copied from the source, so the stream header matches
   the packets: AAC and HE-AAC sources become AAC-LC (FFmpeg can't encode HE-AAC) at the source bitrate but at
   least 128 kbps. Other codecs are re-encoded with their own encoder when FFmpeg has one, else AAC.
+- `.webm` outputs: WebM holds only Opus and Vorbis audio, so other tracks (e.g. AAC, HE-AAC) are always
+  re-encoded to Opus as a whole track (48 kHz, at least 128 kbps), fades or not. Opus/Vorbis tracks are copied
+  when there are no audio fades. Other containers are unchanged.
 - Audio is cut sample-accurately to each cut piece and kept locked to the video timeline (silence is inserted
   where the source has no audio). After a jump the decoder restarts two packets early, so the first kept samples
   decode cleanly.
@@ -158,6 +161,7 @@ Run from the repo root (tests live in `smartcut/tests/`):
 | `test_cancel.py` | Cancelling (also midway through re-encoding, with and without progress), steady progress, input closed |
 | `test_last_frame.py` | Cuts keep their last frame, also when they end with re-encoded frames (H.264, VP9, AV1, fades) |
 | `test_multitrack.py` | Every audio track is kept: copied without audio fades, each re-encoded as a whole with them |
+| `test_webm.py` | `.webm` outputs: AAC re-encoded to Opus (with and without fades), Opus copied |
 | `regression/` | Measurement-based regression harness, test media generator and diagnostic tools (see its README) |
 
 ## Usage Examples

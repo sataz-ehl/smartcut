@@ -16,6 +16,7 @@ from smartcut.track_cutters import (
     PassthruAudioCutter,
     RecodeAudioCutter,
     SubtitleCutter,
+    audio_needs_recode,
     create_audio_output_stream,
     create_recode_audio_output_stream,
     create_subtitle_output_stream,
@@ -316,8 +317,6 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                           (seg.fade_info.audio_fadein_duration is not None or seg.fade_info.audio_fadeout_duration is not None)
                           for seg in cut_segments)
     work = None
-    recode_audio = sum(1 for t in audio_export_info.output_tracks[:len(media_container.audio_tracks)]
-                       if t is not None and t.codec == 'passthru') if has_audio_fades and audio_export_info is not None else 0
     previously_done_segments = 0
     for output_path_segment in output_files:
         if cancel_object is not None and cancel_object.cancelled:
@@ -328,9 +327,14 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             include_video = True
             if output_av_container.format.name in ['ogg', 'mp3', 'm4a', 'ipod', 'flac', 'wav']: #ipod is the real name for m4a, I guess
                 include_video = False
+            # Audio tracks re-encoded as a whole: every one with audio fades, and in WebM those it can't hold (Opus)
+            recode_tracks = {i for i, t in enumerate(audio_export_info.output_tracks[:len(media_container.audio_tracks)])
+                             if t is not None and t.codec == 'passthru'
+                             and (has_audio_fades or audio_needs_recode(media_container, output_av_container, i))
+                             } if audio_export_info is not None else set()
             if work is None and (isinstance(progress, WorkProgressCallback) or cancel_object is not None):
                 work = _WorkProgress(progress if isinstance(progress, WorkProgressCallback) else None, cancel_object,
-                                     media_container, cut_segments, recode_audio, include_video=include_video)
+                                     media_container, cut_segments, len(recode_tracks), include_video=include_video)
 
                         # Preserve container attachments (e.g., MKV attachments) when supported by the output format
             container_name = (output_av_container.format.name or "").lower()
@@ -358,11 +362,11 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                     generators.append(factory(output_av_container))
 
             # Any audio fade (has_audio_fades): re-encode the whole audio track with one encoder (see
-            # RecodeAudioCutter). Without audio fades the audio is copied untouched.
+            # RecodeAudioCutter). Without audio fades the audio is copied untouched, unless WebM can't hold it.
             if audio_export_info is not None:
                 for track_i, track_export_settings in enumerate(audio_export_info.output_tracks):
                     if track_export_settings is not None and track_export_settings.codec == 'passthru':
-                        if has_audio_fades:
+                        if track_i in recode_tracks:
                             audio_out_stream = create_recode_audio_output_stream(media_container, output_av_container, track_i)
                             generators.append(RecodeAudioCutter(media_container, audio_out_stream, track_i))
                         else:
