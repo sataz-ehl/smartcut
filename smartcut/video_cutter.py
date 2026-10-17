@@ -184,6 +184,11 @@ def _normalize_output_codec_tag(
     elif is_mp4_mov_mkv and in_codec_name in ('hevc', 'h265') and _is_mpegts_hevc_tag(in_codec_ctx.codec_tag):
         out_codec_ctx.codec_tag = 'hvc1'
 
+    # VP9 from MP4 has the sample entry tag 'vp09', which Matroska rejects ("Tag vp09 incompatible with output
+    # codec id"): it identifies codecs by CodecID, so leave the tag unset (fork addition)
+    if not is_mp4_or_mov and is_mp4_mov_mkv and in_codec_name == 'vp9' and out_codec_ctx.codec_tag == 'vp09':
+        out_codec_ctx.codec_tag = '\0\0\0\0'
+
 
 def _is_mpegts_h264_tag(codec_tag: str) -> bool:
     """Check if codec tag is MPEG-TS style H.264 tag."""

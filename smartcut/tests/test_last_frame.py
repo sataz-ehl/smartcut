@@ -101,7 +101,7 @@ def main() -> int:
         for name, (codec, options, with_audio) in SOURCES.items():
             src = tmp / f"src_{name}.mp4"
             make_source(src, codec, options, with_audio)
-            for ext in ("mp4", "mkv") if name == "h264" else ("mp4",):
+            for ext in ("mp4", "mkv") if name in ("h264", "vp9") else ("mp4",):
                 for i, (cut, segments) in enumerate(CUTS if with_audio else CUTS[:1]):
                     total += 1
                     problem = check_cut(src, tmp / f"out_{name}_{i}.{ext}", segments)
