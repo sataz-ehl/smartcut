@@ -7,10 +7,12 @@ updates, the longest stretch without an update, and the largest difference betwe
 the share of the time elapsed (0 = perfectly even). The time before the first update (opening and indexing the
 input) is reported separately.
 
---calibrate also times every cut piece and prints the measured cost per re-encoded megapixel-frame, per copied
-frame and per second of re-encoded audio, to compare with the _*_COST_* constants in smart_cut.py.
+--calibrate also times every cut piece (the whole loop iteration, muxing and audio passthrough included) and
+prints the measured cost per re-encoded megapixel-frame, per copied frame and per second of re-encoded audio, to
+compare with the _*_COST_* constants in smart_cut.py. Calibrate with --one-core.
 """
 import argparse
+import importlib
 import sys
 import time
 from collections import defaultdict
@@ -21,17 +23,22 @@ from run_cases import CASES, pin_to_one_core  # noqa: E402
 
 
 def install_timers(stats):
-    """Wrap the cutters to time every piece. Encoder flushes (the frames still inside the encoder when a
-    re-encoded run ends) are counted as re-encoding, not as the copy that triggers them."""
+    """Wrap the cutters to time every piece: the whole loop iteration in smart_cut (video, audio passthrough,
+    subtitles, muxing), from the video cutter's start to _WorkProgress.piece_done. Encoder flushes (the frames
+    still inside the encoder when a re-encoded run ends) are counted as re-encoding, not as the copy that triggers
+    them, and re-encoded audio separately."""
     from smartcut import track_cutters, video_cutter
 
+    work_progress = importlib.import_module("smartcut.smart_cut")._WorkProgress
     vc = video_cutter.VideoCutter
-    orig_segment, orig_flush = vc.segment, vc.flush_encoder
+    orig_segment, orig_flush, orig_piece_done = vc.segment, vc.flush_encoder, work_progress.piece_done
+    piece = {}  # the piece in progress: start time, flush and audio time so far, kind and frame count
 
     def flush_encoder(self):
         t = time.perf_counter()
         packets = orig_flush(self)
         stats["flush_s"] += time.perf_counter() - t
+        stats["flush_packets"] += len(packets)
         return packets
 
     def segment(self, s):
@@ -44,24 +51,29 @@ def install_timers(stats):
                 hook(count)
 
         self.on_frames_encoded = counting_hook
-        flush_before = stats["flush_s"]
-        t = time.perf_counter()
+        piece.update(t=time.perf_counter(), flush_s=stats["flush_s"], audio_s=stats["audio_s"])
+        flushed_before = stats["flush_packets"]
         try:
             packets = orig_segment(self, s)
         finally:
             self.on_frames_encoded = hook
-        spent = time.perf_counter() - t - (stats["flush_s"] - flush_before)
         ctx = self.in_stream.codec_context
         stats["megapixels"] = ctx.width * ctx.height / 1e6
-        if s.require_recode:
-            stats["recode_frames"] += frames[0]
-            stats["recode_s"] += spent
-        else:
-            stats["copy_frames"] += len(packets)
-            stats["copy_s"] += spent
+        piece.update(recode=s.require_recode,
+                     frames=frames[0] if s.require_recode else len(packets) - (stats["flush_packets"] - flushed_before))
         return packets
 
-    vc.segment, vc.flush_encoder = segment, flush_encoder
+    def piece_done(self, index):
+        if piece:
+            spent = (time.perf_counter() - piece["t"] - (stats["flush_s"] - piece["flush_s"])
+                     - (stats["audio_s"] - piece["audio_s"]))
+            kind = "recode" if piece["recode"] else "copy"
+            stats[f"{kind}_frames"] += piece["frames"]
+            stats[f"{kind}_s"] += spent
+            piece.clear()
+        orig_piece_done(self, index)
+
+    vc.segment, vc.flush_encoder, work_progress.piece_done = segment, flush_encoder, piece_done
 
     ac = track_cutters.RecodeAudioCutter
     orig_audio = ac.segment

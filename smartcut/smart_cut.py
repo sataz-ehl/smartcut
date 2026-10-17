@@ -62,10 +62,11 @@ class CancelObject:
 # lookahead (libaom, libvpx, x264) take in their first frames instantly and finish the last ones in a flush.
 # The same per-frame hook stops a re-encoded piece midway when cancel_object is set, with or without progress.
 # Cost in seconds on one desktop core, measured with tests/regression/progress_timeline.py --one-core --calibrate
-# (Oct 2026, 360p and 720p clips; hevc is an estimate). Only the ratios matter.
+# (Oct 2026, 360p and 720p clips; hevc is an estimate). Only the ratios matter. A copied frame costs the whole
+# loop: remuxing, audio passthrough and muxing (24-48 us measured; timing the video cutter alone gave 14-19 us).
 _RECODE_COST_PER_MEGAPIXEL_FRAME = {'h264': 0.04, 'hevc': 0.15, 'vp9': 0.075, 'av1': 0.18}
 _RECODE_COST_PER_MEGAPIXEL_FRAME_OTHER = 0.1
-_COPY_COST_PER_FRAME = 0.00002
+_COPY_COST_PER_FRAME = 0.000035
 _AUDIO_RECODE_COST_PER_SECOND = 0.027
 
 
