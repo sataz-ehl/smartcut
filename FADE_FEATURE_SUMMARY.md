@@ -121,6 +121,9 @@ smartcut.process_segments("in.mp4", "out.mp4", [
 - `.webm` outputs: WebM holds only Opus and Vorbis audio, so other tracks (e.g. AAC, HE-AAC) are always
   re-encoded to Opus as a whole track (48 kHz, at least 128 kbps), fades or not. Opus/Vorbis tracks are copied
   when there are no audio fades. Other containers are unchanged.
+- `.webm` outputs need VP8, VP9 or AV1 video, and smartcut doesn't re-encode the whole video: other video (e.g.
+  H.264) fails before anything is written, with "WebM output needs VP8, VP9 or AV1 video; this video is H.264: use
+  .mp4 or .mkv" (`OutputFormatError`; `process_segments` returns False, the CLI exits with 1).
 - Audio is cut sample-accurately to each cut piece and kept locked to the video timeline (silence is inserted
   where the source has no audio). After a jump the decoder restarts two packets early, so the first kept samples
   decode cleanly.

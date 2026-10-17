@@ -166,6 +166,25 @@ class _WorkProgress:
             self.progress.emit_fraction(min(1.0, (min(self.video_done, self.video_total) + self.pieces_done) / self.total))
 
 
+class OutputFormatError(ValueError):
+    """The output container can't hold the input's video codec (fork addition)."""
+
+
+_CODEC_NAMES = {'h264': 'H.264', 'hevc': 'H.265 (HEVC)', 'mpeg4': 'MPEG-4 Part 2', 'mpeg2video': 'MPEG-2'}
+
+
+def _check_webm_video(media_container: MediaContainer, out_path: str, video_settings: VideoSettings) -> None:
+    """WebM holds only VP8, VP9 and AV1 video, and smartcut copies the video except around cuts (fork addition).
+    Say so before writing anything: FFmpeg's error named an encoder ("'webm' format does not support 'libx264'")."""
+    stream = media_container.video_stream
+    if os.path.splitext(out_path)[1].lower() != '.webm' or stream is None or video_settings.codec_override != 'copy':
+        return
+    name = stream.codec_context.name or ''
+    if name not in ('vp8', 'vp9', 'libvpx', 'libvpx-vp9') and 'av1' not in name:  # AV1 decoders: libdav1d, av1, ...
+        raise OutputFormatError(f"WebM output needs VP8, VP9 or AV1 video; this video is {_CODEC_NAMES.get(name, name.upper())}: "
+                                "use .mp4 or .mkv")
+
+
 def make_adjusted_segment_times(positive_segments: list[tuple[Fraction, Fraction]], media_container: MediaContainer) -> list[tuple[Fraction, Fraction]]:
     adjusted_segment_times = []
     EPSILON = Fraction(1, 1_000_000)
@@ -248,6 +267,7 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
               external_generator_factories: list[StreamGeneratorFactory] | None = None) -> Exception | None:
     if video_settings is None:
         video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.NORMAL)
+    _check_webm_video(media_container, out_path, video_settings)
 
     # Handle both legacy tuple format and new SegmentWithFade format
     if positive_segments and isinstance(positive_segments[0], SegmentWithFade):

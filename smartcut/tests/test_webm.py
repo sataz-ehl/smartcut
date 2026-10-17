@@ -10,6 +10,9 @@ with PyAV; HE-AAC sources are in the regression harness (cases W1-W6 in regressi
 Usage (from the repo root):
     python smartcut/tests/test_webm.py
 """
+import contextlib
+import io
+import subprocess
 import sys
 import tempfile
 from fractions import Fraction
@@ -25,13 +28,13 @@ import smartcut
 FPS, SECONDS = 30, 6
 
 
-def make_source(path: Path, audio_codec: str) -> None:
-    """VP9 video and a 440 Hz tone, keyframe every second."""
+def make_source(path: Path, audio_codec: str, video_codec: str = "libvpx-vp9") -> None:
+    """VP9 (or other) video and a 440 Hz tone, keyframe every second."""
     rate = 48000
     with av.open(str(path), "w") as out:
-        video = out.add_stream("libvpx-vp9", rate=FPS)
+        video = out.add_stream(video_codec, rate=FPS)
         video.width, video.height, video.pix_fmt = 160, 96, "yuv420p"
-        video.codec_context.options = {"g": "30", "cpu-used": "8", "deadline": "realtime"}
+        video.codec_context.options = {"g": "30", "cpu-used": "8", "deadline": "realtime"} if "vpx" in video_codec else {"g": "30"}
         audio = out.add_stream(audio_codec, rate=rate, layout="stereo")
         n = rate // FPS
         for i in range(SECONDS * FPS):
@@ -86,6 +89,22 @@ def check(src: Path, out: Path, fades: bool, copied: bool) -> str | None:
     return None
 
 
+def check_h264_rejected(src: Path, out: Path) -> str | None:
+    """WebM can't hold H.264 and smartcut doesn't re-encode the whole video: a clear error, from the API and the
+    CLI, and no output file."""
+    expected = "WebM output needs VP8, VP9 or AV1 video; this video is H.264: use .mp4 or .mkv"
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(io.StringIO()):
+        result = smartcut.process_segments(str(src), str(out), [{"start": 1, "end": 4}])
+    if result is not False or expected not in printed.getvalue() or out.exists():
+        return f"API: returned {result!r}, output left {out.exists()}, printed {printed.getvalue().strip()[:160]!r}"
+    cli = subprocess.run([sys.executable, "-m", "smartcut", str(src), str(out), "--keep", "1,4"], capture_output=True,
+                         text=True, cwd=Path(__file__).resolve().parents[2], check=False)
+    if cli.returncode == 0 or expected not in cli.stderr or "Traceback" in cli.stderr or out.exists():
+        return f"CLI: exit {cli.returncode}, stderr {cli.stderr.strip()[-200:]!r}"
+    return None
+
+
 def main() -> int:
     failed = total = 0
     with tempfile.TemporaryDirectory() as d:
@@ -93,6 +112,11 @@ def main() -> int:
         sources = {"aac": tmp / "vp9_aac.mp4", "libopus": tmp / "vp9_opus.webm"}
         for codec, path in sources.items():
             make_source(path, codec)
+        make_source(tmp / "h264_aac.mp4", "aac", "libx264")
+        total += 1
+        problem = check_h264_rejected(tmp / "h264_aac.mp4", tmp / "h264.webm")
+        failed += problem is not None
+        print(f"✗ FAIL - H.264 video into .webm: {problem}" if problem else "✓ PASS - H.264 video into .webm: clear error")
         cases = [("AAC -> Opus, no fades", "aac", False, False), ("AAC -> Opus, audio fades", "aac", True, False),
                  ("Opus copied, no fades", "libopus", False, True), ("Opus re-encoded, audio fades", "libopus", True, False)]
         for i, (name, codec, fades, copied) in enumerate(cases):

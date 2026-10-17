@@ -7,7 +7,7 @@ from tqdm import tqdm
 from smartcut.media_container import MediaContainer
 from smartcut.media_utils import VideoExportMode, VideoExportQuality
 from smartcut.misc_data import AudioExportInfo, AudioExportSettings, FadeInfo, SegmentWithFade
-from smartcut.smart_cut import __version__, smart_cut
+from smartcut.smart_cut import OutputFormatError, __version__, smart_cut
 from smartcut.video_cutter import VideoSettings
 
 
@@ -456,10 +456,13 @@ time formats:
     # TODO: Fix av.logging import when PyAV version is updated
     pass
 
-    exception_value = smart_cut(source, segments_with_fade, args.output,
-                                audio_export_info=export_info,
-                                video_settings=video_settings,
-                                progress=progress, log_level=args.log_level)
+    try:
+        exception_value = smart_cut(source, segments_with_fade, args.output,
+                                    audio_export_info=export_info,
+                                    video_settings=video_settings,
+                                    progress=progress, log_level=args.log_level)
+    except OutputFormatError as e:  # (fork addition) e.g. H.264 video into .webm: the message, not a traceback
+        sys.exit(f"Error: {e}")
 
     if progress.tqdm is not None:
         progress.tqdm.close()
