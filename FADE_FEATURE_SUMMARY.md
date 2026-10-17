@@ -124,7 +124,9 @@ smartcut.process_segments("in.mp4", "out.mp4", [
   AV1 smart cuts ~16x and VP9 ~2x faster, for ~1.7 dB / ~0.7 dB lower PSNR on the re-encoded GOPs only.
 - Re-encoded GOPs use a 10-frame encoder lookahead: x264 `rc-lookahead`, libvpx/libaom `lag-in-frames`; libaom only
   from 720p up, since below that it was ~35% slower. The defaults hold 19-40 frames of several MB each. Full
-  re-encodes (`VideoExportMode.RECODE`) keep the defaults.
+  re-encodes (`VideoExportMode.RECODE`) keep the encoders' default lookahead.
+- Full re-encodes use the same faster VP9/AV1 speed settings (`cpu-used` 5 / 8), on purpose: on a 1-CPU server AV1
+  at the default speed is ~16x slower.
   - Peak memory on one core, 1080p with fades: x264 +429 → +239 MB, libaom +545 → +331 MB.
   - AV1 1080p also got faster: 209 → ~135 s.
   - Cost: 0.4-0.9 dB PSNR on the re-encoded frames only (at 47-52 dB).

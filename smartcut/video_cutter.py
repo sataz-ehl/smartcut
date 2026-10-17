@@ -376,7 +376,8 @@ class VideoCutter:
 
         # Speed settings for the GOPs that get re-encoded (cut points, fades). The libvpx-vp9 and especially
         # libaom-av1 defaults are very slow: on one CPU core, AV1 smart cuts took ~16x longer than with
-        # cpu-used=8, which costs ~1.7 dB PSNR on the re-encoded GOPs only (VP9 cpu-used=5: ~2x, ~0.7 dB).
+        # cpu-used=8, which costs ~1.7 dB PSNR on the re-encoded GOPs only (VP9 cpu-used=5: ~2x, ~0.7 dB). Full
+        # re-encodes (RECODE mode) use them too, on purpose.
         # Lookahead of 10 frames instead of the defaults (x264 40, libvpx 25, libaom 19-35): re-encoded runs are
         # short, and each frame in the lookahead holds several MB. One core, 1080p with fades: x264 peak
         # +429 -> +239 MB, libaom +545 -> +331 MB and 209 -> 132 s, for 0.4-0.9 dB PSNR on the re-encoded frames
