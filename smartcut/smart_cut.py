@@ -64,10 +64,16 @@ class CancelObject:
 # lookahead (libaom, libvpx, x264) take in their first frames instantly and finish the last ones in a flush.
 # The same per-frame hook stops a re-encoded piece midway when cancel_object is set, with or without progress.
 # Cost in seconds on one desktop core, measured with tests/regression/progress_timeline.py --one-core --calibrate
-# (Oct 2026, 360p and 720p clips; hevc is an estimate). Only the ratios matter. A copied frame costs the whole
-# loop: remuxing, audio passthrough and muxing (24-48 us measured; timing the video cutter alone gave 14-19 us).
-_RECODE_COST_PER_MEGAPIXEL_FRAME = {'h264': 0.04, 'hevc': 0.15, 'vp9': 0.075, 'av1': 0.18}
-_RECODE_COST_PER_MEGAPIXEL_FRAME_OTHER = 0.1
+# (Oct 2026; hevc is an estimate). Only the ratios matter.
+# - A re-encoded frame costs a fixed part plus a part per megapixel, fitted on real clips from 360x360 to 1080p
+#   (synthetic clips re-encode 2-3x cheaper). libvpx and libaom have a fixed part, so per megapixel alone
+#   underestimated small frames (360x360 VP9: 12 ms measured, 10 ms estimated) and overestimated 1080p (VP9 101 ms
+#   vs 155, AV1 265 ms vs 373). x264 has none measurable (and 0.047 per megapixel, the fit, made progress no more
+#   even than 0.04).
+# - A copied frame costs the whole loop: remuxing, audio passthrough and muxing (24-48 us measured; timing the
+#   video cutter alone gave 14-19 us).
+_RECODE_COST_PER_FRAME = {'h264': (0.0, 0.04), 'hevc': (0.0, 0.15), 'vp9': (0.009, 0.046), 'av1': (0.025, 0.117)}
+_RECODE_COST_PER_FRAME_OTHER = (0.005, 0.1)  # (seconds per frame, seconds per megapixel-frame)
 _COPY_COST_PER_FRAME = 0.000035
 _AUDIO_RECODE_COST_PER_SECOND = 0.027
 
@@ -111,8 +117,8 @@ class _WorkProgress:
             ctx = stream.codec_context
             name = ctx.name or ''
             family = 'av1' if 'av1' in name else name  # decoder names: h264, hevc, vp9, libdav1d, ...
-            cost = _RECODE_COST_PER_MEGAPIXEL_FRAME.get(family, _RECODE_COST_PER_MEGAPIXEL_FRAME_OTHER)
-            self.frame_cost = cost * (ctx.width or 0) * (ctx.height or 0) / 1e6
+            fixed, per_megapixel = _RECODE_COST_PER_FRAME.get(family, _RECODE_COST_PER_FRAME_OTHER)
+            self.frame_cost = fixed + per_megapixel * (ctx.width or 0) * (ctx.height or 0) / 1e6
         leading = _cra_leading_frames(media_container, cut_segments) if stream is not None and include_video else None
 
         media_start, media_end = media_container.start_time, media_container.start_time + media_container.duration
