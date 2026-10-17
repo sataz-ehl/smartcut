@@ -10,8 +10,11 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+# Make the repo root importable (tests live in smartcut/tests/; run from the repo root)
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 # Import synthetic video generator
-from generate_synthetic_video import generate_test_video
+from smartcut.tests.generate_synthetic_video import generate_test_video
 
 def run_smartcut(input_path: str, output_path: str, keep_args: list[str]) -> None:
     """
@@ -205,11 +208,9 @@ def main():
 
     for test_name, test_func in tests:
         try:
-            if test_func():
-                passed += 1
-            else:
-                failed += 1
-                print(f"✗ TEST FAILED: {test_name}")
+            # Tests signal failure by raising (assert); they return None on success
+            test_func()
+            passed += 1
         except Exception as e:
             failed += 1
             print(f"✗ TEST FAILED: {test_name} - {e}")

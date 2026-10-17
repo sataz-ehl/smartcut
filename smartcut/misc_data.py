@@ -3,10 +3,6 @@ from fractions import Fraction
 
 
 @dataclass
-class MixInfo:
-    track_levels: list[float]
-
-@dataclass
 class AudioExportSettings:
     codec: str
     channels: str | None = None
@@ -16,9 +12,7 @@ class AudioExportSettings:
 
 @dataclass
 class AudioExportInfo:
-    mix_info: MixInfo | None = None
-    mix_export_settings: AudioExportSettings | None = None
-    output_tracks: list[AudioExportSettings | None] = field(default_factory = lambda: [])
+    output_tracks: list[AudioExportSettings | None] = field(default_factory=lambda: [])
 
 @dataclass
 class FadeInfo:

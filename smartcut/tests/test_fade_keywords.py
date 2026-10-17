@@ -7,10 +7,10 @@ import os
 import sys
 from pathlib import Path
 
-# Add parent directory to path to import test utilities
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Make the repo root importable (tests live in smartcut/tests/)
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tests.test_fade import generate_test_video
+from smartcut.tests.test_fade import generate_test_video
 
 
 def run_test(name, input_file, output_file, keep_args):

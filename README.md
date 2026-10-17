@@ -6,6 +6,15 @@
 
 [![PyPI - Version](https://img.shields.io/pypi/v/smartcut?logo=pypi&logoColor=white&label=PyPI)](https://pypi.org/project/smartcut) [![Discord](https://img.shields.io/discord/1257684604941504623?logo=discord&logoColor=blue&label=Join%20Discord)](https://discord.gg/uYGkyfzU4c)
 
+**UPDATE Feb 2026:**
+- **This repo is no longer being updated.**
+- The code is no longer integrated with SMC and maintaining a separate open source repo got too difficult.
+- New performance & correctness fixes are only in [SMC](https://smartmediacutter.com).
+- The SMC executable has the same CLI syntax, e.g. `.\smart-media-cutter.exe input.mp4 output.mp4 --keep 10,20`
+- I still read the repo issues, so feel free to open them.
+
+---
+
 This tool is an open-source CLI companion to [Smart Media Cutter](https://smartmediacutter.com).
 
 `smartcut` can cut video files in many different formats and codecs with only minimal recoding around the cutpoints (a.k.a. "smart cut").
@@ -109,13 +118,13 @@ The CLI requires the input and output file paths as positional arguments. You ca
 
   `smartcut input.mp4 output.mp4 --keep 10:videofadein:2,30:videofadeout:3`
 
-  Applies fade effects only to video. Audio remains unchanged (passthrough, very fast).
+  Applies fade effects only to video. Audio is copied unchanged.
 
 - **Audio-only fade**:
 
   `smartcut input.mp4 output.mp4 --keep 10:audiofadein:2,30:audiofadeout:3`
 
-  Applies fade effects only to audio. Video remains unchanged (passthrough, fast).
+  Applies fade effects only to audio. Video is cut as usual (only the partial GOPs at the cut points are re-encoded).
 
 - **Mixed fade effects**:
 
@@ -133,14 +142,15 @@ The CLI requires the input and output file paths as positional arguments. You ca
 smartcut input.mp4 output.mp4 --keep 10:fadein,20:fadeout    # 1 second fades
 ```
 
-**Performance notes**:
-- Audio-only fades are ~17x faster than video fades (video uses passthrough)
-- Video-only fades save audio processing time
-- Fades may start/end up to ~1 second early/late due to GOP alignment (typically 0.5-1s imprecision)
+**How fades are applied**:
+- Video: only the GOPs that overlap a fade are re-encoded (in addition to the partial GOPs at cut points); fade timing is frame-exact. Frames are faded directly in YUV (8/10/12-bit planar formats), with an RGB fallback for other pixel formats.
+- Audio: if any segment has an audio fade, each audio track is decoded and re-encoded as a whole with one continuous encoder (AAC sources become AAC-LC at the source bitrate, at least 128 kbps). Without audio fades the audio is copied. Mixing copied and re-encoded audio packets in one track causes clicks at the joins.
+- VP9 and AV1 re-encodes use faster encoder settings (`cpu-used` 5 / 8); on one CPU core VP9 takes ~1-2x and AV1 ~2.5-6x the H.264 time. 10/12-bit VP9 (profile 2/3) can't be re-encoded.
+- Re-encodes use a 10-frame encoder lookahead, which cuts peak memory at 1080p by about 40% (libaom only from 720p up).
 
 ### Audio Export
 
-By default, all audio tracks are included with passthrough codec settings. This can be adjusted by modifying the `AudioExportInfo` in the script if needed.
+By default, all audio tracks are included with passthrough codec settings (re-encoded when audio fades are used, see above). This can be adjusted by modifying the `AudioExportInfo` in the script if needed.
 
 ## Contributing
 
@@ -238,6 +248,15 @@ Tests ran in 153.6s
 * [Machete](https://www.machetesoft.com/) Quick and light lossless video cutting tool. Not free, but has a 14-day trial version.
 
 ## Version History
+
+### 1.7
+* Set hev1 encoder tag for h265 in mp4 and mov. Improves compatibility in some cases.
+* Improved test suite to catch more encoding issues.
+
+### 1.6
+* Proper handling of HEVC CRA and RASL frames.
+* Other small compatibility changes.
+* Set encoded by program name to 'smartcut'.
 
 ### 1.5
 * Better handling of inputs where DTS is missing.

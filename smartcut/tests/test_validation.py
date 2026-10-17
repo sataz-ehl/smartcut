@@ -7,19 +7,20 @@ Tests:
 2. Auto-sorting: segments provided in wrong chronological order (should auto-sort)
 3. API validation: same tests for process() and process_segments()
 
-Usage:
-    python tests/test_validation.py
+Usage (from the repo root):
+    python smartcut/tests/test_validation.py
 """
 
 import sys
 import os
 import tempfile
+from pathlib import Path
 
-# Add parent directory to path so we can import smartcut
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Make the repo root importable (tests live in smartcut/tests/)
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import smartcut
-from tests.generate_synthetic_video import generate_test_video
+from smartcut.tests.generate_synthetic_video import generate_test_video
 
 
 def test_cli_validation_reversed_segment():

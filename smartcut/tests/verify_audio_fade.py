@@ -9,8 +9,8 @@ import av
 import numpy as np
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from tests.test_fade import generate_test_video
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (tests live in smartcut/tests/)
+from smartcut.tests.test_fade import generate_test_video
 
 
 def analyze_audio_volume(video_path, duration_seconds=None):

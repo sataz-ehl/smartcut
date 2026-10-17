@@ -1,0 +1,138 @@
+"""How steadily process_segments' progress moves, and calibration data for the work estimate in smart_cut.py.
+
+    python progress_timeline.py <media dir> <out dir> [case ...] [--one-core] [--calibrate]
+
+Runs run_cases.py's cases (those whose media exists) and prints per case: total time, number of progress
+updates, the longest stretch without an update, and the largest difference between the progress shown and
+the share of the time elapsed (0 = perfectly even). The time before the first update (opening and indexing the
+input) is reported separately.
+
+--calibrate also times every cut piece and prints the measured cost per re-encoded megapixel-frame, per copied
+frame and per second of re-encoded audio, to compare with the _*_COST_* constants in smart_cut.py.
+"""
+import argparse
+import sys
+import time
+from collections import defaultdict
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from run_cases import CASES, pin_to_one_core  # noqa: E402
+
+
+def install_timers(stats):
+    """Wrap the cutters to time every piece. Encoder flushes (the frames still inside the encoder when a
+    re-encoded run ends) are counted as re-encoding, not as the copy that triggers them."""
+    from smartcut import track_cutters, video_cutter
+
+    vc = video_cutter.VideoCutter
+    orig_segment, orig_flush = vc.segment, vc.flush_encoder
+
+    def flush_encoder(self):
+        t = time.perf_counter()
+        packets = orig_flush(self)
+        stats["flush_s"] += time.perf_counter() - t
+        return packets
+
+    def segment(self, s):
+        frames = [0]  # frames fed to the encoder: one hook call each in a re-encoded piece
+        hook = self.on_frames_encoded
+
+        def counting_hook(count):
+            frames[0] += 1
+            if hook is not None:
+                hook(count)
+
+        self.on_frames_encoded = counting_hook
+        flush_before = stats["flush_s"]
+        t = time.perf_counter()
+        try:
+            packets = orig_segment(self, s)
+        finally:
+            self.on_frames_encoded = hook
+        spent = time.perf_counter() - t - (stats["flush_s"] - flush_before)
+        ctx = self.in_stream.codec_context
+        stats["megapixels"] = ctx.width * ctx.height / 1e6
+        if s.require_recode:
+            stats["recode_frames"] += frames[0]
+            stats["recode_s"] += spent
+        else:
+            stats["copy_frames"] += len(packets)
+            stats["copy_s"] += spent
+        return packets
+
+    vc.segment, vc.flush_encoder = segment, flush_encoder
+
+    ac = track_cutters.RecodeAudioCutter
+    orig_audio = ac.segment
+
+    def audio_segment(self, s):
+        t = time.perf_counter()
+        packets = orig_audio(self, s)
+        stats["audio_s"] += time.perf_counter() - t
+        stats["audio_media_s"] += sum(p.duration * p.time_base for p in packets if p.duration and p.time_base)
+        return packets
+
+    ac.segment = audio_segment
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("media_dir", type=Path)
+    ap.add_argument("out_dir", type=Path)
+    ap.add_argument("cases", nargs="*")
+    ap.add_argument("--repo", default=str(Path(__file__).resolve().parents[3]), help="smartcut repo root")
+    ap.add_argument("--one-core", action="store_true", help="pin to one CPU core")
+    ap.add_argument("--calibrate", action="store_true", help="time every cut piece (see above)")
+    ap.add_argument("--timeline", action="store_true", help="also print the progress at every 5%% of the time")
+    args = ap.parse_args()
+    if args.one_core:
+        pin_to_one_core()
+    sys.path.insert(0, args.repo)
+    import smartcut
+
+    stats = defaultdict(float)
+    if args.calibrate:
+        install_timers(stats)
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"{'case':<16} {'total s':>7} {'first s':>7} {'updates':>7} {'max gap s':>9} {'at %':>5} {'max off %':>9}")
+    for case in args.cases or CASES:
+        src, segs = CASES[case]
+        if not (args.media_dir / src).exists():
+            continue
+        calls = []
+        t0 = time.perf_counter()
+        ok = smartcut.process_segments(str(args.media_dir / src), str(args.out_dir / f"{case}.mp4"),
+                                       segments=[dict(s) for s in segs],
+                                       progress_callback=lambda c, n, calls=calls, t0=t0: calls.append((time.perf_counter() - t0, c / n)))
+        total = time.perf_counter() - t0
+        if not ok or not calls:
+            print(f"{case:<16} failed or no progress (ok={ok}, updates={len(calls)})")
+            continue
+        first = calls[0][0]
+        times = [first] + [t for t, _ in calls] + [total]
+        values = [0.0] + [f for _, f in calls] + [1.0]
+        gap, at = max((times[i + 1] - times[i], values[i]) for i in range(len(times) - 1))
+        work_time = total - first
+        off = max(abs(f - (t - first) / work_time) for t, f in calls) if work_time > 0 else 0.0
+        print(f"{case:<16} {total:7.1f} {first:7.1f} {len(calls):7d} {gap:9.2f} {at * 100:5.0f} {off * 100:9.1f}")
+        if args.timeline:
+            shown = [max([f for t, f in calls if t <= total * k / 20], default=0.0) for k in range(1, 21)]
+            print("  time %:     " + " ".join(f"{k * 5:3d}" for k in range(1, 21)))
+            print("  progress %: " + " ".join(f"{f * 100:3.0f}" for f in shown))
+
+    if args.calibrate and stats["recode_frames"]:
+        mp_frames = stats["recode_frames"] * stats["megapixels"]
+        print("\nMeasured (last case's resolution is used for megapixels; run one codec/resolution at a time):")
+        print(f"  re-encode: {(stats['recode_s'] + stats['flush_s']) / mp_frames:.4f} s per megapixel-frame "
+              f"({stats['recode_frames']:.0f} frames, incl. {stats['flush_s']:.1f} s of encoder flushes)")
+        if stats["copy_frames"]:
+            print(f"  copy:      {stats['copy_s'] / stats['copy_frames']:.6f} s per frame ({stats['copy_frames']:.0f} frames)")
+        if stats["audio_media_s"]:
+            print(f"  audio:     {stats['audio_s'] / stats['audio_media_s']:.4f} s per second of audio "
+                  f"({stats['audio_media_s']:.0f} s of audio)")
+
+
+if __name__ == "__main__":
+    main()

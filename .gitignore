@@ -39,12 +39,6 @@ sm_cython/*/*.c
 *.otio
 *.aaf
 
-# Flatpak build artifacts
-distribution/flatpak/build-dir/
-distribution/flatpak/repo/
-*.flatpak
-.flatpak-builder
-
 smartcut_cpp
 
 AGENTS.md

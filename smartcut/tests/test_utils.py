@@ -12,13 +12,17 @@ import requests
 import scipy.signal
 import soundfile as sf
 from av import AudioFrame, AudioStream, Packet, VideoFrame, VideoStream
+from av import logging as av_logging
 from av import open as av_open
 from av import time_base as AV_TIME_BASE
 from av.container.input import InputContainer
 from av.stream import Disposition
 
-from smartcut.cut_video import AudioExportInfo, AudioExportSettings, VideoExportMode, VideoExportQuality, VideoSettings, make_adjusted_segment_times, make_cut_segments, smart_cut
 from smartcut.media_container import AudioTrack, MediaContainer
+from smartcut.media_utils import VideoExportMode, VideoExportQuality
+from smartcut.misc_data import AudioExportInfo, AudioExportSettings
+from smartcut.smart_cut import make_adjusted_segment_times, make_cut_segments, smart_cut
+from smartcut.video_cutter import VideoSettings
 
 AV_TIME_BASE_VALUE: int = int(AV_TIME_BASE) if AV_TIME_BASE else 1
 
@@ -53,6 +57,40 @@ def cached_download(url: str, name: str) -> str:
     os.rename(tmp_path, name)
 
     return name
+
+
+MEDIA_TEST_DATA_REPO = "https://github.com/skeskinen/media-test-data.git"
+MEDIA_TEST_DATA_DIR = "media-test-data"
+
+
+def get_media_test_data_file(filename: str) -> str:
+    """Get a file from the media-test-data git repo, cloning if needed."""
+    repo_dir = MEDIA_TEST_DATA_DIR
+    file_path = os.path.join(repo_dir, filename)
+
+    if os.path.exists(file_path):
+        return file_path
+
+    if not os.path.exists(repo_dir):
+        # Clone the repo (shallow clone for speed)
+        subprocess.run(
+            ["git", "clone", "--depth", "1", MEDIA_TEST_DATA_REPO, repo_dir],
+            check=True
+        )
+        # Pull LFS files if any (harmless if no LFS)
+        subprocess.run(
+            ["git", "-C", repo_dir, "lfs", "pull"],
+            check=False  # Don't fail if git-lfs not installed
+        )
+    else:
+        # Repo exists but file missing - try git pull
+        subprocess.run(["git", "-C", repo_dir, "pull"], check=True)
+        subprocess.run(["git", "-C", repo_dir, "lfs", "pull"], check=False)
+
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File {filename} not found in media-test-data repo")
+
+    return file_path
 
 
 def color_at_time(ts: float) -> np.ndarray:
@@ -351,7 +389,7 @@ def _infer_frame_count_anomaly(source_times: list[Fraction], result_times: list[
         return None
 
 
-def check_videos_equal(source_container: MediaContainer, result_container: MediaContainer, pixel_tolerance: int = 20, allow_failed_frames: int = 0) -> None:
+def check_videos_equal(source_container: MediaContainer, result_container: MediaContainer, pixel_tolerance: int = 20, allow_failed_frames: int = 0, allow_failed_pixels_per_frame: int = 0, timing_tolerance: Fraction | None = None) -> None:
     source_stream = source_container.video_stream
     result_stream = result_container.video_stream
     assert source_stream is not None, "Source container is missing a video stream"
@@ -396,42 +434,82 @@ def check_videos_equal(source_container: MediaContainer, result_container: Media
     # input and output timebases are not multiples of each other.
     is_mpeg = source_container.av_container.format.name in ['mpegts', 'mpegvideo']
     is_avi = source_container.av_container.format.name == 'avi'
-    diff_tolerance = Fraction(3, 1000)
-    if is_mpeg:
-        diff_tolerance = 2
+    if timing_tolerance is not None:
+        diff_tolerance = timing_tolerance
+    elif is_mpeg:
+        diff_tolerance = Fraction(2)
     elif is_avi:
         diff_tolerance = Fraction(1, 10)
+    else:
+        diff_tolerance = Fraction(3, 1000)
 
     assert diff_amount <= diff_tolerance, f'Mismatch of {diff_amount} in frame timings, at frame {diff_i}.'
 
-    failed_frames = 0
-    with av_open(source_container.path, mode='r') as source_av_raw, av_open(result_container.path, mode='r') as result_av_raw:
-        source_av = cast(InputContainer, source_av_raw)
-        result_av = cast(InputContainer, result_av_raw)
-        for frame_i, (source_frame, result_frame) in enumerate(zip(source_av.decode(video=0), result_av.decode(video=0))):
-            if not isinstance(source_frame, VideoFrame) or not isinstance(result_frame, VideoFrame):
-                continue
-            source_numpy = source_frame.to_ndarray(format='rgb24')
-            result_numpy = result_frame.to_ndarray(format='rgb24')
-            assert source_numpy.shape == result_numpy.shape, f'Video resolution or channel count changed. Exp: {source_numpy.shape}, got: {result_numpy.shape}'
+    failed_frame_info: list[tuple[int, float]] = []  # (frame_index, time_seconds)
+    frame_times = source_container.video_frame_times
 
-            frame_failed = False
-            for y in [0, source_numpy.shape[0] // 2, source_numpy.shape[0] - 1]:
-                for x in [0, source_numpy.shape[1] // 2, source_numpy.shape[1] - 1]:
-                    source_color = source_numpy[y, x]
-                    result_color = result_numpy[y, x]
-                    diff = np.abs(source_color.astype(np.int16) - result_color)
-                    max_diff = np.max(diff)
-                    if max_diff > pixel_tolerance:
-                        if failed_frames >= allow_failed_frames:
-                            raise AssertionError(f'Large color deviation at frame {frame_i} (failed frame {failed_frames + 1}/{allow_failed_frames + 1}). Exp: {source_color}, got: {result_color}, {result_container.path}')
-                        frame_failed = True
-                        break
-                if frame_failed:
-                    break
+    # First, decode source alone to capture baseline warnings (some source files have inherent issues)
+    # Also trigger swscaler by converting first frame to RGB24, since the comparison phase does this
+    av_logging.set_level(av_logging.WARNING)
+    try:
+        with av_logging.Capture() as source_logs, av_open(source_container.path, mode='r') as source_av_raw:
+            source_av = cast(InputContainer, source_av_raw)
+            triggered_swscaler = False
+            for frame in source_av.decode(video=0):
+                if not triggered_swscaler and isinstance(frame, VideoFrame):
+                    frame.to_ndarray(format='rgb24')  # Trigger swscaler warnings once
+                    triggered_swscaler = True
+    finally:
+        av_logging.set_level(av_logging.FATAL)
+    source_warnings = {msg for level, _, msg in source_logs if level <= av_logging.WARNING}
 
-            if frame_failed:
-                failed_frames += 1
+    # Capture decode warnings while comparing pixels
+    av_logging.set_level(av_logging.WARNING)
+    try:
+        with av_logging.Capture() as logs, av_open(source_container.path, mode='r') as source_av_raw, av_open(result_container.path, mode='r') as result_av_raw:
+            source_av = cast(InputContainer, source_av_raw)
+            result_av = cast(InputContainer, result_av_raw)
+            for frame_i, (source_frame, result_frame) in enumerate(zip(source_av.decode(video=0), result_av.decode(video=0))):
+                if not isinstance(source_frame, VideoFrame) or not isinstance(result_frame, VideoFrame):
+                    continue
+                source_numpy = source_frame.to_ndarray(format='rgb24')
+                result_numpy = result_frame.to_ndarray(format='rgb24')
+                assert source_numpy.shape == result_numpy.shape, f'Video resolution or channel count changed. Exp: {source_numpy.shape}, got: {result_numpy.shape}'
+
+                failed_pixels_in_frame = 0
+                last_fail_colors = None
+                for y in [0, source_numpy.shape[0] // 2, source_numpy.shape[0] - 1]:
+                    for x in [0, source_numpy.shape[1] // 2, source_numpy.shape[1] - 1]:
+                        source_color = source_numpy[y, x]
+                        result_color = result_numpy[y, x]
+                        diff = np.abs(source_color.astype(np.int16) - result_color)
+                        max_diff = np.max(diff)
+                        if max_diff > pixel_tolerance:
+                            failed_pixels_in_frame += 1
+                            last_fail_colors = (source_color, result_color)
+
+                if failed_pixels_in_frame > allow_failed_pixels_per_frame:
+                    frame_time = float(frame_times[frame_i]) if frame_i < len(frame_times) else 0.0
+                    if len(failed_frame_info) >= allow_failed_frames:
+                        failed_frame_info.append((frame_i, frame_time))
+                        prev_failures = ", ".join(f"#{f}@{t:.3f}s" for f, t in failed_frame_info[:-1])
+                        source_color, result_color = last_fail_colors if last_fail_colors else (None, None)
+                        raise AssertionError(
+                            f'Large color deviation at frame {frame_i} ({frame_time:.3f}s), {failed_pixels_in_frame}/9 pixels failed. '
+                            f'Exp: {source_color}, got: {result_color}. '
+                            f'Failed frames ({len(failed_frame_info)}/{allow_failed_frames + 1}): {prev_failures}, #{frame_i}@{frame_time:.3f}s. '
+                            f'{result_container.path}'
+                        )
+                    failed_frame_info.append((frame_i, frame_time))
+    finally:
+        av_logging.set_level(av_logging.FATAL)
+
+    # Check for decode warnings (excluding warnings that were already present in source)
+    error_msgs = [msg for level, _, msg in logs if level <= av_logging.WARNING and msg not in source_warnings]
+    assert len(error_msgs) == 0, (
+        f"Video has {len(error_msgs)} decode warnings:\n" +
+        "\n".join(error_msgs[:10])
+    )
 
 def check_videos_equal_segment(source_container: MediaContainer, result_container: MediaContainer, start_time: float | Fraction = 0.0, duration: float | None = None, pixel_tolerance: int = 20) -> None:
     """Fast pixel testing of small video segments instead of entire video"""
@@ -557,6 +635,7 @@ def run_partial_smart_cut(
     pixel_tolerance: int = 20,
     allow_failed_frames: int = 0,
     recode_codec_override: str | None = None,
+    allow_failed_pixels_per_frame: int = 0,
 ) -> None:
     """
     Test smart cutting on short segments from random positions in long videos.
@@ -583,10 +662,7 @@ def run_partial_smart_cut(
     total_duration = float(source.duration)
 
     # Skip if video is too short for meaningful testing
-    if total_duration < segment_duration * n_segments * 2:
-        print(f"Video too short ({total_duration:.1f}s) for partial testing, using regular test")
-        return run_smartcut_test(input_path, output_base_name + os.path.splitext(input_path)[1], 2,
-                             audio_export_info, video_settings, pixel_tolerance)
+    assert total_duration >= segment_duration * n_segments * 2, f"Video too short ({total_duration:.1f}s) for partial testing, use regular test"
 
     # Calculate safe range for random segment selection (avoid first/last 30 seconds)
     safe_start = 30
@@ -676,7 +752,7 @@ def run_partial_smart_cut(
     smartcut_container = MediaContainer(smartcut_output)
     recode_container = MediaContainer(recode_output)
 
-    check_videos_equal(smartcut_container, recode_container, pixel_tolerance=pixel_tolerance, allow_failed_frames=allow_failed_frames)
+    check_videos_equal(smartcut_container, recode_container, pixel_tolerance=pixel_tolerance, allow_failed_frames=allow_failed_frames, allow_failed_pixels_per_frame=allow_failed_pixels_per_frame)
 
     smartcut_container.close()
     recode_container.close()
@@ -900,6 +976,34 @@ def get_tears_of_steel_annexb() -> str:
             raise RuntimeError(f"Failed to convert to TS format: {result.stderr}")
 
     return ts_filename
+
+
+def check_no_discard_packets(output_path: str) -> None:
+    """Verify that no video packets in the output have the discard flag set.
+
+    The discard flag (AV_PKT_FLAG_DISCARD) tells decoders to skip the packet.
+    This should never be set on video packets in smartcut output - we either
+    copy packets directly or encode new ones, neither of which should produce
+    discard-flagged packets.
+
+    Raises:
+        AssertionError: If any video packet has is_discard=True
+    """
+    with av_open(output_path, mode='r') as container:
+        video_streams = [s for s in container.streams if s.type == 'video']
+        if not video_streams:
+            return  # No video to check
+
+        discard_packets: list[tuple[int, float | None]] = []
+        for packet in container.demux(video_streams[0]):
+            if packet.is_discard:
+                pts_time = float(packet.pts * packet.time_base) if packet.pts is not None and packet.time_base else None
+                discard_packets.append((packet.pts or -1, pts_time))
+
+        assert len(discard_packets) == 0, (
+            f"Found {len(discard_packets)} video packet(s) with discard flag set. "
+            f"First few: {discard_packets[:5]}"
+        )
 
 
 def get_testvideos_jellyfish_h265_ts() -> str:

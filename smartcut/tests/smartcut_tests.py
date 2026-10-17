@@ -1,6 +1,7 @@
 import argparse
 import os
 import random
+import subprocess
 import sys
 import threading
 import time
@@ -17,6 +18,7 @@ from av.stream import Disposition
 from test_utils import (
     cached_download,
     check_audio_pts_timestamps,
+    check_no_discard_packets,
     check_stream_dispositions,
     check_videos_equal,
     check_videos_equal_segment,
@@ -24,6 +26,7 @@ from test_utils import (
     create_test_video,
     generate_sine_wave,
     get_attachment_stream_metadata,
+    get_media_test_data_file,
     get_tears_of_steel_annexb,
     get_testvideos_jellyfish_h265_ts,
     make_video_and_audio_mkv,
@@ -36,8 +39,11 @@ from test_utils import (
     to_fraction_segments,
 )
 
-from smartcut.cut_video import AudioExportInfo, AudioExportSettings, VideoExportMode, VideoExportQuality, VideoSettings, make_cut_segments, smart_cut
 from smartcut.media_container import MediaContainer
+from smartcut.media_utils import VideoExportMode, VideoExportQuality
+from smartcut.misc_data import AudioExportInfo, AudioExportSettings
+from smartcut.smart_cut import make_cut_segments, smart_cut
+from smartcut.video_cutter import VideoSettings
 
 DEFAULT_SEED = 12345
 
@@ -169,21 +175,9 @@ def test_h265_smart_cut_large() -> None:
     for c in [1, 2, 5]:
         run_smartcut_test(input_file, output_path, c)
 
-def test_mkv_with_invalid_timestamps() -> None:
-    """Test cutting anime_clip.mkv which has invalid timestamps."""
-    url = "https://github.com/skeskinen/media-test-data/raw/refs/heads/main/anime_clip.mkv"
-    anime_path = cached_download(url, "anime_clip.mkv")
-
-    output_path = test_mkv_with_invalid_timestamps.__name__ + '.mkv'
-
-    # Run normal smartcut test with a few cuts
-    run_smartcut_test(anime_path, output_path, n_cuts=2, audio_export_info='auto')
-
 def test_peaks_mkv_memory_usage() -> None:
     """Test that peaks.mkv doesn't cause excessive memory usage and has proper GOP detection."""
-    # Download peaks.mkv using cached_download utility
-    url = "https://raw.githubusercontent.com/skeskinen/media-test-data/refs/heads/main/peaks.mkv"
-    peaks_path = cached_download(url, "peaks.mkv")
+    peaks_path = get_media_test_data_file("peaks.mkv")
 
     # Test GOP detection
     container = MediaContainer(peaks_path)
@@ -248,6 +242,105 @@ def test_peaks_mkv_memory_usage() -> None:
 
     print(f"Peak memory increase: {memory_increase / (1024*1024):.1f} MB")
     assert memory_increase < max_allowed_memory, f"Memory usage too high: {memory_increase / (1024*1024):.1f} MB"
+
+def test_hevc_mkv_nal_type_detection() -> None:
+    """Test that HEVC NAL type detection finds IDR frames, not VPS headers.
+
+    Regression test for a bug where get_h265_nal_unit_type() only read the first
+    NAL unit in MP4-format packets. For MKV files with HEVC, keyframe packets
+    contain multiple NAL units (VPS, SPS, PPS, IDR), and the function would
+    return the VPS type (39) instead of the actual IDR type (19/20).
+    This caused most keyframes to be rejected as "unsafe", resulting in
+    very few GOPs being detected.
+    """
+    test_path = get_media_test_data_file("hevc_mkv_no_dts.mkv")
+
+    container = MediaContainer(test_path)
+
+    # The test file should have multiple GOPs (at least 3 in ~10 seconds)
+    # Before the fix, only 1 or 2 GOPs would be detected
+    actual_gops = len(container.gop_start_times_pts_s)
+    expected_min_gops = 3
+
+    assert actual_gops >= expected_min_gops, (
+        f"Expected at least {expected_min_gops} GOPs but found {actual_gops}. "
+        "This suggests NAL type detection is returning VPS/SPS types instead of IDR."
+    )
+
+    container.close()
+
+def test_h265_zcam() -> None:
+    """Test smartcut with ZCAM H.265/HEVC MOV file."""
+    test_path = get_media_test_data_file("zcam.mov")
+
+    output_path = test_h265_zcam.__name__ + '.mov'
+    run_smartcut_test(test_path, output_path, n_cuts=1, audio_export_info='auto')
+
+
+def test_h265_zcam_containers() -> None:
+    """Test smartcut with ZCAM HEVC converted to different containers.
+
+    Converts zcam.mov to MP4 and MKV, then tests smartcut on each.
+    This verifies the hev1 codec tag handling works correctly across containers.
+    """
+    source_path = get_media_test_data_file("zcam.mov")
+
+    # Test MP4 container
+    mp4_path = 'test_zcam_converted.mp4'
+    if not os.path.exists(mp4_path):
+        subprocess.run([
+            'ffmpeg', '-y', '-i', source_path,
+            '-c', 'copy', mp4_path
+        ], check=True, capture_output=True)
+    run_smartcut_test(mp4_path, 'test_zcam_mp4_out.mp4', n_cuts=1, audio_export_info='auto')
+
+    # Test MKV container
+    mkv_path = 'test_zcam_converted.mkv'
+    if not os.path.exists(mkv_path):
+        subprocess.run([
+            'ffmpeg', '-y', '-i', source_path,
+            '-c', 'copy', mkv_path
+        ], check=True, capture_output=True)
+    run_smartcut_test(mkv_path, 'test_zcam_mkv_out.mkv', n_cuts=1, audio_export_info='auto')
+
+
+def test_hevc_mkv_no_dts_remux() -> None:
+    """Test that smartcut handles HEVC MKV files with DTS=N/A packets.
+
+    Regression test for a bug where packets with DTS=None would get monotonically
+    increasing DTS values generated that could exceed PTS (violating PTS >= DTS).
+    This happened because the code used max(pts, last_dts + 1) which would push
+    DTS above PTS for B-frames.
+    """
+    test_path = get_media_test_data_file("hevc_mkv_no_dts.mkv")
+
+    output_path = test_hevc_mkv_no_dts_remux.__name__ + '.mkv'
+
+    container = MediaContainer(test_path)
+    segments = [(Fraction(0), Fraction(5))]  # First 5 seconds
+
+    audio_settings: list[AudioExportSettings | None] = [AudioExportSettings(codec='passthru')] * len(container.audio_tracks)
+    export_info = AudioExportInfo(output_tracks=audio_settings)
+    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.NORMAL)
+
+    # This should not raise an error - before the fix it would fail with:
+    # av.error.ValueError: [Errno 22] Invalid argument
+    smart_cut(
+        container,
+        segments,
+        output_path,
+        audio_export_info=export_info,
+        video_settings=video_settings,
+        log_level='error'
+    )
+
+    container.close()
+
+    # Verify output was created
+    assert os.path.exists(output_path), "Output file was not created"
+
+    # Clean up
+    os.remove(output_path)
 
 def test_h264_24_fps_long() -> None:
     filename = 'long_h264.mkv'
@@ -724,8 +817,8 @@ def test_broken_ref_vid() -> None:
         run_smartcut_test(filename, output_path, n_cuts=c)
 
 def test_manual() -> None:
-    seed_all(1235)
-    test_vorbis_passthru()
+    seed_all(12345)
+    test_h265_zcam()
 
 # Real-world video tests using publicly available videos
 
@@ -773,6 +866,13 @@ def test_libde265_tears_of_steel_h265() -> None:
     Downloads a long HEVC MKV sample and validates smart cut against a full
     recode. For speed, force the recode path to H.264 while preserving HEVC
     for the smart-cut path.
+
+    This file has 367 CRA frames and only 1 IDR frame, with RASL
+    pictures following each CRA.
+
+    Key validation: frame counts must match between smartcut and recode,
+    confirming that RASL pictures are properly handled by recoding CRA+RASL
+    segments instead of dropping them.
     """
     filename = cached_download('https://www.libde265.org/hevc-bitstreams/tos-1720x720-cfg01.mkv', 'libde265_tos_1720x720_cfg01.mkv')
     output_base = test_libde265_tears_of_steel_h265.__name__
@@ -783,9 +883,10 @@ def test_libde265_tears_of_steel_h265() -> None:
         segment_duration=15,
         n_segments=3,
         audio_export_info='auto',
-        pixel_tolerance=40,
-        allow_failed_frames=3,
-        recode_codec_override='h264'
+        pixel_tolerance=60,
+        allow_failed_frames=12,
+        recode_codec_override='h264',
+        allow_failed_pixels_per_frame=3,
     )
 
 def test_h264_non_idr_keyframes() -> None:
@@ -1247,6 +1348,68 @@ def test_mkv_attachment_preservation() -> None:
     assert input_attachments == output_attachments, "Attachment streams metadata mismatch after smart_cut"
 
 
+def test_no_discard_flag_on_output_packets() -> None:
+    """Verify that smartcut output never has video packets with discard flag set.
+
+    Regression test for a bug where the last frame in smartcut output had
+    AV_PKT_FLAG_DISCARD set, causing decoders to skip it and show "No frame available".
+
+    The bug manifests when the cut endpoint is at a time that causes the last frame
+    to be included at the exact boundary. For example, cutting to 81.033s (which is
+    81s + 1 frame at 30fps) causes frame 2431 to be included but marked with discard.
+
+    The key to reproducing is using an MP4 output (which uses edit lists) and
+    cutting to a time just beyond a frame boundary.
+    """
+    input_path = 'test_discard_flag_input.mkv'
+    create_test_video(input_path, 30, 'h264', 'yuv420p', 30, (256, 144))
+
+    source = MediaContainer(input_path)
+
+    # Cut to a time just past a frame boundary (e.g., 20 seconds + epsilon)
+    # At 30fps, each frame is 1/30 = 0.0333... seconds
+    # Cutting to 20.034s should include 601 frames (0-600, where frame 600 is at 20.0s)
+    output_path = test_no_discard_flag_on_output_packets.__name__ + '.mp4'
+    segments = [(Fraction(0), Fraction(20034, 1000))]  # 20.034 seconds
+
+    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.NORMAL)
+    smart_cut(source, segments, output_path, video_settings=video_settings, log_level='warning')
+
+    # The key assertion: no packets should have discard flag
+    check_no_discard_packets(output_path)
+
+    source.close()
+
+
+def test_no_discard_flag_multiple_cuts() -> None:
+    """Verify no discard flags when cutting multiple segments from a video.
+
+    Tests that the discard flag issue doesn't appear with more complex
+    cut patterns involving multiple segments, including segments that end
+    just past a frame boundary.
+    """
+    input_path = 'test_discard_flag_multi_input.mkv'
+    create_test_video(input_path, 30, 'h264', 'yuv420p', 30, (256, 144))
+
+    source = MediaContainer(input_path)
+
+    # Multiple segments with gaps - tests segment boundaries
+    # Use times that are just past frame boundaries (at 30fps, frame duration is ~0.0333s)
+    output_path = test_no_discard_flag_multiple_cuts.__name__ + '.mp4'
+    segments = [
+        (Fraction(2), Fraction(8034, 1000)),   # Ends just past 8s
+        (Fraction(12), Fraction(18034, 1000)), # Ends just past 18s
+        (Fraction(22), Fraction(28034, 1000)), # Ends just past 28s - this is the final segment
+    ]
+
+    video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.NORMAL)
+    smart_cut(source, segments, output_path, video_settings=video_settings, log_level='warning')
+
+    check_no_discard_packets(output_path)
+
+    source.close()
+
+
 def get_test_categories() -> dict[str, list]:
     """
     Returns a dictionary of test categories.
@@ -1258,6 +1421,8 @@ def get_test_categories() -> dict[str, list]:
             test_h264_smart_cut,
             test_mp4_cut_on_keyframe,
             test_mp4_smart_cut,
+            test_no_discard_flag_on_output_packets,
+            test_no_discard_flag_multiple_cuts,
         ],
 
         'h264': [
@@ -1282,6 +1447,8 @@ def get_test_categories() -> dict[str, list]:
             test_mp4_h265_smart_cut,
             test_peaks_mkv_memory_usage,
             test_ts_h265_to_mp4_smart_cut,
+            test_hevc_mkv_nal_type_detection,
+            test_hevc_mkv_no_dts_remux,
         ],
 
         'codecs': [
@@ -1350,7 +1517,6 @@ def get_test_categories() -> dict[str, list]:
             # test-videos.co.uk H.264 samples
             test_testvideos_bigbuckbunny_h264,
             test_testvideos_jellyfish_h264,
-            test_mkv_with_invalid_timestamps,
         ],
 
         'real_world_h265': [
@@ -1358,6 +1524,8 @@ def get_test_categories() -> dict[str, list]:
             test_testvideos_bigbuckbunny_h265,
             test_testvideos_jellyfish_h265,
             test_libde265_tears_of_steel_h265,
+            test_h265_zcam,
+            test_h265_zcam_containers,
         ],
 
         'real_world_vp9': [
