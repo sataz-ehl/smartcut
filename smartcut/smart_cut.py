@@ -1,5 +1,6 @@
 import os
 from collections.abc import Callable
+from contextlib import ExitStack
 from fractions import Fraction
 from typing import Protocol, TypeAlias, runtime_checkable
 
@@ -318,7 +319,7 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
     for output_path_segment in output_files:
         if cancel_object is not None and cancel_object.cancelled:
             break
-        with av.open(output_path_segment[0], 'w') as output_av_container:
+        with av.open(output_path_segment[0], 'w') as output_av_container, ExitStack() as cleanup:
             output_av_container.metadata['ENCODED_BY'] = f'smartcut {__version__}'
 
             include_video = True
@@ -344,6 +345,8 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             if media_container.video_stream is not None and include_video:
                 video_stream_setup = create_video_output_stream(media_container, output_av_container, video_settings)
                 generators.append(VideoCutter(media_container, video_stream_setup, output_av_container, video_settings, log_level))
+                # Its own input container: finish() closes it, this also when an error stops the cut (fork addition)
+                cleanup.callback(generators[-1].input_av_container.close)
                 if work is not None:
                     generators[-1].on_frames_encoded = work.frames_encoded
 

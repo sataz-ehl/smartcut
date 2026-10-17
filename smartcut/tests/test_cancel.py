@@ -4,7 +4,7 @@ Tests for process_segments() cancellation, progress and resource handling.
 
 1. cancel_check returning True stops processing: the call returns False and no output file is left
 2. Without cancellation the call succeeds and cancel_check is polled (before every cut piece)
-3. The input file is closed afterwards (on Windows an open file can't be deleted)
+3. The input file is closed afterwards, also after an error (on Windows an open file can't be deleted)
 4. Cancelling midway through a re-encoded piece stops it within a frame, not at the end of the piece, also
    without progress_callback; cancel_check isn't asked again once it returned True, so True once is enough
 5. Progress is reported as thousandths of the work, rising steadily to 1000, also during re-encoding
@@ -12,6 +12,7 @@ Tests for process_segments() cancellation, progress and resource handling.
 Usage (from the repo root):
     python smartcut/tests/test_cancel.py
 """
+import gc
 import os
 import sys
 import tempfile
@@ -24,6 +25,7 @@ import smartcut  # noqa: E402
 from smartcut.media_container import MediaContainer  # noqa: E402
 from smartcut.smart_cut import make_adjusted_segment_times, make_cut_segments  # noqa: E402
 from smartcut.tests.generate_synthetic_video import generate_test_video  # noqa: E402
+from smartcut.video_cutter import VideoCutter  # noqa: E402
 
 SEGMENTS = [{"start": 2, "end": 8, "fadein": 1, "fadeout": 1}, {"start": 12, "end": 18}]
 
@@ -59,6 +61,26 @@ def test_input_closed(tmp: Path, src: Path):
     copy.write_bytes(src.read_bytes())
     assert smartcut.process_segments(str(copy), str(tmp / "from_copy.mp4"), SEGMENTS)
     os.remove(copy)  # raises on Windows if process_segments left the input open
+
+
+def test_input_closed_after_error(tmp: Path, src: Path) -> None:
+    # The video cutter opens the input a second time; an error must not leave that open either. PyAV containers
+    # are freed by the garbage collector only, which is held off here so that it can't close the file by chance.
+    copy = tmp / "input_copy_error.mp4"
+    copy.write_bytes(src.read_bytes())
+    real_segment = VideoCutter.segment
+
+    def failing_segment(self, cut_segment):
+        raise RuntimeError("test error while cutting")
+
+    VideoCutter.segment = failing_segment
+    gc.disable()
+    try:
+        assert smartcut.process_segments(str(copy), str(tmp / "failed.mp4"), SEGMENTS) is False
+        os.remove(copy)  # raises on Windows if the input was left open
+    finally:
+        gc.enable()
+        VideoCutter.segment = real_segment
 
 
 def count_pieces(src: Path, segments: list[dict]) -> int:
@@ -133,6 +155,7 @@ def main():
         tests = [("Cancel stops processing and removes the output", test_cancel_stops_and_removes_output),
                  ("Without cancellation: succeeds, cancel_check polled", test_no_cancel_polls_and_succeeds),
                  ("Input file is closed afterwards", test_input_closed),
+                 ("Input file is closed after an error too", test_input_closed_after_error),
                  ("Cancel midway through a re-encoded piece stops within a frame", test_cancel_midway_through_reencoding),
                  ("Cancel midway also works without progress_callback", test_cancel_midway_without_progress),
                  ("A cancel_check that returns True only once still cancels", test_cancel_true_only_once),
