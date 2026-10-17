@@ -124,12 +124,18 @@ class CutSegmentConfig:
                 raise ValueError("Segment end is None (end of video) but the media duration is unknown")
             end = duration
         fade_info = FadeInfo(
-            video_fadein_duration=Fraction(self.video_fadein) if self.video_fadein else None,
-            video_fadeout_duration=Fraction(self.video_fadeout) if self.video_fadeout else None,
-            audio_fadein_duration=Fraction(self.audio_fadein) if self.audio_fadein else None,
-            audio_fadeout_duration=Fraction(self.audio_fadeout) if self.audio_fadeout else None,
+            video_fadein_duration=_exact(self.video_fadein) if self.video_fadein else None,
+            video_fadeout_duration=_exact(self.video_fadeout) if self.video_fadeout else None,
+            audio_fadein_duration=_exact(self.audio_fadein) if self.audio_fadein else None,
+            audio_fadeout_duration=_exact(self.audio_fadeout) if self.audio_fadeout else None,
         )
-        return SegmentWithFade(Fraction(self.start), Fraction(end), fade_info)
+        return SegmentWithFade(_exact(self.start), _exact(end), fade_info)
+
+
+def _exact(seconds: float | Fraction) -> Fraction:
+    """The decimal a float stands for (3.6 -> 18/5). Fraction(3.6) is the binary value, slightly above 3.6, which
+    dropped the frame at exactly 3.6 s from a segment starting there."""
+    return Fraction(repr(seconds)) if isinstance(seconds, float) else Fraction(seconds)
 
 
 class _CallbackCancel(CancelObject):
