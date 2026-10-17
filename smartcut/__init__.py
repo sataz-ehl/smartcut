@@ -15,6 +15,7 @@ Low-level API (for advanced use):
     - FadeInfo, SegmentWithFade: Fade effect data structures
 """
 
+import traceback
 from fractions import Fraction
 from typing import Any, Callable, Optional, Union
 
@@ -28,6 +29,7 @@ from .misc_data import (
 )
 from .smart_cut import CancelObject, __version__, smart_cut
 from .video_cutter import VideoSettings
+
 __all__ = [
     # High-level API
     "process",
@@ -46,13 +48,20 @@ __all__ = [
     "CancelObject",
 ]
 
+_QUALITY_MAP = {
+    "low": VideoExportQuality.LOW,
+    "normal": VideoExportQuality.NORMAL,
+    "high": VideoExportQuality.HIGH,
+    "lossless": VideoExportQuality.LOSSLESS,
+}
+
 
 class CutSegmentConfig:
     """Configuration for a single segment with optional fade effects.
 
     Args:
         start: Start time in seconds
-        end: End time in seconds
+        end: End time in seconds (None means the end of the video)
         fadein: Fade-in duration for both video and audio (seconds)
         fadeout: Fade-out duration for both video and audio (seconds)
         video_fadein: Fade-in duration for video only (seconds)
@@ -77,7 +86,7 @@ class CutSegmentConfig:
     def __init__(
         self,
         start: float,
-        end: float,
+        end: Optional[float],
         fadein: Optional[float] = None,
         fadeout: Optional[float] = None,
         video_fadein: Optional[float] = None,
@@ -103,15 +112,51 @@ class CutSegmentConfig:
             self.video_fadeout = video_fadeout
             self.audio_fadeout = audio_fadeout
 
-    def to_segment_with_fade(self) -> SegmentWithFade:
-        """Convert to internal SegmentWithFade representation."""
+    def to_segment_with_fade(self, duration: Optional[Fraction] = None) -> SegmentWithFade:
+        """Convert to internal SegmentWithFade representation.
+
+        Args:
+            duration: Media duration, used when ``end`` is None (end of the video).
+        """
+        end = self.end
+        if end is None:
+            if duration is None:
+                raise ValueError("Segment end is None (end of video) but the media duration is unknown")
+            end = duration
         fade_info = FadeInfo(
             video_fadein_duration=Fraction(self.video_fadein) if self.video_fadein else None,
             video_fadeout_duration=Fraction(self.video_fadeout) if self.video_fadeout else None,
             audio_fadein_duration=Fraction(self.audio_fadein) if self.audio_fadein else None,
             audio_fadeout_duration=Fraction(self.audio_fadeout) if self.audio_fadeout else None,
         )
-        return SegmentWithFade(Fraction(self.start), Fraction(self.end), fade_info)
+        return SegmentWithFade(Fraction(self.start), Fraction(end), fade_info)
+
+
+class _CallbackCancel(CancelObject):
+    """CancelObject whose ``cancelled`` flag asks a callback. smart_cut checks it before every GOP,
+    stops, and removes the partial output file."""
+
+    def __init__(self, cancel_check: Callable[[], bool]) -> None:
+        self._cancel_check = cancel_check
+
+    @property
+    def cancelled(self) -> bool:  # type: ignore[override]
+        return bool(self._cancel_check())
+
+
+class _ProgressAdapter:
+    """smart_cut emits the total number of cut pieces first, then the progress so far.
+    Forward the progress as callback(current, total)."""
+
+    def __init__(self, callback: Callable[[int, int], None]) -> None:
+        self.callback = callback
+        self.total: Optional[int] = None
+
+    def emit(self, value: int) -> None:
+        if self.total is None:
+            self.total = value
+        else:
+            self.callback(value, self.total)
 
 
 def process(
@@ -146,10 +191,13 @@ def process(
         audio_fadeout: Fade-out duration for audio only in seconds
         quality: Video quality - "normal", "high", "low", or "lossless"
         progress_callback: Optional callback(current, total) for progress updates
-        cancel_check: Optional callback() -> bool to check if processing should be cancelled
+        cancel_check: Optional callback() -> bool; processing stops when it returns True
 
     Returns:
-        True if successful, False if error occurred
+        True if successful, False if an error occurred or processing was cancelled
+
+    Raises:
+        ValueError: If the segment is invalid (e.g. start is not before end)
 
     Examples:
         # Simple cut without fades
@@ -158,7 +206,7 @@ def process(
         # With both video and audio fades
         process("input.mp4", "output.mp4", start=10, end=20, fadein=2, fadeout=3)
 
-        # Video fade only (17x faster audio processing)
+        # Video fade only
         process("input.mp4", "output.mp4", start=10, end=20,
                 video_fadein=2, video_fadeout=3)
 
@@ -173,97 +221,18 @@ def process(
         process("input.mp4", "output.mp4", start=10, end=20,
                 fadein=2, progress_callback=progress)
     """
-    try:
-        # Load media container
-        media_container = MediaContainer(input_path)
-
-        # Determine end time if not specified
-        if end is None:
-            end = float(media_container.duration)
-
-        # Validate: start must be before end
-        if start >= end:
-            raise ValueError(
-                f"Invalid segment: start time ({start:.2f}s) must be before "
-                f"end time ({end:.2f}s)"
-            )
-
-        # Create segment config
-        segment = CutSegmentConfig(
-            start=start,
-            end=end,
-            fadein=fadein,
-            fadeout=fadeout,
-            video_fadein=video_fadein,
-            video_fadeout=video_fadeout,
-            audio_fadein=audio_fadein,
-            audio_fadeout=audio_fadeout,
-        )
-
-        # Convert to internal representation
-        segment_with_fade = segment.to_segment_with_fade()
-
-        # Setup audio export (passthrough all tracks)
-        audio_export_info = AudioExportInfo(output_tracks=[AudioExportSettings('passthru')])
-
-        # Setup video quality
-        quality_map = {
-            "low": VideoExportQuality.LOW,
-            "normal": VideoExportQuality.NORMAL,
-            "high": VideoExportQuality.HIGH,
-            "lossless": VideoExportQuality.LOSSLESS,
-        }
-        video_quality = quality_map.get(quality.lower(), VideoExportQuality.NORMAL)
-        video_settings = VideoSettings(
-            mode=VideoExportMode.SMARTCUT,
-            quality=video_quality
-        )
-
-        # Setup progress callback wrapper
-        progress_wrapper = None
-        if progress_callback:
-            class ProgressWrapper:
-                def __init__(self, callback):
-                    self.callback = callback
-                    self.total = 0
-
-                def emit(self, value):
-                    if self.total == 0:
-                        self.total = value
-                    else:
-                        self.callback(value, self.total)
-
-            progress_wrapper = ProgressWrapper(progress_callback)
-
-        # Setup cancel check wrapper
-        cancel_object = None
-        if cancel_check:
-            cancel_object = CancelObject()
-            # Note: Would need to poll cancel_check() in a background thread
-            # For now, just create the object
-
-        # Process
-        error = smart_cut(
-            media_container=media_container,
-            positive_segments=[segment_with_fade],
-            out_path=output_path,
-            audio_export_info=audio_export_info,
-            video_settings=video_settings,
-            progress=progress_wrapper,
-            cancel_object=cancel_object,
-        )
-
-        return error is None
-
-    except ValueError:
-        # Re-raise validation errors (user input errors)
-        raise
-    except Exception as e:
-        # Catch other exceptions and return False for user-friendly behavior
-        print(f"Error processing video: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+    segment = CutSegmentConfig(
+        start=start,
+        end=end,
+        fadein=fadein,
+        fadeout=fadeout,
+        video_fadein=video_fadein,
+        video_fadeout=video_fadeout,
+        audio_fadein=audio_fadein,
+        audio_fadeout=audio_fadeout,
+    )
+    return process_segments(input_path, output_path, [segment], quality=quality,
+                            progress_callback=progress_callback, cancel_check=cancel_check)
 
 
 def process_segments(
@@ -277,6 +246,7 @@ def process_segments(
     """Process multiple video segments with independent fade effects.
 
     This is a high-level convenience function suitable for Gradio and other web apps.
+    Segments are sorted by start time before processing.
 
     Args:
         input_path: Path to input video file
@@ -284,10 +254,14 @@ def process_segments(
         segments: List of segment configurations (CutSegmentConfig or dict)
         quality: Video quality - "normal", "high", "low", or "lossless"
         progress_callback: Optional callback(current, total) for progress updates
-        cancel_check: Optional callback() -> bool to check if processing should be cancelled
+        cancel_check: Optional callback() -> bool; processing stops when it returns True
+            and the partial output file is removed
 
     Returns:
-        True if successful, False if error occurred
+        True if successful, False if an error occurred or processing was cancelled
+
+    Raises:
+        ValueError: If a segment is invalid (e.g. start is not before end)
 
     Examples:
         # Multiple segments with different fade configurations
@@ -312,21 +286,22 @@ def process_segments(
                         progress_callback=progress)
     """
     try:
-        # Load media container
         media_container = MediaContainer(input_path)
+    except Exception as e:
+        print(f"Error opening video: {e}")
+        traceback.print_exc()
+        return False
 
-        # Convert segments to internal representation
+    try:
         segments_with_fade = []
         for seg in segments:
             if isinstance(seg, dict):
-                # Convert dict to CutSegmentConfig
                 segment_config = CutSegmentConfig(**seg)
             elif isinstance(seg, CutSegmentConfig):
                 segment_config = seg
             else:
                 raise ValueError(f"Invalid segment type: {type(seg)}")
-
-            segments_with_fade.append(segment_config.to_segment_with_fade())
+            segments_with_fade.append(segment_config.to_segment_with_fade(media_container.duration))
 
         # Validate: start < end for each segment
         for i, seg in enumerate(segments_with_fade):
@@ -339,54 +314,22 @@ def process_segments(
         # Auto-sort segments by start time to ensure chronological order
         segments_with_fade.sort(key=lambda seg: seg.start_time)
 
-        # Setup audio export (passthrough all tracks)
-        audio_export_info = AudioExportInfo(output_tracks=[AudioExportSettings('passthru')])
-
-        # Setup video quality
-        quality_map = {
-            "low": VideoExportQuality.LOW,
-            "normal": VideoExportQuality.NORMAL,
-            "high": VideoExportQuality.HIGH,
-            "lossless": VideoExportQuality.LOSSLESS,
-        }
-        video_quality = quality_map.get(quality.lower(), VideoExportQuality.NORMAL)
-        video_settings = VideoSettings(
-            mode=VideoExportMode.SMARTCUT,
-            quality=video_quality
-        )
-
-        # Setup progress callback wrapper
-        progress_wrapper = None
-        if progress_callback:
-            class ProgressWrapper:
-                def __init__(self, callback):
-                    self.callback = callback
-                    self.total = 0
-
-                def emit(self, value):
-                    if self.total == 0:
-                        self.total = value
-                    else:
-                        self.callback(value, self.total)
-
-            progress_wrapper = ProgressWrapper(progress_callback)
-
-        # Setup cancel check wrapper
-        cancel_object = None
-        if cancel_check:
-            cancel_object = CancelObject()
-
-        # Process
+        cancel_object = _CallbackCancel(cancel_check) if cancel_check else None
         error = smart_cut(
             media_container=media_container,
             positive_segments=segments_with_fade,
             out_path=output_path,
-            audio_export_info=audio_export_info,
-            video_settings=video_settings,
-            progress=progress_wrapper,
+            audio_export_info=AudioExportInfo(output_tracks=[AudioExportSettings('passthru')]),
+            video_settings=VideoSettings(
+                mode=VideoExportMode.SMARTCUT,
+                quality=_QUALITY_MAP.get(quality.lower(), VideoExportQuality.NORMAL),
+            ),
+            progress=_ProgressAdapter(progress_callback) if progress_callback else None,
             cancel_object=cancel_object,
         )
 
+        if cancel_object is not None and cancel_object.cancelled:
+            return False  # smart_cut stopped early and removed the partial output
         return error is None
 
     except ValueError:
@@ -395,6 +338,7 @@ def process_segments(
     except Exception as e:
         # Catch other exceptions and return False for user-friendly behavior
         print(f"Error processing video: {e}")
-        import traceback
         traceback.print_exc()
         return False
+    finally:
+        media_container.close()
