@@ -100,13 +100,30 @@ _LOSSLESS_AUDIO_PREFIXES = ('flac', 'alac', 'pcm_')
 _MIN_RECODE_AUDIO_BITRATE = 128_000  # HE-AAC sources (~64 kbps) become AAC-LC, which needs more bits
 
 
-def _recode_audio_encoder_name(decoder_name: str) -> str:
+def _recode_audio_encoder_name(decoder_name: str, webm: bool = False) -> str:
     name = _AUDIO_ENCODER_FOR_DECODER.get(decoder_name, decoder_name)
     try:
         av.Codec(name, 'w')
     except Exception:  # no encoder for this codec in this FFmpeg build
         name = 'aac'
+    if webm and name not in _WEBM_AUDIO_ENCODERS:
+        name = 'libopus'
     return name
+
+
+# WebM holds only Opus and Vorbis audio: other tracks are re-encoded to Opus for .webm outputs (fork addition)
+_WEBM_AUDIO_DECODERS = ('opus', 'libopus', 'vorbis', 'libvorbis')
+_WEBM_AUDIO_ENCODERS = ('libopus', 'libvorbis')
+
+
+def _is_webm(output_av_container: OutputContainer) -> bool:
+    return (output_av_container.format.name or '') == 'webm'
+
+
+def audio_needs_recode(media_container: MediaContainer, output_av_container: OutputContainer, track_index: int) -> bool:
+    """True if the track can't be copied into this output: Opus/Vorbis-only WebM and another codec (fork addition)."""
+    name = media_container.audio_tracks[track_index].av_stream.codec_context.name
+    return _is_webm(output_av_container) and name not in _WEBM_AUDIO_DECODERS
 
 
 def create_recode_audio_output_stream(
@@ -123,7 +140,7 @@ def create_recode_audio_output_stream(
     """
     track = media_container.audio_tracks[track_index]
     in_ctx = track.av_stream.codec_context
-    codec_name = _recode_audio_encoder_name(in_ctx.name)
+    codec_name = _recode_audio_encoder_name(in_ctx.name, webm=_is_webm(output_av_container))
 
     rate = in_ctx.sample_rate or 48000
     supported_rates = av.Codec(codec_name, 'w').audio_rates

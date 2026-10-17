@@ -16,6 +16,9 @@ keyframe interval) are always generated:
     synth_h264_baseline.mp4   H.264 Constrained Baseline (like YouTube format 18)
     synth_h264_60fps.mp4      60 fps, 2 s GOPs
     synth_portrait.mp4        720x1280
+    synth_2audio.mp4          synth_h264.mp4 + a second audio track: AC-3 880 Hz mono, 44.1 kHz
+    synth_2audio_mp3.mp4      the same with an MP3 second track
+    synth_vp9_opus.webm       synth_vp9.mp4's video with the tone as Opus (for .webm outputs)
 
 --real CLIP.mp4 (any H.264 + AAC clip, e.g. a downloaded music video) additionally derives:
 
@@ -25,6 +28,8 @@ keyframe interval) are always generated:
 Not generated (FFmpeg can't encode HE-AAC, and real-world encoders matter): synth_heaac.mp4 / real_fb_vp9.mp4 /
 fb_sd_h264.mp4. To make synth_heaac.mp4, mux any HE-AAC track (e.g. Facebook audio) with synth_h264.mp4's video:
     ffmpeg -i synth_h264.mp4 -ss 30 -i heaac.m4a -map 0:v -map 1:a -c copy -shortest synth_heaac.mp4
+and synth_2audio_heaac.mp4 (two audio tracks, the second HE-AAC) likewise:
+    ffmpeg -i synth_h264.mp4 -ss 30 -i heaac.m4a -map 0:v -map 0:a -map 1:a -c copy -shortest synth_2audio_heaac.mp4
 """
 import argparse
 import shutil
@@ -67,6 +72,13 @@ def transcode(ffmpeg, out_dir, src, name, video_args):
     return run(ffmpeg, ["-i", src, "-map", "0", *video_args, "-c:a", "copy", name], out_dir)
 
 
+def add_audio_track(ffmpeg, out_dir, src, name, audio_args):
+    """src plus a second audio track: an 880 Hz mono tone at 44.1 kHz."""
+    return run(ffmpeg, ["-i", src, "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=44100:duration=20",
+                        "-map", "0:v", "-map", "0:a", "-map", "1:a", "-c:v", "copy", "-c:a:0", "copy", *audio_args,
+                        "-shortest", name], out_dir)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("media_dir")
@@ -95,8 +107,13 @@ def main():
     ok["synth_vp9.mp4"] = transcode(ff, out, "synth_h264.mp4", "synth_vp9.mp4", vp9)
     ok["synth_vp9_10bit.mp4"] = transcode(ff, out, "synth_h264.mp4", "synth_vp9_10bit.mp4",
                                           [*vp9, "-pix_fmt", "yuv420p10le", "-profile:v", "2"])
+    ok["synth_vp9_opus.webm"] = run(ff, ["-i", "synth_vp9.mp4", "-c:v", "copy", "-c:a", "libopus", "-b:a", "96k",
+                                         "synth_vp9_opus.webm"], out)
     ok["synth_av1.mp4"] = transcode(ff, out, "synth_h264.mp4", "synth_av1.mp4", av1)
     ok["synth_av1_10bit.mp4"] = transcode(ff, out, "synth_h264.mp4", "synth_av1_10bit.mp4", [*av1, "-pix_fmt", "yuv420p10le"])
+    ok["synth_2audio.mp4"] = add_audio_track(ff, out, "synth_h264.mp4", "synth_2audio.mp4", ["-c:a:1", "ac3", "-b:a:1", "192k"])
+    ok["synth_2audio_mp3.mp4"] = add_audio_track(ff, out, "synth_h264.mp4", "synth_2audio_mp3.mp4",
+                                                 ["-c:a:1", "libmp3lame", "-b:a:1", "128k"])
 
     if args.real:
         real = Path(args.real).resolve()

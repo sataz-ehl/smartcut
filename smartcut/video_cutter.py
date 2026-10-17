@@ -184,6 +184,11 @@ def _normalize_output_codec_tag(
     elif is_mp4_mov_mkv and in_codec_name in ('hevc', 'h265') and _is_mpegts_hevc_tag(in_codec_ctx.codec_tag):
         out_codec_ctx.codec_tag = 'hvc1'
 
+    # VP9 from MP4 has the sample entry tag 'vp09', which Matroska rejects ("Tag vp09 incompatible with output
+    # codec id"): it identifies codecs by CodecID, so leave the tag unset (fork addition)
+    if not is_mp4_or_mov and is_mp4_mov_mkv and in_codec_name == 'vp9' and out_codec_ctx.codec_tag == 'vp09':
+        out_codec_ctx.codec_tag = '\0\0\0\0'
+
 
 def _is_mpegts_h264_tag(codec_tag: str) -> bool:
     """Check if codec tag is MPEG-TS style H.264 tag."""
@@ -311,6 +316,12 @@ class VideoCutter:
         # MP4 muxer uses duration to calculate edit list boundaries, so
         # packets without proper duration cause last-frame discard issues
         self.typical_frame_duration: int | None = None
+        # Start from the source frame rate (fork addition). Encoders give their packets no duration (x264, libvpx),
+        # so an output that starts with re-encoded frames had no typical duration yet: a cut re-encoded as a whole
+        # ended with a zero-duration packet, and in MP4 with B-frames the edit list then ended before that frame.
+        rate = self.in_stream.average_rate or self.in_stream.guessed_rate
+        if rate:
+            self.typical_frame_duration = max(1, round(1 / (rate * self.out_time_base)))
 
         # Output position state - can be set for joining multiple files
         self.last_dts = initial_last_dts
@@ -365,21 +376,26 @@ class VideoCutter:
 
         # Speed settings for the GOPs that get re-encoded (cut points, fades). The libvpx-vp9 and especially
         # libaom-av1 defaults are very slow: on one CPU core, AV1 smart cuts took ~16x longer than with
-        # cpu-used=8, which costs ~1.7 dB PSNR on the re-encoded GOPs only (VP9 cpu-used=5: ~2x, ~0.7 dB).
+        # cpu-used=8, which costs ~1.7 dB PSNR on the re-encoded GOPs only (VP9 cpu-used=5: ~2x, ~0.7 dB). Full
+        # re-encodes (RECODE mode) use them too, on purpose.
         # Lookahead of 10 frames instead of the defaults (x264 40, libvpx 25, libaom 19-35): re-encoded runs are
         # short, and each frame in the lookahead holds several MB. One core, 1080p with fades: x264 peak
         # +429 -> +239 MB, libaom +545 -> +331 MB and 209 -> 132 s, for 0.4-0.9 dB PSNR on the re-encoded frames
         # (at 47-52 dB, same size). It also shortens the encoder flushes, where progress pauses. Not for libaom
-        # below 720p: there it was ~35% slower (360p: 14 -> 19 s), and the memory is small anyway.
+        # below 720p: there it was ~35% slower (360p: 14 -> 19 s), and the memory is small anyway. Not in RECODE mode
+        # either, which re-encodes the whole video in one long run.
         ctx = self.in_stream.codec_context
         hd = (ctx.width or 0) * (ctx.height or 0) >= 1280 * 720
+        short_runs = self.video_settings.mode == VideoExportMode.SMARTCUT
         if self.codec_name == 'vp9':
-            self.encoding_options.update({'cpu-used': '5', 'row-mt': '1', 'lag-in-frames': '10'})
+            self.encoding_options.update({'cpu-used': '5', 'row-mt': '1'})
+            if short_runs:
+                self.encoding_options['lag-in-frames'] = '10'
         elif self.codec_name == 'av1' and not any(x in codec_name for x in ('svt', 'rav1e')):  # libaom-av1 options
             self.encoding_options.update({'cpu-used': '8', 'row-mt': '1'})
-            if hd:
+            if hd and short_runs:
                 self.encoding_options['lag-in-frames'] = '10'
-        elif self.codec_name == 'h264':
+        elif self.codec_name == 'h264' and short_runs:
             self.encoding_options['rc-lookahead'] = '10'
         # encoding_options = {}
         if profile is not None:
@@ -488,6 +504,10 @@ class VideoCutter:
 
         if muxing_codec.rate is not None:
             enc_codec.rate = muxing_codec.rate
+        elif self.in_stream.average_rate:
+            # (fork addition) Without a frame rate libaom-av1 gives every packet a duration of one tick, so a
+            # re-encoded last frame lasted one tick. libaom and libvpx encode the same data either way.
+            enc_codec.rate = self.in_stream.average_rate
         enc_codec.options.update(self.encoding_options)
 
         # Leaving this here for future consideration: manually setting the bframe count seems to make sense in principle.

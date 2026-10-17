@@ -59,13 +59,16 @@ High-level API for programmatic use (Gradio, web apps):
 - `process_segments()`: several segments, each with its own fades (dicts or `CutSegmentConfig`)
 - `CutSegmentConfig`: segment configuration; `end=None` means the end of the video
 
-Both validate that start < end (raising `ValueError` with "Invalid segment ..."), sort segments by start time,
+Both keep every audio track, like the CLI (with audio fades each one is re-encoded as a whole). They validate that
+start < end (raising `ValueError` with "Invalid segment ..."), sort segments by start time,
 and report progress as `progress_callback(current, total)`: thousandths of the estimated work (total is 1000).
 Re-encoding a GOP can take a thousand times longer than copying one, so `smart_cut()` weighs re-encoded frames
 by measured per-codec costs, copied frames and re-encoded audio far less, and counts re-encoded frames as the
 encoder outputs them (`_WorkProgress` in `smart_cut.py`). They honour `cancel_check()`: it is polled before every
-GOP and after every re-encoded frame, processing stops, the partial output is removed and the call returns
-`False`. The input file is always closed afterwards.
+GOP and after every re-encoded frame (also without a progress callback), processing stops, the partial output is
+removed and the call returns `False`. Once it returned True it isn't polled again, so True once is enough, and the
+encoder's buffered frames are dropped rather than encoded into the removed file. The input file is always closed
+afterwards.
 
 ```python
 import smartcut
@@ -109,6 +112,9 @@ smartcut.process_segments("in.mp4", "out.mp4", [
 - The output stream is created from the encoder rather than copied from the source, so the stream header matches
   the packets: AAC and HE-AAC sources become AAC-LC (FFmpeg can't encode HE-AAC) at the source bitrate but at
   least 128 kbps. Other codecs are re-encoded with their own encoder when FFmpeg has one, else AAC.
+- `.webm` outputs: WebM holds only Opus and Vorbis audio, so other tracks (e.g. AAC, HE-AAC) are always
+  re-encoded to Opus as a whole track (48 kHz, at least 128 kbps), fades or not. Opus/Vorbis tracks are copied
+  when there are no audio fades. Other containers are unchanged.
 - Audio is cut sample-accurately to each cut piece and kept locked to the video timeline (silence is inserted
   where the source has no audio). After a jump the decoder restarts two packets early, so the first kept samples
   decode cleanly.
@@ -120,7 +126,10 @@ smartcut.process_segments("in.mp4", "out.mp4", [
 - Re-encoded GOPs use `cpu-used=5` (VP9) and `cpu-used=8` (libaom-av1), plus `row-mt`. On one CPU core this made
   AV1 smart cuts ~16x and VP9 ~2x faster, for ~1.7 dB / ~0.7 dB lower PSNR on the re-encoded GOPs only.
 - Re-encoded GOPs use a 10-frame encoder lookahead: x264 `rc-lookahead`, libvpx/libaom `lag-in-frames`; libaom only
-  from 720p up, since below that it was ~35% slower. The defaults hold 19-40 frames of several MB each.
+  from 720p up, since below that it was ~35% slower. The defaults hold 19-40 frames of several MB each. Full
+  re-encodes (`VideoExportMode.RECODE`) keep the encoders' default lookahead.
+- Full re-encodes use the same faster VP9/AV1 speed settings (`cpu-used` 5 / 8), on purpose: on a 1-CPU server AV1
+  at the default speed is ~16x slower.
   - Peak memory on one core, 1080p with fades: x264 +429 → +239 MB, libaom +545 → +331 MB.
   - AV1 1080p also got faster: 209 → ~135 s.
   - Cost: 0.4-0.9 dB PSNR on the re-encoded frames only (at 47-52 dB).
@@ -149,6 +158,10 @@ Run from the repo root (tests live in `smartcut/tests/`):
 | `test_validation.py` | Reversed segments rejected, out-of-order segments sorted (CLI and API) |
 | `test_audio_parameters.py` | Re-encoded audio keeps sample rate / channels; mixed and multi-segment cases |
 | `verify_audio_fade.py` | Measured audio level ramps for fade-in, fade-out, both |
+| `test_cancel.py` | Cancelling (also midway through re-encoding, with and without progress), steady progress, input closed |
+| `test_last_frame.py` | Cuts keep their last frame, also when they end with re-encoded frames (H.264, VP9, AV1, fades) |
+| `test_multitrack.py` | Every audio track is kept: copied without audio fades, each re-encoded as a whole with them |
+| `test_webm.py` | `.webm` outputs: AAC re-encoded to Opus (with and without fades), Opus copied |
 | `regression/` | Measurement-based regression harness, test media generator and diagnostic tools (see its README) |
 
 ## Usage Examples

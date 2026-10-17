@@ -6,6 +6,7 @@ Tests:
 1. Validation: start >= end within segment (should raise error)
 2. Auto-sorting: segments provided in wrong chronological order (should auto-sort)
 3. API validation: same tests for process() and process_segments()
+4. API: an error while processing returns False; only invalid segments raise ValueError
 
 Usage (from the repo root):
     python smartcut/tests/test_validation.py
@@ -235,6 +236,42 @@ def test_api_auto_sort_segments():
         return False
 
 
+def test_api_processing_error_returns_false():
+    """Test API: a ValueError raised while processing is not a validation error. FFmpeg's EINVAL is an
+    av.error.ValueError (a ValueError), e.g. when libvpx can't open a 10-bit VP9 encoder."""
+    print("\n" + "="*60)
+    print("Test 5: API - a processing error returns False instead of raising")
+    print("="*60)
+
+    import av
+    input_video = tempfile.mktemp(suffix=".mp4")
+    output_video = tempfile.mktemp(suffix=".mp4")
+    if not generate_test_video(input_video, duration=10, fps=30):
+        print("✗ Failed to create test video")
+        return False
+
+    def failing_smart_cut(*args, **kwargs):
+        raise av.error.ValueError(22, "Invalid argument", "avcodec_open2(libvpx-vp9)")  # as FFmpeg raises it
+
+    real_smart_cut = smartcut.smart_cut
+    smartcut.smart_cut = failing_smart_cut  # the name process_segments() calls
+    try:
+        result = smartcut.process_segments(input_video, output_video, [{"start": 2, "end": 5}])
+    except ValueError as e:
+        print(f"✗ Test failed! The processing error was raised like a validation error: {e!r}")
+        return False
+    finally:
+        smartcut.smart_cut = real_smart_cut
+        os.remove(input_video)
+        if os.path.exists(output_video):
+            os.remove(output_video)
+    if result is False:
+        print("✓ Test passed! process_segments returned False")
+        return True
+    print(f"✗ Test failed! Expected False, got {result!r}")
+    return False
+
+
 def main():
     """Run all validation tests."""
     print("\n" + "="*60)
@@ -247,6 +284,7 @@ def main():
         ("CLI auto-sort (wrong order)", test_cli_auto_sort_segments),
         ("API validation (reversed segment)", test_api_validation_reversed_segment),
         ("API auto-sort (wrong order)", test_api_auto_sort_segments),
+        ("API processing error returns False", test_api_processing_error_returns_false),
     ]
 
     results = []

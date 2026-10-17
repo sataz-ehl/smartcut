@@ -39,9 +39,9 @@ def process_single_segment(
         # Create output file
         output_path = tempfile.mktemp(suffix=".mp4")
 
-        # Progress callback
+        # Progress callback: current/total is the share of the estimated work done (total is 1000)
         def on_progress(current, total):
-            progress((current, total), desc=f"Processing {current}/{total} segments")
+            progress(current / total, desc="Processing")
 
         # Process
         success = smartcut.process(
@@ -114,9 +114,9 @@ def process_multiple_segments(
         # Create output file
         output_path = tempfile.mktemp(suffix=".mp4")
 
-        # Progress callback
+        # Progress callback: current/total is the share of the estimated work done (total is 1000)
         def on_progress(current, total):
-            progress((current, total), desc=f"Processing {current}/{total} segments")
+            progress(current / total, desc="Processing")
 
         # Process
         success = smartcut.process_segments(

@@ -19,7 +19,8 @@ python smartcut/tests/regression/run_cases.py --list
 ```
 
 Media the generator can't make (add it to the media dir by hand to enable those cases):
-`synth_heaac.mp4` (HE-AAC audio; see make_test_media.py for the one-line ffmpeg mux), `real_fb_vp9.mp4`
+`synth_heaac.mp4` and `synth_2audio_heaac.mp4` (HE-AAC audio; see make_test_media.py for the one-line ffmpeg
+muxes), `real_fb_vp9.mp4`
 (a Facebook VP9 + HE-AAC download), `fb_sd_h264.mp4` (a Facebook `sd` H.264 download). Real clips are
 third-party content, so they are not committed.
 
@@ -27,7 +28,9 @@ third-party content, so they are not committed.
 
 | Column | Meaning | PASS threshold |
 |---|---|---|
-| `dur/exp`, `frames/exp` | Output video duration / frame count vs the requested segments | frames within 1 |
+| `dur/exp` | Output video duration (to the end of its last frame) vs the requested segments | - |
+| `stream` | Video stream duration as players see it (in MP4 the edit list; `-` in Matroska) | ends within half a frame of the last frame |
+| `frames/exp` | Frames decoded vs the source frames inside the segments. Decoding drops frames outside an MP4 edit list, as FFmpeg and players do (same count as `ffprobe -count_frames`) | equal |
 | `gap` | Largest gap between consecutive frame timestamps, in frames | <= 1.5, no backwards steps |
 | `same` | Consecutive frames that decode identically (informational: near-black fade frames are often identical) | - |
 | `A-V ms` | Audio length minus video length | within 60 ms |
@@ -36,9 +39,17 @@ third-party content, so they are not committed.
 | `aFlat min/max` | Audio gain outside fades (should be ~1.0) | - |
 | notes / dips | Audio dips below 0.9 in untouched parts (clicks, gaps); tone sources only, first 50 ms ignored | none |
 
+The audio columns are the first track's. Every other audio track gets the same checks (`track N:` in the notes
+gives its `A-V ms` and `aFadeErr`), and the output must have as many audio tracks as the source.
+
+The `W*` cases write `.webm` (AAC / HE-AAC audio re-encoded to Opus, Opus audio copied). A copied stream that
+starts mid-way ramps up while its decoder converges, so dips are ignored in the first 50 ms (AAC) or 80 ms (Opus,
+whose decoders need 80 ms of pre-roll).
+
 Results are also written to `<out>/results.json`, and per-case time series to `<out>/<case>.npz`
-(`vt, v_alpha, v_ideal, at, a_gain, a_ideal`). `X_vp9_10bit` is an expected failure (smartcut can't re-encode
-10/12-bit VP9); it reports XFAIL, or XPASS if it starts working.
+(`vt, v_alpha, v_ideal, at, a_gain, a_ideal`). Expected failures report XFAIL, or XPASS if they start working:
+`X_vp9_10bit` (smartcut can't re-encode 10/12-bit VP9) and `X_mp3_copy` (copied MP3 audio has ~50 ms of silence
+after every join: MP3 frames borrow bits from earlier frames).
 
 Synthetic clips show a frame counter and timestamp, so stutter, repeated or skipped frames and the frames at a
 join are easy to check by eye too.
@@ -57,10 +68,14 @@ join are easy to check by eye too.
 
 ## Unit tests next to this folder
 
-`smartcut/tests/test_yuv_fade.py` (YUV fade values, no media) and `smartcut/tests/test_cancel.py`
-(cancellation, also midway through a re-encoded piece; steady progress; input file closed) run like the other
-test scripts:
-`python smartcut/tests/test_yuv_fade.py`.
+These need no test media and run like the other test scripts (`python smartcut/tests/test_yuv_fade.py`):
+- `smartcut/tests/test_yuv_fade.py`: YUV fade values.
+- `smartcut/tests/test_cancel.py`: cancellation, also midway through a re-encoded piece (with and without a
+  progress callback; deterministic on any number of cores); steady progress; input file closed.
+- `smartcut/tests/test_last_frame.py`: cuts keep their last frame (H.264 with and without B-frames, VP9, AV1,
+  fades, MP4 and MKV), counted as FFmpeg decodes them; inputs without audio.
+- `smartcut/tests/test_multitrack.py`: every audio track is kept (AAC + AC-3), copied or re-encoded with fades.
+- `smartcut/tests/test_webm.py`: `.webm` outputs (AAC re-encoded to Opus, Opus copied).
 
 ## Windows notes
 

@@ -124,24 +124,36 @@ class CutSegmentConfig:
                 raise ValueError("Segment end is None (end of video) but the media duration is unknown")
             end = duration
         fade_info = FadeInfo(
-            video_fadein_duration=Fraction(self.video_fadein) if self.video_fadein else None,
-            video_fadeout_duration=Fraction(self.video_fadeout) if self.video_fadeout else None,
-            audio_fadein_duration=Fraction(self.audio_fadein) if self.audio_fadein else None,
-            audio_fadeout_duration=Fraction(self.audio_fadeout) if self.audio_fadeout else None,
+            video_fadein_duration=_exact(self.video_fadein) if self.video_fadein else None,
+            video_fadeout_duration=_exact(self.video_fadeout) if self.video_fadeout else None,
+            audio_fadein_duration=_exact(self.audio_fadein) if self.audio_fadein else None,
+            audio_fadeout_duration=_exact(self.audio_fadeout) if self.audio_fadeout else None,
         )
-        return SegmentWithFade(Fraction(self.start), Fraction(end), fade_info)
+        return SegmentWithFade(_exact(self.start), _exact(end), fade_info)
+
+
+def _exact(seconds: float | Fraction) -> Fraction:
+    """The decimal a float stands for (3.6 -> 18/5). Fraction(3.6) is the binary value, slightly above 3.6, which
+    dropped the frame at exactly 3.6 s from a segment starting there."""
+    return Fraction(repr(seconds)) if isinstance(seconds, float) else Fraction(seconds)
 
 
 class _CallbackCancel(CancelObject):
     """CancelObject whose ``cancelled`` flag asks a callback. smart_cut checks it before every GOP and after
-    every re-encoded frame, stops, and removes the partial output file."""
+    every re-encoded frame, stops, and removes the partial output file.
+
+    Once the callback returned True the flag stays True without asking again: smart_cut reads it several times
+    while stopping, and a callback that answered True only once left a truncated output reported as a success."""
 
     def __init__(self, cancel_check: Callable[[], bool]) -> None:
         self._cancel_check = cancel_check
+        self.requested = False
 
     @property
     def cancelled(self) -> bool:  # type: ignore[override]
-        return bool(self._cancel_check())
+        if not self.requested:
+            self.requested = bool(self._cancel_check())
+        return self.requested
 
 
 class _ProgressAdapter:
@@ -197,7 +209,8 @@ def process(
         progress_callback: Optional callback(current, total): the estimated work done, in thousandths
             (total is 1000), called whenever it changes, including during re-encoding
         cancel_check: Optional callback() -> bool; processing stops when it returns True (checked before every
-            cut piece and after every re-encoded frame)
+            cut piece and after every re-encoded frame, also without progress_callback; not called again once it
+            returned True)
 
     Returns:
         True if successful, False if an error occurred or processing was cancelled
@@ -262,7 +275,8 @@ def process_segments(
         progress_callback: Optional callback(current, total): the estimated work done, in thousandths
             (total is 1000), called whenever it changes, including during re-encoding
         cancel_check: Optional callback() -> bool; processing stops when it returns True (checked before every
-            cut piece and after every re-encoded frame) and the partial output file is removed
+            cut piece and after every re-encoded frame, also without progress_callback; not called again once it
+            returned True) and the partial output file is removed
 
     Returns:
         True if successful, False if an error occurred or processing was cancelled
@@ -299,6 +313,7 @@ def process_segments(
         traceback.print_exc()
         return False
 
+    validated = False
     try:
         segments_with_fade = []
         for seg in segments:
@@ -320,13 +335,15 @@ def process_segments(
 
         # Auto-sort segments by start time to ensure chronological order
         segments_with_fade.sort(key=lambda seg: seg.start_time)
+        validated = True
 
         cancel_object = _CallbackCancel(cancel_check) if cancel_check else None
         error = smart_cut(
             media_container=media_container,
             positive_segments=segments_with_fade,
             out_path=output_path,
-            audio_export_info=AudioExportInfo(output_tracks=[AudioExportSettings('passthru')]),
+            # Every audio track, like the CLI (with audio fades each one is re-encoded as a whole)
+            audio_export_info=AudioExportInfo(output_tracks=[AudioExportSettings('passthru')] * len(media_container.audio_tracks)),
             video_settings=VideoSettings(
                 mode=VideoExportMode.SMARTCUT,
                 quality=_QUALITY_MAP.get(quality.lower(), VideoExportQuality.NORMAL),
@@ -335,14 +352,15 @@ def process_segments(
             cancel_object=cancel_object,
         )
 
-        if cancel_object is not None and cancel_object.cancelled:
+        if cancel_object is not None and cancel_object.requested:  # not asking again: the output is complete otherwise
             return False  # smart_cut stopped early and removed the partial output
         return error is None
 
-    except ValueError:
-        # Re-raise validation errors (user input errors)
-        raise
     except Exception as e:
+        if isinstance(e, ValueError) and not validated:
+            # Re-raise validation errors (user input errors). Not ValueErrors from processing: FFmpeg's EINVAL
+            # (av.error.ValueError) and an unsupported VP9 profile are processing errors.
+            raise
         # Catch other exceptions and return False for user-friendly behavior
         print(f"Error processing video: {e}")
         traceback.print_exc()
