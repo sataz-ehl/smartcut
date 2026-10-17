@@ -311,6 +311,12 @@ class VideoCutter:
         # MP4 muxer uses duration to calculate edit list boundaries, so
         # packets without proper duration cause last-frame discard issues
         self.typical_frame_duration: int | None = None
+        # Start from the source frame rate (fork addition). Encoders give their packets no duration (x264, libvpx),
+        # so an output that starts with re-encoded frames had no typical duration yet: a cut re-encoded as a whole
+        # ended with a zero-duration packet, and in MP4 with B-frames the edit list then ended before that frame.
+        rate = self.in_stream.average_rate or self.in_stream.guessed_rate
+        if rate:
+            self.typical_frame_duration = max(1, round(1 / (rate * self.out_time_base)))
 
         # Output position state - can be set for joining multiple files
         self.last_dts = initial_last_dts
@@ -488,6 +494,10 @@ class VideoCutter:
 
         if muxing_codec.rate is not None:
             enc_codec.rate = muxing_codec.rate
+        elif self.in_stream.average_rate:
+            # (fork addition) Without a frame rate libaom-av1 gives every packet a duration of one tick, so a
+            # re-encoded last frame lasted one tick. libaom and libvpx encode the same data either way.
+            enc_codec.rate = self.in_stream.average_rate
         enc_codec.options.update(self.encoding_options)
 
         # Leaving this here for future consideration: manually setting the bframe count seems to make sense in principle.

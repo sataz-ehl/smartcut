@@ -27,7 +27,9 @@ third-party content, so they are not committed.
 
 | Column | Meaning | PASS threshold |
 |---|---|---|
-| `dur/exp`, `frames/exp` | Output video duration / frame count vs the requested segments | frames within 1 |
+| `dur/exp` | Output video duration (to the end of its last frame) vs the requested segments | - |
+| `stream` | Video stream duration as players see it (in MP4 the edit list; `-` in Matroska) | ends within half a frame of the last frame |
+| `frames/exp` | Frames decoded vs the source frames inside the segments. Decoding drops frames outside an MP4 edit list, as FFmpeg and players do (same count as `ffprobe -count_frames`) | equal |
 | `gap` | Largest gap between consecutive frame timestamps, in frames | <= 1.5, no backwards steps |
 | `same` | Consecutive frames that decode identically (informational: near-black fade frames are often identical) | - |
 | `A-V ms` | Audio length minus video length | within 60 ms |
@@ -57,10 +59,12 @@ join are easy to check by eye too.
 
 ## Unit tests next to this folder
 
-`smartcut/tests/test_yuv_fade.py` (YUV fade values, no media) and `smartcut/tests/test_cancel.py`
-(cancellation, also midway through a re-encoded piece; steady progress; input file closed) run like the other
-test scripts:
-`python smartcut/tests/test_yuv_fade.py`.
+These need no test media and run like the other test scripts (`python smartcut/tests/test_yuv_fade.py`):
+- `smartcut/tests/test_yuv_fade.py`: YUV fade values.
+- `smartcut/tests/test_cancel.py`: cancellation, also midway through a re-encoded piece; steady progress; input
+  file closed.
+- `smartcut/tests/test_last_frame.py`: cuts keep their last frame (H.264 with and without B-frames, VP9, AV1,
+  fades, MP4 and MKV), counted as FFmpeg decodes them; inputs without audio.
 
 ## Windows notes
 

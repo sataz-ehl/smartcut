@@ -42,10 +42,14 @@ CASES = {
                             {"start": 11, "end": 18, "fadein": 1, "fadeout": 1}]),
     "T6_start0":   (SYNTH, [{"start": 0, "end": 6, "fadein": 2}]),
     "T7_unsorted": (SYNTH, [{"start": 12, "end": 16}, {"start": 2, "end": 6, "fadeout": 1}]),
+    # Outputs that end with re-encoded frames and no copied packet before them (they lost their last frame)
+    "T8_short":    (SYNTH, [{"start": 1, "end": 2}]),
+    "T9_recoded":  (SYNTH, [{"start": 3, "end": 6, "fadein": 1.5, "fadeout": 1.5}]),
     # Real content (H.264 + AAC-LC)
     "R1_real_fades":  (REAL, [{"start": 20, "end": 35, "fadein": 2, "fadeout": 2},
                               {"start": 60, "end": 75, "audio_fadein": 1.5, "video_fadeout": 2}]),
     "R2_real_nofade": (REAL, [{"start": 20, "end": 35}, {"start": 60, "end": 75}]),
+    "R3_real_short":  (REAL, [{"start": 20, "end": 21.1}]),
     # HE-AAC audio (Facebook's format)
     "H1_heaac_fade":   ("synth_heaac.mp4", [{"start": 3, "end": 13, "audio_fadein": 2, "audio_fadeout": 2}]),
     "H2_heaac_nofade": ("synth_heaac.mp4", [{"start": 3, "end": 13}]),
@@ -54,6 +58,8 @@ CASES = {
     "V2_vp9_fades":  ("synth_vp9.mp4", [{"start": 3, "end": 13, "fadein": 2, "fadeout": 2}]),
     "A1_av1_cuts":   ("synth_av1.mp4", [{"start": 5, "end": 9}, {"start": 12, "end": 17}]),
     "A2_av1_fades":  ("synth_av1.mp4", [{"start": 3, "end": 13, "fadein": 2, "fadeout": 2}]),
+    "V3_vp9_short":  ("synth_vp9.mp4", [{"start": 1, "end": 2}]),
+    "A3_av1_short":  ("synth_av1.mp4", [{"start": 1, "end": 2}]),
     "RV_vp9_real":   ("real_vp9.mp4", TWO_SEGMENTS_REAL),
     "RA_av1_real":   ("real_av1.mp4", TWO_SEGMENTS_REAL),
     "RH7_h264_720p": ("real_h264_720p.mp4", TWO_SEGMENTS_REAL),
@@ -64,6 +70,7 @@ CASES = {
     "X_vp9_10bit":     ("synth_vp9_10bit.mp4", [{"start": 3, "end": 13, "fadein": 2, "fadeout": 2}]),
     "X_av1_10bit":     ("synth_av1_10bit.mp4", [{"start": 3, "end": 13, "fadein": 2, "fadeout": 2}]),
     "X_h264_baseline": ("synth_h264_baseline.mp4", [{"start": 3, "end": 13, "fadein": 2, "fadeout": 2}]),
+    "X_h264_bl_short": ("synth_h264_baseline.mp4", [{"start": 1, "end": 2}]),
     "X_h264_60fps":    ("synth_h264_60fps.mp4", [{"start": 3, "end": 9, "fadein": 1, "fadeout": 1}, {"start": 12, "end": 17}]),
     "X_portrait":      ("synth_portrait.mp4", [{"start": 3, "end": 13, "fadein": 2, "fadeout": 2}]),
     "X_fb_sd_h264":    ("fb_sd_h264.mp4", [{"start": 2, "end": 8, "fadein": 1, "fadeout": 1}, {"start": 10, "end": 14}]),
@@ -72,7 +79,8 @@ EXPECTED_FAILURES = {"X_vp9_10bit"}  # smartcut can't re-encode 10/12-bit VP9 (p
 
 # Verdict thresholds (correct outputs measured: fade errors <= 0.04, gaps <= 1.1 frames, |A-V| <= 20 ms)
 MAX_FADE_ERR_SYNTH, MAX_FADE_ERR_REAL = 0.08, 0.15
-MAX_GAP_FRAMES, MAX_AV_MS, MAX_FRAME_DIFF = 1.5, 60, 1
+MAX_GAP_FRAMES, MAX_AV_MS = 1.5, 60
+MAX_STREAM_END_FRAMES = 0.5  # the video stream must end where its last frame does
 DIP_GRACE_S = 0.05  # the first AAC frames of a copied stream ramp up; ignore dips this close to the start
 
 
@@ -118,7 +126,12 @@ def read_media(path):
         as_ = c.streams.audio[0] if c.streams.audio else None
         info = {"vcodec": vs.codec_context.name if vs else None,
                 "avg_rate": float(vs.average_rate) if vs and vs.average_rate else None,
-                "acodec": as_.codec_context.name if as_ else None, "abitrate": as_.bit_rate if as_ else None}
+                "acodec": as_.codec_context.name if as_ else None, "abitrate": as_.bit_rate if as_ else None,
+                "start_time": (c.start_time or 0) / av.time_base,
+                # As players see it (in MP4 the edit list); None in Matroska
+                "v_stream_s": float(vs.duration * vs.time_base) if vs and vs.duration is not None and vs.time_base else None}
+        # Decoding drops the frames outside an MP4 edit list, as FFmpeg and players do: the frame count is the same
+        # as ffprobe -count_frames
         for frame in c.decode(*[s for s in (vs, as_) if s is not None]):
             if isinstance(frame, av.VideoFrame):
                 p = frame.planes[0]
@@ -170,8 +183,11 @@ def analyse(media, out_dir, case, src_name, segs, out_path):
     vt = o_vt - t0
     d = np.diff(vt)
     res["v_frames"] = len(vt)
-    res["v_frames_expected"] = round(expected * fps)
+    # Exactly the source frames inside the segments (smartcut keeps start <= t < end)
+    st = s_info["start_time"]
+    res["v_frames_expected"] = int(sum(((s_vt >= st + s["start"] - 1e-9) & (s_vt < st + s["end"] - 1e-9)).sum() for s in segs))
     res["v_duration"] = float(vt[-1] + 1 / fps) if len(vt) else 0
+    res["v_stream_s"] = o_info["v_stream_s"]
     res["v_max_gap_frames"] = float(d.max() * fps) if len(d) else 0
     res["v_nonmonotonic"] = int((d <= 0).sum())
     res["v_identical_frames"] = int(sum(o_hash[i] == o_hash[i - 1] for i in range(1, len(o_hash))))
@@ -218,8 +234,10 @@ def analyse(media, out_dir, case, src_name, segs, out_path):
 
     max_err = MAX_FADE_ERR_SYNTH if tone else MAX_FADE_ERR_REAL
     problems = []
-    if abs(res["v_frames"] - res["v_frames_expected"]) > MAX_FRAME_DIFF:
+    if res["v_frames"] != res["v_frames_expected"]:
         problems.append("frame count")
+    if res["v_stream_s"] is not None and abs(res["v_stream_s"] - res["v_duration"]) * fps > MAX_STREAM_END_FRAMES:
+        problems.append("stream duration")
     if res["v_max_gap_frames"] > MAX_GAP_FRAMES or res["v_nonmonotonic"]:
         problems.append("frame timing")
     if abs(res["av_diff_ms"]) > MAX_AV_MS:
@@ -286,7 +304,7 @@ def main():
     def f(x, nd=2):
         return "-" if x is None else (f"{x:.{nd}f}" if isinstance(x, float) else str(x))
 
-    print(f"\n{'case':<16}{'verdict':<9}{'sec':>7}{'dur/exp':>13}{'frames/exp':>12}{'gap':>5}{'same':>5}{'A-V ms':>8}"
+    print(f"\n{'case':<16}{'verdict':<9}{'sec':>7}{'dur/exp':>13}{'stream':>7}{'frames/exp':>12}{'gap':>5}{'same':>5}{'A-V ms':>8}"
           f"{'vFadeErr':>9}{'aFadeErr':>9}{'aFlat min/max':>15}  notes")
     failures = 0
     for case, r in results.items():
@@ -303,7 +321,7 @@ def main():
         if expected_fail:
             verdict = "XPASS"  # started working: update EXPECTED_FAILURES
         failures += verdict == "FAIL"
-        print(f"{case:<16}{verdict:<9}{r['seconds']:>7.1f}{r['v_duration']:>7.2f}/{r['expected_s']:<5.1f}"
+        print(f"{case:<16}{verdict:<9}{r['seconds']:>7.1f}{r['v_duration']:>7.2f}/{r['expected_s']:<5.1f}{f(r['v_stream_s']):>7}"
               f"{r['v_frames']:>6}/{r['v_frames_expected']:<5}{f(r['v_max_gap_frames'], 1):>5}{r['v_identical_frames']:>5}"
               f"{r['av_diff_ms']:>8.0f}{f(r['v_fade_max_err']):>9}{f(r['a_fade_max_err']):>9}"
               f"{f(r['a_flat_min_gain']):>8}/{f(r['a_flat_max_gain'])}  {', '.join(r['problems'] + [f'dips {d}' for d in r.get('a_dips_at', [])][:1])}")

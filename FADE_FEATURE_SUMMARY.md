@@ -149,6 +149,7 @@ Run from the repo root (tests live in `smartcut/tests/`):
 | `test_validation.py` | Reversed segments rejected, out-of-order segments sorted (CLI and API) |
 | `test_audio_parameters.py` | Re-encoded audio keeps sample rate / channels; mixed and multi-segment cases |
 | `verify_audio_fade.py` | Measured audio level ramps for fade-in, fade-out, both |
+| `test_last_frame.py` | Cuts keep their last frame, also when they end with re-encoded frames (H.264, VP9, AV1, fades) |
 | `regression/` | Measurement-based regression harness, test media generator and diagnostic tools (see its README) |
 
 ## Usage Examples
