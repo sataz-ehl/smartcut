@@ -4,6 +4,8 @@ Tests that cut audio has no gaps or ramps at the joins and at the start, for cod
 decode cleanly after a jump:
 - MP3: a frame can take bits from earlier frames (the bit reservoir), so copied MP3 had ~50 ms of silence after
   every join. MP3 tracks are now re-encoded as a whole when the output has a join.
+- Opus: decoders need 80 ms of pre-roll, so a copy that started mid-stream rose from ~40 % of the level over its
+  first 80 ms. The copy now includes 80 ms of earlier packets, skipped through the stream's pre-skip.
 
 The level is measured in 10 ms windows against the source's steady level. Sources (H.264 video + a 440 Hz tone)
 are made with PyAV, no media needed.
@@ -67,6 +69,8 @@ def check(src: Path, out: Path, segments: list[dict], from_s: float) -> str | No
 def main() -> int:
     cases = [  # name, video encoder, audio encoder, rate, container, check from (s)
         ("MP3 in MP4: start and join", "libx264", "libmp3lame", 44100, "mp4", 0.0),
+        ("Opus in WebM: start", "libvpx-vp9", "libopus", 48000, "webm", 0.0),
+        ("Opus in MP4: start", "libvpx-vp9", "libopus", 48000, "mp4", 0.0),
     ]
     failed = 0
     with tempfile.TemporaryDirectory() as d:

@@ -13,13 +13,13 @@ from smartcut.media_container import MediaContainer
 from smartcut.media_utils import VideoExportMode
 from smartcut.misc_data import AudioExportInfo, CutSegment, FadeInfo, SegmentWithFade
 from smartcut.track_cutters import (
-    PassthruAudioCutter,
     RecodeAudioCutter,
     SubtitleCutter,
     audio_needs_recode,
     create_audio_output_stream,
     create_recode_audio_output_stream,
     create_subtitle_output_stream,
+    passthru_audio_cutter,
 )
 from smartcut.video_cutter import (
     VideoCutter,
@@ -380,7 +380,8 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                             generators.append(RecodeAudioCutter(media_container, audio_out_stream, track_i))
                         else:
                             audio_out_stream = create_audio_output_stream(media_container, output_av_container, track_i)
-                            generators.append(PassthruAudioCutter(media_container, audio_out_stream, track_i))
+                            generators.append(passthru_audio_cutter(media_container, audio_out_stream, track_i,
+                                                                    cut_segments[previously_done_segments]))
 
             for sub_track_i in range(len(media_container.subtitle_tracks)):
                 subtitle_out_stream = create_subtitle_output_stream(media_container, output_av_container, sub_track_i)

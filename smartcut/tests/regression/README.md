@@ -42,9 +42,8 @@ third-party content, so they are not committed.
 The audio columns are the first track's. Every other audio track gets the same checks (`track N:` in the notes
 gives its `A-V ms` and `aFadeErr`), and the output must have as many audio tracks as the source.
 
-The `W*` cases write `.webm` (AAC / HE-AAC audio re-encoded to Opus, Opus audio copied). A copied stream that
-starts mid-way ramps up while its decoder converges, so dips are ignored in the first 50 ms (AAC) or 80 ms (Opus,
-whose decoders need 80 ms of pre-roll).
+The `W*` cases write `.webm` (AAC / HE-AAC audio re-encoded to Opus, Opus audio copied with pre-roll). Dips in
+the first 50 ms are ignored: a copied AAC stream that starts mid-way ramps up over its first frame.
 
 Results are also written to `<out>/results.json`, and per-case time series to `<out>/<case>.npz`
 (`vt, v_alpha, v_ideal, at, a_gain, a_ideal`). Expected failures report XFAIL, or XPASS if they start working:

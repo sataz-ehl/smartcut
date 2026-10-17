@@ -96,9 +96,7 @@ OUTPUT_EXT = {case: ".webm" for case in CASES if case.startswith("W")}  # defaul
 MAX_FADE_ERR_SYNTH, MAX_FADE_ERR_REAL = 0.08, 0.15
 MAX_GAP_FRAMES, MAX_AV_MS = 1.5, 60
 MAX_STREAM_END_FRAMES = 0.5  # the video stream must end where its last frame does
-# A copied stream that starts mid-way ramps up while its decoder converges: ignore dips this close to the start.
-# Opus decoders need 80 ms (RFC 7845 pre-roll), AAC ~50 ms
-DIP_GRACE_S, DIP_GRACE_OPUS_S = 0.05, 0.08
+DIP_GRACE_S = 0.05  # the first AAC frames of a copied stream ramp up; ignore dips this close to the start
 
 
 def pin_to_one_core():
@@ -186,7 +184,7 @@ def rms_windows(x, rate, win):
     return np.sqrt((x[: k * n].reshape(k, n).astype(np.float64) ** 2).mean(axis=1))
 
 
-def measure_audio(o_track, s_track, o_offset, tone, segs, starts, lengths, v_duration, grace=DIP_GRACE_S):
+def measure_audio(o_track, s_track, o_offset, tone, segs, starts, lengths, v_duration):
     """One audio track vs the same source track: length vs the video, fade curve error, gain outside fades, dips."""
     (o_audio, o_rate, _), (s_audio, s_rate, s_astart) = o_track, s_track
     win = 0.01 if tone else 0.05
@@ -210,7 +208,7 @@ def measure_audio(o_track, s_track, o_offset, tone, segs, starts, lengths, v_dur
     r["a_flat_max_gain"] = float(np.nanmax(a_gain[flat])) if flat.any() else None
     if tone:
         dips = at[flat & (a_gain < 0.9)]
-        r["a_dips_at"] = [round(float(x), 2) for x in dips if x > grace][:10]
+        r["a_dips_at"] = [round(float(x), 2) for x in dips if x > DIP_GRACE_S][:10]
     return r, at, a_gain, a_ideal
 
 
@@ -266,7 +264,7 @@ def analyse(media, out_dir, case, src_name, segs, out_path):
     for t, (o_track, s_track) in enumerate(zip(o_audios, s_audios)):
         tone = src_name.startswith("synth_") and s_info["atracks"][t][1] != "HE-AAC"
         tr, at, a_gain, a_ideal = measure_audio(o_track, s_track, o_track[2] - t0, tone, segs, starts, lengths,
-                                                res["v_duration"], DIP_GRACE_OPUS_S if s_info["atracks"][t][0] == "opus" else DIP_GRACE_S)
+                                                res["v_duration"])
         res["tracks"].append(tr)
         if t == 0:
             res.update(tr)

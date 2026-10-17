@@ -115,6 +115,9 @@ smartcut.process_segments("in.mp4", "out.mp4", [
 - MP3 tracks are re-encoded as a whole whenever the output has a join or starts mid-stream: an MP3 frame can take
   bits from earlier frames (the bit reservoir), so copied MP3 had ~50 ms of silence after every join. They are
   re-encoded at 256 kbps or more: below that LAME scales the input down (0.95 up to 160 kbps).
+- Copied Opus that starts mid-stream includes the 80 ms of earlier packets that Opus decoders need as pre-roll, and
+  the stream's pre-skip is set to their length, so decoders discard them (`OpusPassthruAudioCutter`). Before, the
+  copy rose from ~40 % of the level over its first 80 ms. In MKV/WebM all streams then start ~75 ms later, in sync.
 - `.webm` outputs: WebM holds only Opus and Vorbis audio, so other tracks (e.g. AAC, HE-AAC) are always
   re-encoded to Opus as a whole track (48 kHz, at least 128 kbps), fades or not. Opus/Vorbis tracks are copied
   when there are no audio fades. Other containers are unchanged.
