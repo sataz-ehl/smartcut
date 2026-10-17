@@ -74,9 +74,31 @@ class _Cancelled(Exception):
     """Stops a re-encoded piece midway when the cancel object is set."""
 
 
+def _cra_leading_frames(media_container: MediaContainer, cut_segments: list[CutSegment]) -> list[int]:
+    """Per cut piece, the leading pictures VideoCutter re-encodes in a copied piece: the RASL/RADL frames of an HEVC
+    CRA GOP right after a jump (VideoCutter._should_hybrid_recode_cra, same bookkeeping). Counted from the DTS span
+    between the CRA and its first trailing picture."""
+    has_rasl = getattr(media_container, 'gop_has_rasl', [])
+    frame_pts = getattr(media_container, 'video_frame_times_pts', None)
+    tick = float(np.median(np.diff(frame_pts))) if any(has_rasl) and frame_pts is not None and len(frame_pts) > 1 else 0.0
+    if tick <= 0:  # tick: the DTS step of one frame
+        return [0] * len(cut_segments)
+    counts, last_copied_gop = [], None
+    for s in cut_segments:
+        n, g = 0, s.gop_index
+        if not s.require_recode:
+            jump = (last_copied_gop is None and g > 0) or (last_copied_gop is not None and g > last_copied_gop + 1)
+            leading_end = media_container.gop_leading_end_dts[g] if 0 <= g < len(has_rasl) and has_rasl[g] else None
+            if jump and leading_end is not None:
+                n = max(0, round((leading_end - media_container.gop_start_times_dts[g]) / tick) - 1)
+            last_copied_gop = g
+        counts.append(n)
+    return counts
+
+
 class _WorkProgress:
     def __init__(self, progress: WorkProgressCallback | None, cancel_object: CancelObject | None, media_container: MediaContainer,
-                 cut_segments: list[CutSegment], recode_audio: bool) -> None:
+                 cut_segments: list[CutSegment], recode_audio: bool, *, include_video: bool = True) -> None:
         self.progress = progress
         self.cancel_object = cancel_object
         self.frame_cost = 0.0
@@ -88,19 +110,22 @@ class _WorkProgress:
             family = 'av1' if 'av1' in name else name  # decoder names: h264, hevc, vp9, libdav1d, ...
             cost = _RECODE_COST_PER_MEGAPIXEL_FRAME.get(family, _RECODE_COST_PER_MEGAPIXEL_FRAME_OTHER)
             self.frame_cost = cost * (ctx.width or 0) * (ctx.height or 0) / 1e6
+        leading = _cra_leading_frames(media_container, cut_segments) if stream is not None and include_video else None
 
         media_start, media_end = media_container.start_time, media_container.start_time + media_container.duration
         self.video_total = 0.0  # re-encoded frames, counted as the encoder outputs them
         self.piece_weights = []  # everything else (copied frames, audio), counted when a piece is done
-        for s in cut_segments:
+        for i, s in enumerate(cut_segments):
             weight = 0.0
             if stream is not None and stream.time_base is not None and frame_pts is not None and len(frame_pts):
                 frames = int(np.searchsorted(frame_pts, float(s.end_time / stream.time_base))
                              - np.searchsorted(frame_pts, float(s.start_time / stream.time_base)))
-                if s.require_recode:
+                if s.require_recode and include_video:
                     self.video_total += frames * self.frame_cost
-                else:
+                else:  # copied; or no video in the output (e.g. .m4a), where pieces only cost their audio
                     weight += frames * _COPY_COST_PER_FRAME
+                if leading is not None:
+                    self.video_total += leading[i] * self.frame_cost
             if recode_audio:  # pieces at the file edges reach 10 s past it (make_adjusted_segment_times)
                 weight += max(0.0, float(min(s.end_time, media_end) - max(s.start_time, media_start))) * _AUDIO_RECODE_COST_PER_SECOND
             self.piece_weights.append(weight)
@@ -288,10 +313,7 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                           (seg.fade_info.audio_fadein_duration is not None or seg.fade_info.audio_fadeout_duration is not None)
                           for seg in cut_segments)
     work = None
-    if isinstance(progress, WorkProgressCallback) or cancel_object is not None:
-        recode_audio = has_audio_fades and audio_export_info is not None and len(media_container.audio_tracks) > 0
-        work = _WorkProgress(progress if isinstance(progress, WorkProgressCallback) else None, cancel_object,
-                             media_container, cut_segments, recode_audio)
+    recode_audio = has_audio_fades and audio_export_info is not None and len(media_container.audio_tracks) > 0
     previously_done_segments = 0
     for output_path_segment in output_files:
         if cancel_object is not None and cancel_object.cancelled:
@@ -302,6 +324,9 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             include_video = True
             if output_av_container.format.name in ['ogg', 'mp3', 'm4a', 'ipod', 'flac', 'wav']: #ipod is the real name for m4a, I guess
                 include_video = False
+            if work is None and (isinstance(progress, WorkProgressCallback) or cancel_object is not None):
+                work = _WorkProgress(progress if isinstance(progress, WorkProgressCallback) else None, cancel_object,
+                                     media_container, cut_segments, recode_audio, include_video=include_video)
 
                         # Preserve container attachments (e.g., MKV attachments) when supported by the output format
             container_name = (output_av_container.format.name or "").lower()
