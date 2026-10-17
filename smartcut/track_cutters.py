@@ -98,6 +98,9 @@ _AUDIO_ENCODER_FOR_DECODER = {
 }
 _LOSSLESS_AUDIO_PREFIXES = ('flac', 'alac', 'pcm_')
 _MIN_RECODE_AUDIO_BITRATE = 128_000  # HE-AAC sources (~64 kbps) become AAC-LC, which needs more bits
+# LAME's presets scale the input down below 256 kbps to leave headroom (0.95 up to 160 kbps, 0.97 at 192, 0.98 at
+# 224), and the ffmpeg CLI does the same: each re-encode would lower the level ~0.45 dB (fork addition)
+_MIN_RECODE_AUDIO_BITRATE_FOR = {'libmp3lame': 256_000}
 
 
 def _recode_audio_encoder_name(decoder_name: str, webm: bool = False) -> str:
@@ -151,7 +154,7 @@ def create_recode_audio_output_stream(
     out_stream.codec_context.layout = in_ctx.layout
     if not codec_name.startswith(_LOSSLESS_AUDIO_PREFIXES):
         source_bitrate = track.av_stream.bit_rate or in_ctx.bit_rate or 0
-        out_stream.codec_context.bit_rate = max(source_bitrate, _MIN_RECODE_AUDIO_BITRATE)
+        out_stream.codec_context.bit_rate = max(source_bitrate, _MIN_RECODE_AUDIO_BITRATE_FOR.get(codec_name, _MIN_RECODE_AUDIO_BITRATE))
     out_stream.time_base = Fraction(1, rate)
     out_stream.metadata.update(track.av_stream.metadata)
     out_stream.disposition = cast(Disposition, track.av_stream.disposition.value)
