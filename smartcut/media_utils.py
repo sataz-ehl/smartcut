@@ -154,25 +154,6 @@ def validate_video_container_compat(encoder_name: str, container_ext: str) -> li
 
     return errors
 
-def infer_audio_codec_warnings(container_ext: str, has_any_audio: bool, has_mix_track: bool) -> list[str]:
-    """Return informational warnings about implied audio codecs by container.
-
-    This does not block export and is intended for user visibility.
-    """
-    warnings: list[str] = []
-    ext = container_ext.lower().lstrip('.')
-
-    if not has_any_audio:
-        return warnings
-
-    if ext == 'mp3':
-        if has_mix_track:
-            warnings.append("Mixed audio will be re-encoded to MP3 format")
-    elif ext == 'ogg':
-        warnings.append("Audio will be encoded using Vorbis or Opus codec")
-
-    return warnings
-
 def validate_audio_track_limits_for_container(container_ext: str, total_audio_tracks: int) -> list[str]:
     """Validate total audio track count for a given container.
 
@@ -187,3 +168,119 @@ def validate_audio_track_limits_for_container(container_ext: str, total_audio_tr
     if ext in single_track_formats:
         errors.append(f"{ext.upper()} format can only have 1 audio track, but {total_audio_tracks} were selected")
     return errors
+
+
+def get_valid_audio_codecs_for_container(container_ext: str) -> list[AudioCodec]:
+    """Get list of valid audio codecs for a given container format.
+
+    Args:
+        container_ext: File extension (with or without dot)
+
+    Returns:
+        List of AudioCodec enum values compatible with the container
+    """
+    ext = container_ext.lower().lstrip('.')
+
+    # Audio-only containers have strict requirements
+    audio_only_map = {
+        'mp3': [AudioCodec.MP3],
+        'flac': [AudioCodec.FLAC],
+        'wav': [AudioCodec.PCM_S16LE, AudioCodec.PCM_F32LE],
+        'ogg': [AudioCodec.LIBOPUS, AudioCodec.LIBVORBIS],
+        'm4a': [AudioCodec.AAC],
+        'ipod': [AudioCodec.AAC],
+    }
+
+    if ext in audio_only_map:
+        return audio_only_map[ext]
+
+    # Video containers
+    video_container_map = {
+        'mp4': [AudioCodec.AAC, AudioCodec.MP3],
+        'mov': [AudioCodec.AAC, AudioCodec.MP3],
+        'mkv': [AudioCodec.AAC, AudioCodec.MP3, AudioCodec.LIBOPUS, AudioCodec.FLAC, AudioCodec.PCM_S16LE],
+        'webm': [AudioCodec.LIBOPUS, AudioCodec.LIBVORBIS],
+        'avi': [AudioCodec.MP3, AudioCodec.PCM_S16LE],
+    }
+
+    return video_container_map.get(ext, [AudioCodec.AAC, AudioCodec.MP3])
+
+
+def get_valid_video_codecs_for_container(container_ext: str) -> list[VideoCodec]:
+    """Get list of valid video codecs for a given container format.
+
+    Args:
+        container_ext: File extension (with or without dot)
+
+    Returns:
+        List of VideoCodec enum values compatible with the container
+    """
+    ext = container_ext.lower().lstrip('.')
+
+    container_map = {
+        'mp4': [VideoCodec.H264, VideoCodec.HEVC, VideoCodec.AV1],
+        'mov': [VideoCodec.H264, VideoCodec.HEVC],
+        'mkv': [VideoCodec.H264, VideoCodec.HEVC, VideoCodec.VP9, VideoCodec.AV1],
+        'webm': [VideoCodec.VP9, VideoCodec.AV1],
+        'avi': [VideoCodec.H264],
+    }
+
+    return container_map.get(ext, [VideoCodec.H264, VideoCodec.HEVC])
+
+
+def get_default_audio_codec_for_container(container_ext: str) -> AudioCodec:
+    """Get the recommended default audio codec for a container format.
+
+    Args:
+        container_ext: File extension (with or without dot)
+
+    Returns:
+        Default AudioCodec for the container
+    """
+    ext = container_ext.lower().lstrip('.')
+
+    # Audio-only containers have specific defaults
+    audio_only_defaults = {
+        'mp3': AudioCodec.MP3,
+        'flac': AudioCodec.FLAC,
+        'wav': AudioCodec.PCM_S16LE,
+        'ogg': AudioCodec.LIBOPUS,
+        'm4a': AudioCodec.AAC,
+        'ipod': AudioCodec.AAC,
+    }
+
+    if ext in audio_only_defaults:
+        return audio_only_defaults[ext]
+
+    # Video container defaults
+    video_defaults = {
+        'mp4': AudioCodec.AAC,
+        'mov': AudioCodec.AAC,
+        'mkv': AudioCodec.AAC,
+        'webm': AudioCodec.LIBOPUS,
+        'avi': AudioCodec.MP3,
+    }
+
+    return video_defaults.get(ext, AudioCodec.AAC)
+
+
+def get_default_video_codec_for_container(container_ext: str) -> VideoCodec:
+    """Get the recommended default video codec for a container format.
+
+    Args:
+        container_ext: File extension (with or without dot)
+
+    Returns:
+        Default VideoCodec for the container
+    """
+    ext = container_ext.lower().lstrip('.')
+
+    container_defaults = {
+        'mp4': VideoCodec.H264,
+        'mov': VideoCodec.H264,
+        'mkv': VideoCodec.H264,
+        'webm': VideoCodec.VP9,
+        'avi': VideoCodec.H264,
+    }
+
+    return container_defaults.get(ext, VideoCodec.H264)

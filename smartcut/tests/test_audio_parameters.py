@@ -14,8 +14,8 @@ import tempfile
 import av
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from tests.test_fade import generate_test_video
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (tests live in smartcut/tests/)
+from smartcut.tests.test_fade import generate_test_video
 
 
 def check_audio_parameters(video_path):

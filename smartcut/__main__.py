@@ -4,16 +4,11 @@ from fractions import Fraction
 
 from tqdm import tqdm
 
-from smartcut.cut_video import (
-    AudioExportInfo,
-    AudioExportSettings,
-    VideoExportMode,
-    VideoExportQuality,
-    VideoSettings,
-    smart_cut,
-)
 from smartcut.media_container import MediaContainer
-from smartcut.misc_data import FadeInfo, SegmentWithFade
+from smartcut.media_utils import VideoExportMode, VideoExportQuality
+from smartcut.misc_data import AudioExportInfo, AudioExportSettings, FadeInfo, SegmentWithFade
+from smartcut.smart_cut import __version__, smart_cut
+from smartcut.video_cutter import VideoSettings
 
 
 def time_to_fraction(time_str_elem: str) -> Fraction:
@@ -414,7 +409,7 @@ time formats:
     parser.add_argument('--log-level', choices=['warning', 'error', 'fatal'],
                        default='warning', metavar='LEVEL',
                        help="Set logging verbosity level (default: %(default)s)")
-    parser.add_argument('--version', action='version', version='Smartcut 1.5')
+    parser.add_argument('--version', action='version', version=f'Smartcut {__version__}')
 
     # Preprocess argv to handle negative numbers in -k/-c arguments
     processed_argv = preprocess_argv_for_negative_numbers(sys.argv[1:])
@@ -449,7 +444,7 @@ time formats:
     else:
         raise ValueError("You must specify either --keep or --cut.")
 
-    # Default audio settings: no mix, include all tracks with lossless passthru
+    # Default audio settings: include all tracks with lossless passthru
     audio_settings: list[AudioExportSettings | None] = [AudioExportSettings(codec='passthru')] * len(source.audio_tracks)
     export_info = AudioExportInfo(output_tracks=audio_settings)
 

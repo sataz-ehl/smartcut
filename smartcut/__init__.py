@@ -19,21 +19,15 @@ from fractions import Fraction
 from typing import Any, Callable, Optional, Union
 
 from .media_container import MediaContainer
-from .cut_video import (
-    smart_cut,
-    VideoSettings,
-    VideoExportMode,
-    VideoExportQuality,
-    CancelObject,
-)
+from .media_utils import VideoExportMode, VideoExportQuality
 from .misc_data import (
     FadeInfo,
     SegmentWithFade,
     AudioExportInfo,
     AudioExportSettings,
 )
-
-__version__ = "1.5.0"
+from .smart_cut import CancelObject, __version__, smart_cut
+from .video_cutter import VideoSettings
 __all__ = [
     # High-level API
     "process",
@@ -210,11 +204,7 @@ def process(
         segment_with_fade = segment.to_segment_with_fade()
 
         # Setup audio export (passthrough all tracks)
-        audio_export_info = AudioExportInfo(
-            mix_info=None,
-            mix_export_settings=None,
-            output_tracks=[AudioExportSettings('passthru')]
-        )
+        audio_export_info = AudioExportInfo(output_tracks=[AudioExportSettings('passthru')])
 
         # Setup video quality
         quality_map = {
@@ -350,11 +340,7 @@ def process_segments(
         segments_with_fade.sort(key=lambda seg: seg.start_time)
 
         # Setup audio export (passthrough all tracks)
-        audio_export_info = AudioExportInfo(
-            mix_info=None,
-            mix_export_settings=None,
-            output_tracks=[AudioExportSettings('passthru')]
-        )
+        audio_export_info = AudioExportInfo(output_tracks=[AudioExportSettings('passthru')])
 
         # Setup video quality
         quality_map = {

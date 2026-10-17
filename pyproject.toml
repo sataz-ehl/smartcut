@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smartcut"
-version = "1.5"
+version = "1.7"
 description = "CLI tool for efficient video cutting with minimal recoding"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -61,13 +61,14 @@ Changelog = "https://github.com/skeskinen/smartcut/blob/main/README.md#version-h
 smartcut = "smartcut.__main__:main"
 
 [tool.setuptools]
-packages = ["smartcut"]
+packages = ["smartcut", "smartcut.tests"]
 
 [tool.setuptools.package-data]
 smartcut = ["py.typed"]
 
 [tool.ruff]
 line-length = 300
+exclude = ["smartcut/parse_h265.py"]  # Experimental H.265 parser, not production code
 
 [tool.ruff.lint]
 # Select specific rules to check
@@ -106,6 +107,7 @@ indent-style = "space"
 
 [tool.pyright]
 include = ["smartcut", "tests"]
+exclude = ["smartcut/parse_h265.py"]  # Experimental H.265 parser, not production code
 venvPath = "."
 venv = "venv"
 reportUnusedVariable = "warning"

@@ -6,6 +6,15 @@
 
 [![PyPI - Version](https://img.shields.io/pypi/v/smartcut?logo=pypi&logoColor=white&label=PyPI)](https://pypi.org/project/smartcut) [![Discord](https://img.shields.io/discord/1257684604941504623?logo=discord&logoColor=blue&label=Join%20Discord)](https://discord.gg/uYGkyfzU4c)
 
+**UPDATE Feb 2026:**
+- **This repo is no longer being updated.**
+- The code is no longer integrated with SMC and maintaining a separate open source repo got too difficult.
+- New performance & correctness fixes are only in [SMC](https://smartmediacutter.com).
+- The SMC executable has the same CLI syntax, e.g. `.\smart-media-cutter.exe input.mp4 output.mp4 --keep 10,20`
+- I still read the repo issues, so feel free to open them.
+
+---
+
 This tool is an open-source CLI companion to [Smart Media Cutter](https://smartmediacutter.com).
 
 `smartcut` can cut video files in many different formats and codecs with only minimal recoding around the cutpoints (a.k.a. "smart cut").
@@ -238,6 +247,15 @@ Tests ran in 153.6s
 * [Machete](https://www.machetesoft.com/) Quick and light lossless video cutting tool. Not free, but has a 14-day trial version.
 
 ## Version History
+
+### 1.7
+* Set hev1 encoder tag for h265 in mp4 and mov. Improves compatibility in some cases.
+* Improved test suite to catch more encoding issues.
+
+### 1.6
+* Proper handling of HEVC CRA and RASL frames.
+* Other small compatibility changes.
+* Set encoded by program name to 'smartcut'.
 
 ### 1.5
 * Better handling of inputs where DTS is missing.

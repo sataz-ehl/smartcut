@@ -10,19 +10,20 @@ Tests:
 5. Using CutSegmentConfig objects
 6. Dict-based segment configuration
 
-Usage:
-    python tests/test_api.py
+Usage (from the repo root):
+    python smartcut/tests/test_api.py
 """
 
 import sys
 import os
 import tempfile
+from pathlib import Path
 
-# Add parent directory to path so we can import smartcut
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Make the repo root importable (tests live in smartcut/tests/)
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import smartcut
-from tests.generate_synthetic_video import generate_test_video
+from smartcut.tests.generate_synthetic_video import generate_test_video
 
 
 def test_video_only_fade():
