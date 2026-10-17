@@ -318,8 +318,8 @@ def main():
             print(f"{case:<16}{verdict:<9}{r['seconds']:>7.1f}  {r.get('error') or r.get('analysis_error') or 'returned False'}")
             continue
         verdict = "PASS" if not r["problems"] else "FAIL"
-        if expected_fail:
-            verdict = "XPASS"  # started working: update EXPECTED_FAILURES
+        if expected_fail:  # XPASS: started working, update EXPECTED_FAILURES
+            verdict = "XFAIL" if r["problems"] else "XPASS"
         failures += verdict == "FAIL"
         print(f"{case:<16}{verdict:<9}{r['seconds']:>7.1f}{r['v_duration']:>7.2f}/{r['expected_s']:<5.1f}{f(r['v_stream_s']):>7}"
               f"{r['v_frames']:>6}/{r['v_frames_expected']:<5}{f(r['v_max_gap_frames'], 1):>5}{r['v_identical_frames']:>5}"
