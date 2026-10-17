@@ -1,7 +1,7 @@
 import os
 from collections.abc import Callable
 from fractions import Fraction
-from typing import Protocol, TypeAlias
+from typing import Protocol, TypeAlias, runtime_checkable
 
 import av
 import numpy as np
@@ -35,6 +35,14 @@ class ProgressCallback(Protocol):
         ...
 
 
+@runtime_checkable
+class WorkProgressCallback(ProgressCallback, Protocol):
+    """A progress callback that also gets the share of the estimated work done (fork addition, see _WorkProgress)."""
+    def emit_fraction(self, fraction: float) -> None:
+        """Emit the share of the estimated work done, 0.0 to 1.0."""
+        ...
+
+
 class StreamGenerator(Protocol):
     """Protocol for stream generators that produce packets for output."""
     def segment(self, cut_segment: CutSegment) -> list[Packet]: ...
@@ -65,7 +73,7 @@ class _Cancelled(Exception):
 
 
 class _WorkProgress:
-    def __init__(self, progress: ProgressCallback, cancel_object: CancelObject | None, media_container: MediaContainer,
+    def __init__(self, progress: WorkProgressCallback, cancel_object: CancelObject | None, media_container: MediaContainer,
                  cut_segments: list[CutSegment], recode_audio: bool) -> None:
         self.progress = progress
         self.cancel_object = cancel_object
@@ -273,7 +281,7 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                           (seg.fade_info.audio_fadein_duration is not None or seg.fade_info.audio_fadeout_duration is not None)
                           for seg in cut_segments)
     work = None
-    if progress is not None and hasattr(progress, 'emit_fraction'):
+    if isinstance(progress, WorkProgressCallback):
         recode_audio = has_audio_fades and audio_export_info is not None and len(media_container.audio_tracks) > 0
         work = _WorkProgress(progress, cancel_object, media_container, cut_segments, recode_audio)
     previously_done_segments = 0
@@ -370,7 +378,7 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             if os.path.exists(last_file_path):
                 os.remove(last_file_path)
         elif work is not None and output_path_segment is output_files[-1]:
-            progress.emit_fraction(1.0)  # the frame estimate can be a few frames off
+            work.progress.emit_fraction(1.0)  # the frame estimate can be a few frames off
 
 
 # Re-export commonly used types for convenience
