@@ -313,6 +313,7 @@ def process_segments(
         traceback.print_exc()
         return False
 
+    validated = False
     try:
         segments_with_fade = []
         for seg in segments:
@@ -334,6 +335,7 @@ def process_segments(
 
         # Auto-sort segments by start time to ensure chronological order
         segments_with_fade.sort(key=lambda seg: seg.start_time)
+        validated = True
 
         cancel_object = _CallbackCancel(cancel_check) if cancel_check else None
         error = smart_cut(
@@ -354,10 +356,11 @@ def process_segments(
             return False  # smart_cut stopped early and removed the partial output
         return error is None
 
-    except ValueError:
-        # Re-raise validation errors (user input errors)
-        raise
     except Exception as e:
+        if isinstance(e, ValueError) and not validated:
+            # Re-raise validation errors (user input errors). Not ValueErrors from processing: FFmpeg's EINVAL
+            # (av.error.ValueError) and an unsupported VP9 profile are processing errors.
+            raise
         # Catch other exceptions and return False for user-friendly behavior
         print(f"Error processing video: {e}")
         traceback.print_exc()
