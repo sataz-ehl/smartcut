@@ -366,10 +366,21 @@ class VideoCutter:
         # Speed settings for the GOPs that get re-encoded (cut points, fades). The libvpx-vp9 and especially
         # libaom-av1 defaults are very slow: on one CPU core, AV1 smart cuts took ~16x longer than with
         # cpu-used=8, which costs ~1.7 dB PSNR on the re-encoded GOPs only (VP9 cpu-used=5: ~2x, ~0.7 dB).
+        # Lookahead of 10 frames instead of the defaults (x264 40, libvpx 25, libaom 19-35): re-encoded runs are
+        # short, and each frame in the lookahead holds several MB. One core, 1080p with fades: x264 peak
+        # +429 -> +239 MB, libaom +545 -> +331 MB and 209 -> 132 s, for 0.4-0.9 dB PSNR on the re-encoded frames
+        # (at 47-52 dB, same size). It also shortens the encoder flushes, where progress pauses. Not for libaom
+        # below 720p: there it was ~35% slower (360p: 14 -> 19 s), and the memory is small anyway.
+        ctx = self.in_stream.codec_context
+        hd = (ctx.width or 0) * (ctx.height or 0) >= 1280 * 720
         if self.codec_name == 'vp9':
-            self.encoding_options.update({'cpu-used': '5', 'row-mt': '1'})
+            self.encoding_options.update({'cpu-used': '5', 'row-mt': '1', 'lag-in-frames': '10'})
         elif self.codec_name == 'av1' and not any(x in codec_name for x in ('svt', 'rav1e')):  # libaom-av1 options
             self.encoding_options.update({'cpu-used': '8', 'row-mt': '1'})
+            if hd:
+                self.encoding_options['lag-in-frames'] = '10'
+        elif self.codec_name == 'h264':
+            self.encoding_options['rc-lookahead'] = '10'
         # encoding_options = {}
         if profile is not None:
             self.encoding_options['profile'] = profile

@@ -146,6 +146,7 @@ smartcut input.mp4 output.mp4 --keep 10:fadein,20:fadeout    # 1 second fades
 - Video: only the GOPs that overlap a fade are re-encoded (in addition to the partial GOPs at cut points); fade timing is frame-exact. Frames are faded directly in YUV (8/10/12-bit planar formats), with an RGB fallback for other pixel formats.
 - Audio: if any segment has an audio fade, each audio track is decoded and re-encoded as a whole with one continuous encoder (AAC sources become AAC-LC at the source bitrate, at least 128 kbps). Without audio fades the audio is copied. Mixing copied and re-encoded audio packets in one track causes clicks at the joins.
 - VP9 and AV1 re-encodes use faster encoder settings (`cpu-used` 5 / 8); on one CPU core VP9 takes ~1-2x and AV1 ~2.5-6x the H.264 time. 10/12-bit VP9 (profile 2/3) can't be re-encoded.
+- Re-encodes use a 10-frame encoder lookahead, which cuts peak memory at 1080p by about 40% (libaom only from 720p up).
 
 ### Audio Export
 
