@@ -15,6 +15,7 @@ from smartcut.track_cutters import (
     RecodeAudioCutter,
     SubtitleCutter,
     create_audio_output_stream,
+    create_recode_audio_output_stream,
     create_subtitle_output_stream,
 )
 from smartcut.video_cutter import (
@@ -231,19 +232,20 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                 for factory in external_generator_factories:
                     generators.append(factory(output_av_container))
 
-            # Check if any segment has audio fades - if so, we need to use RecodeAudioCutter
-            has_any_fades = any(seg.fade_info is not None and
-                               (seg.fade_info.audio_fadein_duration is not None or seg.fade_info.audio_fadeout_duration is not None)
-                               for seg in cut_segments if seg.fade_info is not None)
+            # Any audio fade: re-encode the whole audio track with one encoder (see RecodeAudioCutter).
+            # Without audio fades the audio is copied untouched.
+            has_audio_fades = any(seg.fade_info is not None and
+                                  (seg.fade_info.audio_fadein_duration is not None or seg.fade_info.audio_fadeout_duration is not None)
+                                  for seg in cut_segments)
 
             if audio_export_info is not None:
                 for track_i, track_export_settings in enumerate(audio_export_info.output_tracks):
                     if track_export_settings is not None and track_export_settings.codec == 'passthru':
-                        audio_out_stream = create_audio_output_stream(media_container, output_av_container, track_i)
-                        # Use RecodeAudioCutter if fades are present, otherwise use PassthruAudioCutter
-                        if has_any_fades:
+                        if has_audio_fades:
+                            audio_out_stream = create_recode_audio_output_stream(media_container, output_av_container, track_i)
                             generators.append(RecodeAudioCutter(media_container, audio_out_stream, track_i))
                         else:
+                            audio_out_stream = create_audio_output_stream(media_container, output_av_container, track_i)
                             generators.append(PassthruAudioCutter(media_container, audio_out_stream, track_i))
 
             for sub_track_i in range(len(media_container.subtitle_tracks)):
