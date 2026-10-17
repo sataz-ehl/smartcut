@@ -101,6 +101,9 @@ _MIN_RECODE_AUDIO_BITRATE = 128_000  # HE-AAC sources (~64 kbps) become AAC-LC, 
 # LAME's presets scale the input down below 256 kbps to leave headroom (0.95 up to 160 kbps, 0.97 at 192, 0.98 at
 # 224), and the ffmpeg CLI does the same: each re-encode would lower the level ~0.45 dB (fork addition)
 _MIN_RECODE_AUDIO_BITRATE_FOR = {'libmp3lame': 256_000}
+# Decoders whose copied packets break after a jump: an MP3 frame can take bits from earlier frames (the bit
+# reservoir), so after a join ~50 ms decode as silence. Such tracks are re-encoded when the output has a join.
+_JOIN_UNSAFE_AUDIO_DECODERS = ('mp3', 'mp3float')
 
 
 def _recode_audio_encoder_name(decoder_name: str, webm: bool = False) -> str:
@@ -123,10 +126,13 @@ def _is_webm(output_av_container: OutputContainer) -> bool:
     return (output_av_container.format.name or '') == 'webm'
 
 
-def audio_needs_recode(media_container: MediaContainer, output_av_container: OutputContainer, track_index: int) -> bool:
-    """True if the track can't be copied into this output: Opus/Vorbis-only WebM and another codec (fork addition)."""
+def audio_needs_recode(media_container: MediaContainer, output_av_container: OutputContainer, track_index: int,
+                       has_joins: bool = False) -> bool:
+    """True if the track can't be copied cleanly into this output (fork addition): Opus/Vorbis-only WebM and another
+    codec, or MP3 when the output joins pieces (or starts mid-stream)."""
     name = media_container.audio_tracks[track_index].av_stream.codec_context.name
-    return _is_webm(output_av_container) and name not in _WEBM_AUDIO_DECODERS
+    return ((_is_webm(output_av_container) and name not in _WEBM_AUDIO_DECODERS)
+            or (has_joins and name in _JOIN_UNSAFE_AUDIO_DECODERS))
 
 
 def create_recode_audio_output_stream(
@@ -175,7 +181,9 @@ class RecodeAudioCutter:
                                    cut segment to stderr
     """
 
-    PREROLL_PACKETS = 2  # after a jump, decode a couple of earlier packets so the kept samples decode cleanly
+    # After a jump, decode a few earlier packets so the kept samples decode cleanly: 4 cover the 80 ms Opus decoders
+    # need, and the earlier MP3 frames a frame takes bits from (with 2, a cut MP3 started with 13-25 ms of silence)
+    PREROLL_PACKETS = 4
 
     def __init__(self, media_container: MediaContainer, out_stream: AudioStream, track_index: int) -> None:
         self.track = media_container.audio_tracks[track_index]

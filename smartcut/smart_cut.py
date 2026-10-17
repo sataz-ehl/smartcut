@@ -333,10 +333,13 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             include_video = True
             if output_av_container.format.name in ['ogg', 'mp3', 'm4a', 'ipod', 'flac', 'wav']: #ipod is the real name for m4a, I guess
                 include_video = False
-            # Audio tracks re-encoded as a whole: every one with audio fades, and in WebM those it can't hold (Opus)
+            # Audio tracks re-encoded as a whole: every one with audio fades, in WebM those it can't hold (Opus), and
+            # MP3 when this file's audio jumps (several segments, or a start after the media start)
+            file_segments = [output_path_segment[1]] if segment_mode else adjusted_segment_times
+            has_joins = len(file_segments) > 1 or file_segments[0][0] > media_container.start_time
             recode_tracks = {i for i, t in enumerate(audio_export_info.output_tracks[:len(media_container.audio_tracks)])
                              if t is not None and t.codec == 'passthru'
-                             and (has_audio_fades or audio_needs_recode(media_container, output_av_container, i))
+                             and (has_audio_fades or audio_needs_recode(media_container, output_av_container, i, has_joins))
                              } if audio_export_info is not None else set()
             if work is None and (isinstance(progress, WorkProgressCallback) or cancel_object is not None):
                 work = _WorkProgress(progress if isinstance(progress, WorkProgressCallback) else None, cancel_object,

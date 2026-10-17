@@ -59,7 +59,7 @@ CASES = {
     "M3_heaac_2nd":     ("synth_2audio_heaac.mp4", [{"start": 2, "end": 8, "audio_fadein": 1.5},
                                                     {"start": 11, "end": 18, "fadein": 1, "fadeout": 1}]),
     "M4_mp3_fades":     ("synth_2audio_mp3.mp4", [{"start": 3, "end": 13, "fadein": 2, "fadeout": 2}]),
-    "X_mp3_copy":       ("synth_2audio_mp3.mp4", [{"start": 5, "end": 9}, {"start": 12, "end": 17}]),
+    "M5_mp3_cuts":      ("synth_2audio_mp3.mp4", [{"start": 5, "end": 9}, {"start": 12, "end": 17}]),
     # .webm outputs (OUTPUT_EXT): AAC / HE-AAC audio is re-encoded to Opus, Opus audio is copied
     "W1_webm_aac":         ("synth_vp9.mp4", [{"start": 5, "end": 9}, {"start": 12, "end": 17}]),
     "W2_webm_aac_fades":   ("synth_vp9.mp4", [{"start": 3, "end": 13, "fadein": 2, "fadeout": 2}]),
@@ -89,9 +89,7 @@ CASES = {
     "X_portrait":      ("synth_portrait.mp4", [{"start": 3, "end": 13, "fadein": 2, "fadeout": 2}]),
     "X_fb_sd_h264":    ("fb_sd_h264.mp4", [{"start": 2, "end": 8, "fadein": 1, "fadeout": 1}, {"start": 10, "end": 14}]),
 }
-# X_vp9_10bit: smartcut can't re-encode 10/12-bit VP9 (profile 2/3). X_mp3_copy: copied MP3 audio has ~50 ms of
-# silence after every join (and at the start): MP3 frames borrow bits from earlier frames (the bit reservoir)
-EXPECTED_FAILURES = {"X_vp9_10bit", "X_mp3_copy"}
+EXPECTED_FAILURES = {"X_vp9_10bit"}  # smartcut can't re-encode 10/12-bit VP9 (profile 2/3)
 OUTPUT_EXT = {case: ".webm" for case in CASES if case.startswith("W")}  # default .mp4
 
 # Verdict thresholds (correct outputs measured: fade errors <= 0.04, gaps <= 1.1 frames, |A-V| <= 20 ms)

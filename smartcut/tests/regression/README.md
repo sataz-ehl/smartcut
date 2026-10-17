@@ -48,8 +48,7 @@ whose decoders need 80 ms of pre-roll).
 
 Results are also written to `<out>/results.json`, and per-case time series to `<out>/<case>.npz`
 (`vt, v_alpha, v_ideal, at, a_gain, a_ideal`). Expected failures report XFAIL, or XPASS if they start working:
-`X_vp9_10bit` (smartcut can't re-encode 10/12-bit VP9) and `X_mp3_copy` (copied MP3 audio has ~50 ms of silence
-after every join: MP3 frames borrow bits from earlier frames).
+`X_vp9_10bit` (smartcut can't re-encode 10/12-bit VP9).
 
 Synthetic clips show a frame counter and timestamp, so stutter, repeated or skipped frames and the frames at a
 join are easy to check by eye too.
@@ -76,6 +75,7 @@ These need no test media and run like the other test scripts (`python smartcut/t
   fades, MP4 and MKV), counted as FFmpeg decodes them; inputs without audio.
 - `smartcut/tests/test_multitrack.py`: every audio track is kept (AAC + AC-3), copied or re-encoded with fades.
 - `smartcut/tests/test_webm.py`: `.webm` outputs (AAC re-encoded to Opus, Opus copied).
+- `smartcut/tests/test_audio_joins.py`: no gaps or ramps at joins and at the start of cut audio (MP3, Opus).
 
 ## Windows notes
 
