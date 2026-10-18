@@ -238,7 +238,7 @@ def _fade_yuv_frame(frame: VideoFrame, alpha: float) -> VideoFrame | None:
             src_px = np.minimum(src_px, max_value)  # guard the table lookup against out-of-range samples
         dst_px = np.zeros((dst.height, dst.line_size // dtype.itemsize), dtype)
         dst_px[:, :dst.width] = lut[src_px]
-        dst.update(dst_px)
+        dst.update(cast(bytes, dst_px))  # update() takes any buffer, e.g. an ndarray; PyAV's stub says bytes
 
     faded.pts = frame.pts
     if frame.time_base is not None:  # decoded frames often have none
@@ -641,9 +641,10 @@ class VideoCutter:
             decoder_priming_dts = self.media_container.gop_start_times_dts[s.gop_index - 1]
 
         for frame in self.fetch_frame(s.gop_start_dts, s.gop_end_dts, s.end_time, decoder_priming_dts):
-            assert frame.pts is not None, "Frame pts should not be None after decoding"
+            pts = frame.pts  # the faded frame below keeps it
+            assert pts is not None, "Frame pts should not be None after decoding"
             in_tb = frame.time_base if frame.time_base is not None else self.in_time_base
-            frame_abs_time = frame.pts * in_tb
+            frame_abs_time = pts * in_tb
 
             if frame_abs_time < s.start_time:
                 continue
@@ -659,7 +660,7 @@ class VideoCutter:
 
             out_tb = self.out_time_base if self.codec_name != 'mpeg2video' else self.enc_codec.time_base
 
-            frame.pts = int(frame.pts - s.start_time / in_tb)
+            frame.pts = int(pts - s.start_time / in_tb)
 
             frame.pts = int(frame.pts * in_tb / out_tb)
             frame.time_base = out_tb
