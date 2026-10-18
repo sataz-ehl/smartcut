@@ -111,10 +111,10 @@ def main():
     ap.add_argument("--calibrate", action="store_true", help="time every cut piece (see above)")
     ap.add_argument("--timeline", action="store_true", help="also print the progress at every 5%% of the time")
     args = ap.parse_args()
-    if args.one_core:
-        pin_to_one_core()
     sys.path.insert(0, args.repo)
     import smartcut
+    if args.one_core:
+        pin_to_one_core()
 
     stats = defaultdict(float)
     if args.calibrate:

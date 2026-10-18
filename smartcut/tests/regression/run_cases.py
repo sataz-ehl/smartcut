@@ -121,19 +121,76 @@ MAX_SYNC_MS = 1.5  # per segment; re-encoded joins measured <= 0.4 ms (Matroska 
 MAX_STREAM_END_FRAMES = 0.5  # the video stream must end where its last frame does
 
 
-def pin_to_one_core():
-    """Run on one CPU core. FFmpeg also sizes its codec thread pools from this, as on a 1-CPU server."""
-    if hasattr(os, "sched_setaffinity"):  # Linux
+_ONE_CORE_JOB = []  # keeps the Windows job object open
+
+
+def pin_to_one_core() -> None:
+    """Run on one CPU core, like the 1-CPU server. Call it after importing smartcut (see x265 below).
+
+    FFmpeg sizes its codec thread pools from the CPUs the process may use. x265 doesn't:
+    - On Windows it sets its pool threads' affinity to the whole NUMA node itself, which escaped
+      SetProcessAffinityMask (x265 re-encodes ran on 4.8 cores). A job object with an affinity limit holds every
+      thread of the process, and its child processes. x265 then logs "unable to set thread affinity for NUMA node
+      mask" for each pool thread it starts: expected.
+    - It sizes its thread pool and frame threads from all the machine's CPUs (Windows: 12 pool threads and 3 frame
+      threads on a 6-core / 12-thread desktop). x265_one_cpu() gives smartcut's x265 re-encodes what x265 picks on a
+      1-CPU machine.
+    x265 times on one Windows core vary by up to 2x from run to run (its 1-thread pool hands work between threads;
+    without a pool they vary by 1-2 %): compare HEVC speeds over several interleaved runs.
+    """
+    if hasattr(os, "sched_setaffinity"):  # Linux: threads created later inherit it
         os.sched_setaffinity(0, {sorted(os.sched_getaffinity(0))[0]})
     elif sys.platform == "win32":
         import ctypes
         from ctypes import wintypes
+
+        class JobLimits(ctypes.Structure):  # JOBOBJECT_BASIC_LIMIT_INFORMATION
+            _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                        ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                        ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                        ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD), ("SchedulingClass", wintypes.DWORD)]
+
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        # Without these types ctypes truncates the process pseudo-handle and the call fails silently
+        # Without these types ctypes truncates the handles and the calls fail silently
         kernel32.GetCurrentProcess.restype = wintypes.HANDLE
-        kernel32.SetProcessAffinityMask.argtypes = [wintypes.HANDLE, ctypes.c_size_t]
-        if not kernel32.SetProcessAffinityMask(kernel32.GetCurrentProcess(), 1):
-            raise OSError(ctypes.get_last_error(), "SetProcessAffinityMask failed")
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        job = kernel32.CreateJobObjectW(None, None)
+        limits = JobLimits(LimitFlags=0x10, Affinity=1)  # JOB_OBJECT_LIMIT_AFFINITY: the first CPU
+        if not (job and kernel32.SetInformationJobObject(job, 2, ctypes.byref(limits), ctypes.sizeof(limits))  # basic limits
+                and kernel32.AssignProcessToJobObject(job, kernel32.GetCurrentProcess())):
+            raise OSError(ctypes.get_last_error(), "pinning to one CPU through a job object failed")
+        _ONE_CORE_JOB.append(job)
+    x265_one_cpu()
+
+
+_X265_POOL_OPTIONS, _X265_FRAME_THREADS = ("pools", "numa-pools"), "frame-threads"
+_X265_ONE_CPU = set()  # the VideoCutter classes patched
+
+
+def x265_one_cpu() -> None:
+    """x265 re-encodes get the threads x265 picks by itself on a 1-CPU machine: a 1-thread pool and 1 frame
+    thread. Threads set explicitly (e.g. reused from the source's x265 options) are kept, as there."""
+    from smartcut import video_cutter  # noqa: PLC0415
+
+    cutter = video_cutter.VideoCutter
+    if cutter in _X265_ONE_CPU:
+        return
+    init = cutter.init_encoder
+
+    def init_encoder(self: video_cutter.VideoCutter) -> None:
+        init(self)
+        params = self.encoding_options.get("x265-params")
+        if params is not None:
+            names = {p.split("=", 1)[0].replace("_", "-") for p in params.split(":")}
+            extra = [] if names & set(_X265_POOL_OPTIONS) else ["pools=1"]
+            extra += [] if _X265_FRAME_THREADS in names else ["frame-threads=1"]
+            self.encoding_options["x265-params"] = ":".join([params, *extra])
+
+    cutter.init_encoder = init_encoder
+    _X265_ONE_CPU.add(cutter)
 
 
 def fades_of(seg):

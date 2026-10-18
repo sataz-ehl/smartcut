@@ -171,16 +171,16 @@ def main() -> None:
     ap.add_argument("--segments", help="a-b,c-d,... in seconds (default: 6 segments from 10 s to 103 s)")
     ap.add_argument("--ext", default=".mp4", help="output extension (default .mp4)")
     ap.add_argument("--repo", default=str(Path(__file__).resolve().parents[3]), help="smartcut repo root")
-    ap.add_argument("--one-core", action="store_true", help="pin to one CPU core")
+    ap.add_argument("--one-core", action="store_true", help="cut on one CPU core")
     ap.add_argument("--measure", type=Path, help="measure this existing output instead of cutting")
     args = ap.parse_args()
     segments = ([tuple(float(x) for x in s.split("-")) for s in args.segments.split(",")] if args.segments else SEGMENTS)
-    if args.one_core:
-        pin_to_one_core()
     out = args.measure
     if out is None:
         sys.path.insert(0, args.repo)
         import smartcut  # noqa: PLC0415
+        if args.one_core:
+            pin_to_one_core()
         args.out_dir.mkdir(parents=True, exist_ok=True)
         out = args.out_dir / f"join_sync{args.ext}"
         t = time.perf_counter()
