@@ -18,6 +18,12 @@ python smartcut/tests/regression/run_cases.py /tmp/sc_media /tmp/sc_out T2_both 
 python smartcut/tests/regression/run_cases.py --list
 ```
 
+`--one-core` (`run_cases.pin_to_one_core()`) also holds x265's threads, which set their own affinity: on Windows
+through a job object (x265 then logs "unable to set thread affinity for NUMA node mask", expected). x265 sizes its
+pool from all the machine's CPUs, so its re-encodes get a 1-CPU machine's threads (a 1-thread pool, 1 frame thread)
+unless their options set them. With that pool, HEVC times on one Windows core vary up to 2x from run to run:
+compare them over several interleaved runs.
+
 `make_test_media.py` also makes the HEVC clips (`synth_hevc*.mp4`; with `--real`, `real_hevc*.mp4`). For the
 HEVC calibration case `RE10_hevc_1080p` in `progress_timeline.py`, transcode a 1080p clip with `--real`'s HEVC settings.
 
@@ -67,9 +73,10 @@ join are easy to check by eye too.
 | `inspect_case.py <out dir> <case> [audio\|video\|gaps]` | Where a case deviates: time ranges with fade errors, or the frame timing gaps |
 | `match_frames.py <source> <output> <first> <last>` | Which source frame each output frame is: exact match = copied, otherwise nearest = re-encoded. Shows stray or missing frames at joins |
 | `psnr_frames.py <source> <output> <out first> <count> <src first> [<output> ...]` | PSNR of re-encoded frames vs their source frames, e.g. to compare encoder settings |
+| `psnr_reencoded.py <source> '<segments json>' <output> [<output> ...]` | PSNR of all of an edit's re-encoded frames against what the encoder was given (faded frames against the source faded by smartcut), copied frames checked bit-exact; several outputs compared frame by frame |
 | `exp_encoder.py <config.json> <media> <out> [cases] [--one-core]` | Run the cases with another encoder / encoder options for re-encoded GOPs, without changing smartcut |
 | `bench_audio.py <repo> <video> <out dir>` | Cost of re-encoding the whole audio track (audio fades) and of FFmpeg's AAC coders |
-| `progress_timeline.py <media> <out> [cases] [--one-core] [--timeline] [--calibrate]` | How steadily `progress_callback` moves: longest stretch without an update and the largest distance from an even pace. `--calibrate` measures the per-codec costs that `smart_cut.py`'s work estimate uses |
+| `progress_timeline.py <media> <out> [cases] [--one-core] [--timeline] [--calibrate]` | How steadily `progress_callback` moves: longest stretch without an update and the largest distance from an even pace. `--calibrate` measures the per-codec costs that `smart_cut.py`'s work estimate uses (per case and fitted over the cases). Besides run_cases' cases it has 1080p calibration cases and typical app edits (`P2*`, `P3*`: H.264 720p, 2 or 3 segments, without and with fades), run by name |
 | `audio_coder_ab.py <out dir> <video>` | Listening files, "what was lost" difference files and spectrograms for AAC default vs fast coder |
 
 ## Unit tests next to this folder

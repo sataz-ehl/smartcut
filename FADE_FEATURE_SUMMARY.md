@@ -252,17 +252,41 @@ smartcut.process_segments("in.mp4", "out.mp4", [
   That's 0.5-1.3 s more per edit, 0.017-0.032 s per second of kept audio. HE-AAC outputs grow by ~11 %: they become
   AAC-LC at 128 kbps.
 
-### VP9 / AV1
+### Re-encoded GOPs (VP9, AV1, HEVC)
 - Re-encoded GOPs use `cpu-used=5` (VP9) and `cpu-used=8` (libaom-av1), plus `row-mt`. On one CPU core this made
   AV1 smart cuts ~16x and VP9 ~2x faster, for ~1.7 dB / ~0.7 dB lower PSNR on the re-encoded GOPs only.
-- Re-encoded GOPs use a 10-frame encoder lookahead: x264 `rc-lookahead`, libvpx/libaom `lag-in-frames`; libaom only
-  from 720p up, since below that it was ~35% slower. The defaults hold 19-40 frames of several MB each. Full
-  re-encodes (`VideoExportMode.RECODE`) keep the encoders' default lookahead.
 - Full re-encodes use the same faster VP9/AV1 speed settings (`cpu-used` 5 / 8), on purpose: on a 1-CPU server AV1
   at the default speed is ~16x slower.
+- Re-encoded GOPs use a 10-frame encoder lookahead: x264 and x265 `rc-lookahead`, libvpx/libaom `lag-in-frames`;
+  libaom only from 720p up, since below that it was ~35% slower. The defaults hold 19-40 frames of several MB each.
+  Full re-encodes (`VideoExportMode.RECODE`) keep the encoders' default lookahead.
   - Peak memory on one core, 1080p with fades: x264 +429 → +239 MB, libaom +545 → +331 MB.
   - AV1 1080p also got faster: 209 → ~135 s.
   - Cost: 0.4-0.9 dB PSNR on the re-encoded frames only (at 47-52 dB).
+  - x265 (default 20): a source's own lookahead, reused with its x265 options, is kept when shorter. x265 refuses a
+    lookahead that isn't longer than its B-frame runs, so a source with 10 or more B-frames gets bframes + 1. One
+    core, 2 segments with fades, x265 defaults (camera-like sources):
+
+    | | Peak memory over the process | PSNR, re-encoded frames | Output |
+    |---|---|---|---|
+    | 1080p | +516 → +433 MB | 51.49 → 51.19 dB | 3.78 → 3.73 MB |
+    | 720p | +470 → +428 MB | 50.30 → 49.91 dB | 2.40 → 2.36 MB |
+    | 360p | +151 → +136 MB | 47.38 → 46.98 dB | 1.36 → 1.34 MB |
+
+    With the source's options (`-preset fast`, lookahead 15): 720p +448 → +428 MB, 1080p +464 → +426 MB, −0.61 /
+    −0.43 dB. No slower: without a thread pool x265 took 0.985-0.995x the cycles.
+- HEVC open GOPs: a copied GOP after a jump re-encodes its RASL leading pictures, decoding the GOP before it to
+  prime the decoder. Only the GOP's own frames are kept now: all the decoded frames were, a whole GOP (720p: 152
+  frames, 200 MB, for 4 leading frames), and that piece set the edit's peak. 720p, 2 segments with fades:
+  +470 → +297 MB, same output.
+- HEVC sources with x265's options in their headers: smartcut reuses them (they make the re-encoded GOPs match), but
+  not the threads of the machine that encoded the source (`frame-threads`, `numa-pools`, `lookahead-threads`):
+  from a 12-thread PC they gave a 1-CPU server a 12-thread pool and 3 frame threads. Without them, one core,
+  2 segments with fades: 1080p +590 → +426 MB, 720p +388 → +252 MB, same PSNR (±0.02 dB).
+- Measuring x265 on one core: x265 sets its pool threads' affinity itself and sizes its pool from all the machine's
+  CPUs. `run_cases.pin_to_one_core()` (the harness's `--one-core`) holds its threads on one core with a job object
+  on Windows and gives it a 1-CPU machine's threads. Before, "one-core" x265 times were on ~4.8 cores. With x265's
+  1-thread pool, times on one Windows core vary up to 2x from run to run (without a pool 1-2 %).
 - AV1 output streams keep the source's pixel format and colour signalling (10-bit sources stay 10-bit).
 - 10/12-bit VP9 (profile 2/3) can't be re-encoded and fails.
 
