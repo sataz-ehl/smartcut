@@ -232,10 +232,73 @@ _AUDIO_ENCODER_FOR_DECODER = {
     'vorbis': 'libvorbis',
 }
 _LOSSLESS_AUDIO_PREFIXES = ('flac', 'alac', 'pcm_')
-_MIN_RECODE_AUDIO_BITRATE = 128_000  # HE-AAC sources (~64 kbps) become AAC-LC, which needs more bits
+# Re-encoded audio bitrate (fork addition): the source's, at least a floor, within what the encoder accepts (see
+# _recode_audio_bitrate). The floor is per channel, counting mono as two: 128 kb/s mono and stereo, 384 kb/s 5.1. HE-AAC
+# sources (~48-64 kb/s stereo) become AAC-LC, which needs more bits. Mono at 64 kb/s fared worse: re-encoding a 64 kb/s
+# mono source at its own rate moved the level up to x1.20 in 5 ms windows of music (at 128 kb/s, x1.04).
+_RECODE_AUDIO_FLOOR_PER_CHANNEL = 64_000
 # LAME's presets scale the input down below 256 kbps to leave headroom (0.95 up to 160 kbps, 0.97 at 192, 0.98 at
-# 224), and the ffmpeg CLI does the same: each re-encode would lower the level ~0.45 dB (fork addition)
-_MIN_RECODE_AUDIO_BITRATE_FOR = {'libmp3lame': 256_000}
+# 224), and the ffmpeg CLI does the same: each re-encode would lower the level ~0.45 dB. Whatever the channels.
+_RECODE_AUDIO_FLOOR_FOR = {'libmp3lame': 256_000}
+# Highest rates the encoders don't enforce themselves: LAME takes any rate, MP3's highest is 320 kb/s
+_RECODE_AUDIO_MAX_FOR = {'libmp3lame': 320_000}
+
+
+def _source_audio_bitrate(track: AudioTrack) -> int:
+    """The source track's average bitrate (fork addition): as its stream reports it, else from its packets (total
+    size x 8 / the time they span; Matroska / WebM usually report none, e.g. for Opus). 0 for lossless codecs: their
+    rate says nothing about a lossy one (PCM into WebM asked libopus for 1536 kb/s, which it refuses)."""
+    ctx = track.av_stream.codec_context
+    if (ctx.name or '').startswith(_LOSSLESS_AUDIO_PREFIXES):
+        return 0
+    reported = track.av_stream.bit_rate or ctx.bit_rate
+    if reported:
+        return reported
+    timed = [(p.pts, p.duration or 0, p.size) for p in track.packets if p.pts is not None]
+    if not timed:
+        return 0
+    span = (max(pts + duration for pts, duration, _ in timed) - min(pts for pts, _, _ in timed)) * cast(Fraction, track.av_stream.time_base)
+    return round(sum(size for _, _, size in timed) * 8 / span) if span > 0 else 0
+
+
+def _accepted_audio_bitrate(codec_name: str, rate: int, layout: av.AudioLayout, wanted: int) -> int:
+    """The highest bitrate up to `wanted` the encoder opens with, as it reports it after opening (fork addition):
+    aac and ac3 lower a too-high rate themselves (aac: 6144 bits per channel per frame, ac3: 640 kb/s), libopus
+    (256 kb/s per channel) and libvorbis (~89-249 kb/s per channel, by sample rate) refuse it."""
+
+    def opened(bit_rate: int) -> int | None:
+        ctx = cast(av.AudioCodecContext, av.CodecContext.create(codec_name, 'w'))
+        ctx.sample_rate, ctx.layout, ctx.bit_rate = rate, layout, bit_rate
+        formats = av.Codec(codec_name, 'w').audio_formats
+        if formats:
+            ctx.format = formats[0].name
+        ctx.time_base = Fraction(1, rate)
+        try:
+            ctx.open()
+        except Exception:
+            return None
+        return ctx.bit_rate or bit_rate
+
+    got = opened(wanted)
+    if got is not None:
+        return got
+    low, high = 0, wanted  # high is refused; find the highest accepted, to 1 kb/s
+    while high - low > 1000:
+        mid = (low + high) // 2
+        if opened(mid) is None:
+            high = mid
+        else:
+            low = mid
+    return (opened(low) or low) if low else wanted
+
+
+def _recode_audio_bitrate(track: AudioTrack, codec_name: str, rate: int, layout: av.AudioLayout) -> int:
+    """Bitrate for re-encoding the track with this encoder (fork addition): the source's (_source_audio_bitrate), at
+    least _RECODE_AUDIO_FLOOR_FOR or the floor per channel (mono counted as two), at most what the encoder accepts."""
+    floor = _RECODE_AUDIO_FLOOR_FOR.get(codec_name, _RECODE_AUDIO_FLOOR_PER_CHANNEL * max(len(layout.channels), 2))
+    wanted = max(_source_audio_bitrate(track), floor)
+    wanted = min(wanted, _RECODE_AUDIO_MAX_FOR.get(codec_name, wanted))
+    return _accepted_audio_bitrate(codec_name, rate, layout, wanted)
 
 
 def _recode_audio_encoder_name(decoder_name: str, webm: bool = False) -> str:
@@ -310,8 +373,7 @@ def create_recode_audio_output_stream(
     out_stream = cast(AudioStream, output_av_container.add_stream(codec_name, rate=rate))
     out_stream.codec_context.layout = in_ctx.layout
     if not codec_name.startswith(_LOSSLESS_AUDIO_PREFIXES):
-        source_bitrate = track.av_stream.bit_rate or in_ctx.bit_rate or 0
-        out_stream.codec_context.bit_rate = max(source_bitrate, _MIN_RECODE_AUDIO_BITRATE_FOR.get(codec_name, _MIN_RECODE_AUDIO_BITRATE))
+        out_stream.codec_context.bit_rate = _recode_audio_bitrate(track, codec_name, rate, in_ctx.layout)
     out_stream.time_base = Fraction(1, rate)
     out_stream.metadata.update(track.av_stream.metadata)
     out_stream.disposition = cast(Disposition, track.av_stream.disposition.value)

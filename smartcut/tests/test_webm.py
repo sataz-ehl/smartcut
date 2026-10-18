@@ -110,7 +110,7 @@ def main() -> int:
     failed = total = 0
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
-        sources = {"aac": tmp / "vp9_aac.mp4", "libopus": tmp / "vp9_opus.webm"}
+        sources = {"aac": tmp / "vp9_aac.mp4", "libopus": tmp / "vp9_opus.webm", "pcm_s16le": tmp / "vp9_pcm.mkv"}
         for codec, path in sources.items():
             make_source(path, codec)
         make_source(tmp / "h264_aac.mp4", "aac", "libx264")
@@ -119,6 +119,7 @@ def main() -> int:
         failed += problem is not None
         print(f"✗ FAIL - H.264 video into .webm: {problem}" if problem else "✓ PASS - H.264 video into .webm: clear error")
         cases = [("AAC -> Opus, no fades", "aac", False, False, 1), ("AAC -> Opus, audio fades", "aac", True, False, 1),
+                 ("PCM (1536 kb/s) -> Opus at a lossy rate", "pcm_s16le", False, False, 1),
                  ("Opus copied from the start, no fades", "libopus", False, True, 0),
                  ("Opus re-encoded from mid-stream, no fades", "libopus", False, False, 1),
                  ("Opus re-encoded, audio fades", "libopus", True, False, 1)]
