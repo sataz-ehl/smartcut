@@ -378,12 +378,12 @@ class VideoCutter:
         # libaom-av1 defaults are very slow: on one CPU core, AV1 smart cuts took ~16x longer than with
         # cpu-used=8, which costs ~1.7 dB PSNR on the re-encoded GOPs only (VP9 cpu-used=5: ~2x, ~0.7 dB). Full
         # re-encodes (RECODE mode) use them too, on purpose.
-        # Lookahead of 10 frames instead of the defaults (x264 40, libvpx 25, libaom 19-35): re-encoded runs are
-        # short, and each frame in the lookahead holds several MB. One core, 1080p with fades: x264 peak
-        # +429 -> +239 MB, libaom +545 -> +331 MB and 209 -> 132 s, for 0.4-0.9 dB PSNR on the re-encoded frames
-        # (at 47-52 dB, same size). It also shortens the encoder flushes, where progress pauses. Not for libaom
-        # below 720p: there it was ~35% slower (360p: 14 -> 19 s), and the memory is small anyway. Not in RECODE mode
-        # either, which re-encodes the whole video in one long run.
+        # Lookahead of 10 frames instead of the defaults (x264 40, libvpx 25, libaom 19-35, x265 20: see the hevc
+        # options below): re-encoded runs are short, and each frame in the lookahead holds several MB. One core, 1080p
+        # with fades: x264 peak +429 -> +239 MB, libaom +545 -> +331 MB and 209 -> 132 s, for 0.4-0.9 dB PSNR on the
+        # re-encoded frames (at 47-52 dB, same size). It also shortens the encoder flushes, where progress pauses. Not
+        # for libaom below 720p: there it was ~35% slower (360p: 14 -> 19 s), and the memory is small anyway. Not in
+        # RECODE mode either, which re-encodes the whole video in one long run.
         ctx = self.in_stream.codec_context
         hd = (ctx.width or 0) * (ctx.height or 0) >= 1280 * 720
         short_runs = self.video_settings.mode == VideoExportMode.SMARTCUT
@@ -446,6 +446,20 @@ class VideoCutter:
             # Quiet by default, as the output stream's own x265-params (fork fix): sources without x265's options in their
             # headers (camera footage) printed x265's info log for every re-encoded run
             x265_params.append(f'log_level={self.log_level if self.log_level is not None else "error"}')
+
+            # Lookahead of at most 10 frames in smart cuts, as for the other encoders above (fork addition). x265's
+            # default is 20; a source's own, reused above, is kept when shorter (-preset fast: 15). x265 refuses a
+            # lookahead that isn't longer than its B-frame runs, so a source with 10 or more B-frames gets bframes + 1.
+            # One core, 2 segments with fades, x265 defaults: peak 1080p +516 -> +433 MB, 720p +470 -> +428 MB, 360p
+            # +151 -> +136 MB, for 0.3-0.6 dB PSNR on the re-encoded frames (at 47-51 dB; outputs 1-2 % smaller), and no
+            # slower.
+            if short_runs:
+                values = dict(p.split('=', 1) for p in x265_params if '=' in p)
+                try:
+                    lookahead = min(int(values.get('rc-lookahead', 20)), max(10, int(values.get('bframes', 4)) + 1))
+                    x265_params = [p for p in x265_params if not p.startswith('rc-lookahead=')] + [f'rc-lookahead={lookahead}']
+                except ValueError:  # not x265's own option format: its lookahead is left alone
+                    pass
 
             if self.video_settings.quality == VideoExportQuality.LOSSLESS:
                 x265_params.append('lossless=1')
