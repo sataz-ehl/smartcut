@@ -65,15 +65,17 @@ class CancelObject:
 # lookahead (libaom, libvpx, x264) take in their first frames instantly and finish the last ones in a flush.
 # The same per-frame hook stops a re-encoded piece midway when cancel_object is set, with or without progress.
 # Cost in seconds on one desktop core, measured with tests/regression/progress_timeline.py --one-core --calibrate
-# (Oct 2026; hevc is an estimate). Only the ratios matter.
+# (Oct 2026). Only the ratios matter.
 # - A re-encoded frame costs a fixed part plus a part per megapixel, fitted on real clips from 360x360 to 1080p
 #   (synthetic clips re-encode 2-3x cheaper). libvpx and libaom have a fixed part, so per megapixel alone
 #   underestimated small frames (360x360 VP9: 12 ms measured, 10 ms estimated) and overestimated 1080p (VP9 101 ms
 #   vs 155, AV1 265 ms vs 373). x264 has none measurable (and 0.047 per megapixel, the fit, made progress no more
-#   even than 0.04).
+#   even than 0.04). hevc: x265 with its default settings, as for camera footage (sources without x265's options in
+#   their headers; with them smartcut reuses the source's settings: x265 -preset fast cost 0.006 + 0.013 per
+#   megapixel), fitted on real clips at 360p, 720p and 1080p (9.4-46.7 ms per frame).
 # - A copied frame costs the whole loop: remuxing, audio passthrough and muxing (24-48 us measured; timing the
 #   video cutter alone gave 14-19 us).
-_RECODE_COST_PER_FRAME = {'h264': (0.0, 0.04), 'hevc': (0.0, 0.15), 'vp9': (0.009, 0.046), 'av1': (0.025, 0.117)}
+_RECODE_COST_PER_FRAME = {'h264': (0.0, 0.04), 'hevc': (0.005, 0.02), 'vp9': (0.009, 0.046), 'av1': (0.025, 0.117)}
 _RECODE_COST_PER_FRAME_OTHER = (0.005, 0.1)  # (seconds per frame, seconds per megapixel-frame)
 _COPY_COST_PER_FRAME = 0.000035
 _AUDIO_RECODE_COST_PER_SECOND = 0.027
