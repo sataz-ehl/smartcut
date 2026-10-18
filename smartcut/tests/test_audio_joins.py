@@ -6,6 +6,9 @@ decode cleanly after a jump:
   every join. MP3 tracks are now re-encoded as a whole when the output has a join.
 - Opus: decoders need 80 ms of pre-roll, so a copy that started mid-stream rose from ~40 % of the level over its
   first 80 ms. The copy now includes 80 ms of earlier packets, skipped through the stream's pre-skip.
+- AAC and AC-3 into MP4: frames overlap their neighbours, so a copy that started mid-stream began with ~20 ms at a low
+  level, and at the first whole frame after the cut, up to a frame after the video. The copy now includes the
+  frames before the cut, which the MP4 edit list skips: the audio starts exactly with the video.
 
 The level is measured in 10 ms windows against the source's steady level. Sources (H.264 video + a 440 Hz tone)
 are made with PyAV, no media needed.
@@ -49,13 +52,20 @@ def make_source(path: Path, video_codec: str, audio_codec: str, rate: int) -> No
         out.mux(audio.encode())
 
 
-def check(src: Path, out: Path, segments: list[dict], from_s: float) -> str | None:
-    """None if every 10 ms window from from_s to 50 ms before the end is at the source's level, else a message."""
+def check(src: Path, out: Path, segments: list[dict], from_s: float, aligned: bool) -> str | None:
+    """None if every 10 ms window from from_s to 50 ms before the end is at the source's level and (aligned) the
+    audio starts with the video (the cuts here are on the video's frame grid), else a message."""
     if not smartcut.process_segments(str(src), str(out), segments):
         return "process_segments failed"
     with av.open(str(out)) as c:
+        v0 = next(float(f.pts * f.time_base) for f in c.decode(video=0))
+    with av.open(str(out)) as c:
         rate = c.streams.audio[0].sample_rate
-        x = np.concatenate([f.to_ndarray().astype(np.float64).mean(axis=0) for f in c.decode(audio=0)])
+        frames = list(c.decode(audio=0))
+        a0 = float(frames[0].pts * frames[0].time_base)
+        x = np.concatenate([f.to_ndarray().astype(np.float64).mean(axis=0) for f in frames])
+    if aligned and abs(a0 - v0) > 0.001:
+        return f"audio starts at {a0:+.4f} s, video at {v0:+.4f} s"
     expected = sum(s["end"] - s["start"] for s in segments)
     if abs(len(x) / rate - expected) > 0.06:
         return f"{len(x) / rate:.3f} s of audio, expected {expected} s"
@@ -67,17 +77,19 @@ def check(src: Path, out: Path, segments: list[dict], from_s: float) -> str | No
 
 
 def main() -> int:
-    cases = [  # name, video encoder, audio encoder, rate, container, check from (s)
-        ("MP3 in MP4: start and join", "libx264", "libmp3lame", 44100, "mp4", 0.0),
-        ("Opus in WebM: start", "libvpx-vp9", "libopus", 48000, "webm", 0.0),
-        ("Opus in MP4: start", "libvpx-vp9", "libopus", 48000, "mp4", 0.0),
+    cases = [  # name, video encoder, audio encoder, rate, container, check from (s), audio starts with the video
+        ("MP3 in MP4: start and join", "libx264", "libmp3lame", 44100, "mp4", 0.0, True),
+        ("Opus in WebM: start", "libvpx-vp9", "libopus", 48000, "webm", 0.0, False),  # all streams shifted
+        ("Opus in MP4: start", "libvpx-vp9", "libopus", 48000, "mp4", 0.0, True),
+        ("AAC in MP4: start and join", "libx264", "aac", 44100, "mp4", 0.0, True),
+        ("AC-3 in MP4: start and join", "libx264", "ac3", 48000, "mp4", 0.0, True),
     ]
     failed = 0
     with tempfile.TemporaryDirectory() as d:
-        for i, (name, vcodec, acodec, rate, ext, from_s) in enumerate(cases):
+        for i, (name, vcodec, acodec, rate, ext, from_s, aligned) in enumerate(cases):
             src = Path(d) / f"src{i}.{ext}"
             make_source(src, vcodec, acodec, rate)
-            problem = check(src, Path(d) / f"out{i}.{ext}", SEGMENTS, from_s)
+            problem = check(src, Path(d) / f"out{i}.{ext}", SEGMENTS, from_s, aligned)
             if problem:
                 failed += 1
                 print(f"✗ FAIL - {name}: {problem}")

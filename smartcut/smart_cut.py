@@ -401,7 +401,8 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                         else:
                             audio_out_stream = create_audio_output_stream(media_container, output_av_container, track_i)
                             generators.append(passthru_audio_cutter(media_container, audio_out_stream, track_i,
-                                                                    cut_segments[previously_done_segments]))
+                                                                    cut_segments[previously_done_segments],
+                                                                    output_av_container))
 
             for sub_track_i in range(len(media_container.subtitle_tracks)):
                 subtitle_out_stream = create_subtitle_output_stream(media_container, output_av_container, sub_track_i)

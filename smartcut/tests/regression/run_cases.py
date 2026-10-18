@@ -96,7 +96,6 @@ OUTPUT_EXT = {case: ".webm" for case in CASES if case.startswith("W")}  # defaul
 MAX_FADE_ERR_SYNTH, MAX_FADE_ERR_REAL = 0.08, 0.15
 MAX_GAP_FRAMES, MAX_AV_MS = 1.5, 60
 MAX_STREAM_END_FRAMES = 0.5  # the video stream must end where its last frame does
-DIP_GRACE_S = 0.05  # the first AAC frames of a copied stream ramp up; ignore dips this close to the start
 
 
 def pin_to_one_core():
@@ -208,7 +207,7 @@ def measure_audio(o_track, s_track, o_offset, tone, segs, starts, lengths, v_dur
     r["a_flat_max_gain"] = float(np.nanmax(a_gain[flat])) if flat.any() else None
     if tone:
         dips = at[flat & (a_gain < 0.9)]
-        r["a_dips_at"] = [round(float(x), 2) for x in dips if x > DIP_GRACE_S][:10]
+        r["a_dips_at"] = [round(float(x), 2) for x in dips][:10]
     return r, at, a_gain, a_ideal
 
 

@@ -118,6 +118,12 @@ smartcut.process_segments("in.mp4", "out.mp4", [
 - Copied Opus that starts mid-stream includes the 80 ms of earlier packets that Opus decoders need as pre-roll, and
   the stream's pre-skip is set to their length, so decoders discard them (`OpusPassthruAudioCutter`). Before, the
   copy rose from ~40 % of the level over its first 80 ms. In MKV/WebM all streams then start ~75 ms later, in sync.
+- Copied AAC and AC-3 into MP4/MOV/M4A that starts mid-stream also includes the frames just before the cut
+  (`PrerollPassthruAudioCutter`), at times before the output start; the MP4 edit list skips them. Before, the
+  audio began at the first whole frame after the cut (up to a frame, 13-33 ms, after the video) and its first
+  ~20 ms were low (frames overlap). Matroska has no edit list, so copies into .mkv start as before. Joins are
+  unchanged: a copied AAC track still has a short level change at each join, and the joins shift A/V by up to
+  a frame (~20 ms) each, because whole frames are copied.
 - `.webm` outputs: WebM holds only Opus and Vorbis audio, so other tracks (e.g. AAC, HE-AAC) are always
   re-encoded to Opus as a whole track (48 kHz, at least 128 kbps), fades or not. Opus/Vorbis tracks are copied
   when there are no audio fades. Other containers are unchanged.
