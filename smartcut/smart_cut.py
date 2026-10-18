@@ -1,5 +1,5 @@
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import ExitStack
 from fractions import Fraction
 from typing import Protocol, TypeAlias, runtime_checkable
@@ -238,7 +238,7 @@ def make_cut_segments(media_container: MediaContainer,
     return cut_segments
 
 
-def expand_segments_with_fades(segments_with_fade: list[SegmentWithFade]) -> tuple[list[tuple[Fraction, Fraction]], list[FadeInfo | None]]:
+def expand_segments_with_fades(segments: Sequence[tuple[Fraction, Fraction] | SegmentWithFade]) -> tuple[list[tuple[Fraction, Fraction]], list[FadeInfo | None]]:
     """
     Expand segments with fade information into basic segments and their corresponding fade info.
 
@@ -246,17 +246,21 @@ def expand_segments_with_fades(segments_with_fade: list[SegmentWithFade]) -> tup
     at the CutSegment level. It just prepares the data structure.
 
     Args:
-        segments_with_fade: List of segments with fade information
+        segments: Segments with fade information, or (start, end) tuples (the legacy format, no fades)
 
     Returns:
         Tuple of (basic_segments, fade_infos) where fade_infos[i] corresponds to basic_segments[i]
     """
     basic_segments = []
-    fade_infos = []
+    fade_infos: list[FadeInfo | None] = []
 
-    for seg in segments_with_fade:
-        basic_segments.append((seg.start_time, seg.end_time))
-        fade_infos.append(seg.fade_info)
+    for seg in segments:
+        if isinstance(seg, SegmentWithFade):
+            basic_segments.append((seg.start_time, seg.end_time))
+            fade_infos.append(seg.fade_info)
+        else:
+            basic_segments.append(seg)
+            fade_infos.append(None)
 
     return basic_segments, fade_infos
 
@@ -270,12 +274,7 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
     _check_webm_video(media_container, out_path, video_settings)
 
     # Handle both legacy tuple format and new SegmentWithFade format
-    if positive_segments and isinstance(positive_segments[0], SegmentWithFade):
-        basic_segments, fade_infos = expand_segments_with_fades(positive_segments)
-    else:
-        # Legacy format - no fades
-        basic_segments = positive_segments
-        fade_infos = [None] * len(positive_segments)
+    basic_segments, fade_infos = expand_segments_with_fades(positive_segments)
 
     adjusted_segment_times = make_adjusted_segment_times(basic_segments, media_container)
     cut_segments = make_cut_segments(media_container, adjusted_segment_times, video_settings.mode == VideoExportMode.KEYFRAMES)
@@ -295,11 +294,10 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
         if fade_info is None:
             continue
 
-        has_video_fadein = fade_info.video_fadein_duration is not None and fade_info.video_fadein_duration > 0
-        has_video_fadeout = fade_info.video_fadeout_duration is not None and fade_info.video_fadeout_duration > 0
-        has_audio_fadein = fade_info.audio_fadein_duration is not None and fade_info.audio_fadein_duration > 0
-        has_audio_fadeout = fade_info.audio_fadeout_duration is not None and fade_info.audio_fadeout_duration > 0
-        if not (has_video_fadein or has_video_fadeout or has_audio_fadein or has_audio_fadeout):
+        video_fadein = fade_info.video_fadein_duration or 0
+        video_fadeout = fade_info.video_fadeout_duration or 0
+        if not (video_fadein > 0 or video_fadeout > 0 or (fade_info.audio_fadein_duration or 0) > 0
+                or (fade_info.audio_fadeout_duration or 0) > 0):
             continue
 
         # Fade bounds in the same timeline as the cut segments and frame times, i.e. including the
@@ -312,8 +310,8 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
         cut_seg.orig_segment_end = orig_seg_end
 
         overlaps_video_fade = (
-            (has_video_fadein and cut_seg.start_time < orig_seg_start + fade_info.video_fadein_duration)
-            or (has_video_fadeout and cut_seg.end_time > orig_seg_end - fade_info.video_fadeout_duration)
+            (video_fadein > 0 and cut_seg.start_time < orig_seg_start + video_fadein)
+            or (video_fadeout > 0 and cut_seg.end_time > orig_seg_end - video_fadeout)
         )
         # Never turn re-encoding off: partial GOPs at cut points must be re-encoded for a frame-accurate cut
         cut_seg.require_recode = cut_seg.require_recode or overlaps_video_fade
