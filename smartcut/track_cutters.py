@@ -135,19 +135,25 @@ def _preroll_start(track: AudioTrack, start: int, preroll: Fraction) -> tuple[in
 
 class PrerollPassthruAudioCutter(PassthruAudioCutter):
     """
-    Copies a track, with the packets just before a mid-stream start, which decoders run and discard (fork addition).
+    Copies a track into an MP4-family output, timed exactly to the cut by the MP4 edit list (fork addition).
 
-    A copy that started mid-stream was decoded from a cold decoder: its first frames came out low (AAC frames overlap
-    their neighbours, as in AAC and AC-3; Opus decoders need 80 ms of pre-roll). The earlier packets covering `preroll` are copied too,
-    with timestamps before the start of the output. MP4 writes an edit list that skips them, so the audio also
-    starts exactly at the cut point instead of at the first whole packet after it.
+    Start: a copy that started mid-stream was decoded from a cold decoder: its first frames came out low (AAC frames
+    overlap their neighbours, as in AAC and AC-3; Opus decoders need 80 ms of pre-roll). The earlier packets covering
+    `preroll` are copied too, with timestamps before the start of the output. MP4 writes an edit list that skips them,
+    so the audio also starts exactly at the cut point instead of at the first whole packet after it.
+
+    End: the last packet kept runs up to a frame past the end of the output (8 ms in one AAC-LC cut, 28 ms in an
+    HE-AAC one). It is held back until finish(), which shortens its duration to end at the output's end, so the track
+    and its edit list end there, as FFmpeg's own encoders' last packets do. Players that honour the edit list's end
+    stop the audio exactly there; FFmpeg ignores it and decodes the whole last frame (re-encoded tracks likewise).
     """
 
     def __init__(self, media_container: MediaContainer, out_stream: AudioStream, track_index: int,
-                 first_segment: CutSegment, preroll: Fraction) -> None:
+                 first_segment: CutSegment, preroll: Fraction = Fraction(0)) -> None:
         super().__init__(media_container, out_stream, track_index)
         self.preroll: list[Packet] = []
         self.preroll_length = Fraction(0)
+        self.held: Packet | None = None  # the last packet so far, see finish()
         start = _first_copied_packet(self.track, first_segment.start_time)
         if start == 0 or preroll <= 0:  # starts with the stream: nothing to run before it
             return
@@ -155,7 +161,7 @@ class PrerollPassthruAudioCutter(PassthruAudioCutter):
         self.preroll = [p for p in self.track.packets[first:start] if p.pts is not None and p.dts is not None]
 
     def segment(self, cut_segment: CutSegment) -> list[Packet]:
-        packets = []
+        packets = [] if self.held is None else [self.held]
         in_tb = cast(Fraction, self.track.av_stream.time_base)
         for p in self.preroll:  # first piece only: the pre-roll packets, timed like segment() times the others
             assert p.pts is not None and p.dts is not None  # filtered in __init__
@@ -166,7 +172,18 @@ class PrerollPassthruAudioCutter(PassthruAudioCutter):
             self.prev_pts, self.prev_dts = packet.pts, packet.dts
             packets.append(packet)
         self.preroll = []
-        return packets + super().segment(cut_segment)
+        packets += super().segment(cut_segment)
+        self.held = packets.pop() if packets else None
+        return packets
+
+    def finish(self) -> list[Packet]:
+        packet, self.held = self.held, None
+        if packet is None or packet.pts is None:
+            return [] if packet is None else [packet]
+        end = round(self.segment_start_in_output / cast(Fraction, self.track.av_stream.time_base))  # end of the output
+        if packet.duration and packet.pts + packet.duration > end:
+            packet.duration = max(1, end - packet.pts)
+        return [packet]
 
 
 class OpusPassthruAudioCutter(PrerollPassthruAudioCutter):
@@ -195,15 +212,16 @@ class OpusPassthruAudioCutter(PrerollPassthruAudioCutter):
 
 def passthru_audio_cutter(media_container: MediaContainer, out_stream: AudioStream, track_index: int,
                           first_segment: CutSegment, output_av_container: OutputContainer | None = None) -> PassthruAudioCutter:
-    """The cutter that copies this track (fork addition): in MP4-family outputs Opus, AAC and AC-3 get pre-roll
-    packets (see PrerollPassthruAudioCutter); they only matter when the output starts mid-stream."""
+    """The cutter that copies this track (fork addition). MP4-family outputs get PrerollPassthruAudioCutter: its end
+    follows the cut, and Opus, AAC and AC-3 get pre-roll packets when the output starts mid-stream."""
     track = media_container.audio_tracks[track_index]
-    preroll = _copy_preroll(track, (output_av_container.format.name or '') if output_av_container is not None else '')
-    if preroll is None:
+    format_name = (output_av_container.format.name or '') if output_av_container is not None else ''
+    if format_name not in EDIT_LIST_FORMATS:
         return PassthruAudioCutter(media_container, out_stream, track_index)
-    if track.av_stream.codec_context.name in _OPUS_DECODERS:
+    preroll = _copy_preroll(track, format_name)
+    if preroll is not None and track.av_stream.codec_context.name in _OPUS_DECODERS:
         return OpusPassthruAudioCutter(media_container, out_stream, track_index, first_segment)
-    return PrerollPassthruAudioCutter(media_container, out_stream, track_index, first_segment, preroll)
+    return PrerollPassthruAudioCutter(media_container, out_stream, track_index, first_segment, preroll or Fraction(0))
 
 
 # Encoder to use when re-encoding audio, keyed by FFmpeg decoder name (some decoders and encoders differ)
