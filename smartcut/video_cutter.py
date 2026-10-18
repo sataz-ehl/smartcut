@@ -209,6 +209,9 @@ _PLANAR_YUV_BITS = {
 }
 _AVCOL_RANGE_JPEG = 2  # full-range ("PC") YUV
 
+# x265 options in a source's headers that describe the machine that encoded it, not the stream (see init_encoder)
+_X265_MACHINE_OPTIONS = frozenset({'frame-threads', 'numa-pools', 'pools', 'lookahead-threads'})
+
 
 def _fade_yuv_frame(frame: VideoFrame, alpha: float) -> VideoFrame | None:
     """
@@ -433,6 +436,11 @@ class VideoCutter:
                         x265_params[i] = o + '=1'
             except Exception:
                 pass
+
+            # The source's threading options are its encoding machine's, not this one's (fork fix): from a 12-thread
+            # PC, frame-threads=3 numa-pools=12 gave a 1-CPU server a 12-thread pool and 3 frame threads. x265 sizes
+            # them for the machine it runs on.
+            x265_params = [p for p in x265_params if p.split('=', 1)[0] not in _X265_MACHINE_OPTIONS]
 
             # Repeat headers. This should be the same as `global_headers = False`,
             # but for some reason setting this explicitly is necessary with x265.
