@@ -10,6 +10,8 @@ Each case runs smartcut.process_segments() and measures the output against its s
   - video fade curve: brightness relative to the matching source frame, vs the ideal linear ramp
   - audio fade curve: RMS relative to the matching source audio, vs the ideal ramp
   - audio dips (clicks / gaps) in parts that should be untouched (synthetic tone sources only)
+  - A/V sync per segment (real audio only): the audio's offset from where its video says it belongs, by
+    cross-correlation with the source (join_sync.py measures more at each join)
   - A/V length drift and processing time
 and gets a PASS/FAIL verdict from thresholds that correct outputs meet. Time series are saved per case as .npz
 and all numbers as results.json, so two runs (e.g. before/after a change) can be compared.
@@ -29,9 +31,15 @@ from pathlib import Path
 import av
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import join_sync
+
 SYNTH = "synth_h264.mp4"
 REAL = "real_h264.mp4"
 TWO_SEGMENTS_REAL = [{"start": 20, "end": 35, "fadein": 2, "fadeout": 2}, {"start": 60, "end": 75}]
+# Six segments, five joins (join_sync.SEGMENTS): copied audio drifted at every join
+SIX_SEGMENTS = [{"start": a, "end": b} for a, b in ((10.3, 16.9), (25.05, 31.6), (40.77, 46.2), (58.4, 64.95),
+                                                    (77.1, 83.3), (96.6, 103.15))]
 CASES = {
     # H.264 synthetic (2 s GOPs): cuts, every fade kind, segment at 0, unsorted input
     "T1_nofade":   (SYNTH, [{"start": 5, "end": 9}, {"start": 12, "end": 17}]),
@@ -88,13 +96,28 @@ CASES = {
     "X_h264_60fps":    ("synth_h264_60fps.mp4", [{"start": 3, "end": 9, "fadein": 1, "fadeout": 1}, {"start": 12, "end": 17}]),
     "X_portrait":      ("synth_portrait.mp4", [{"start": 3, "end": 13, "fadein": 2, "fadeout": 2}]),
     "X_fb_sd_h264":    ("fb_sd_h264.mp4", [{"start": 2, "end": 8, "fadein": 1, "fadeout": 1}, {"start": 10, "end": 14}]),
+    # Many joins, no fades (audio re-encoded with 3 ms fades at the joins), and starts mid-stream into Matroska
+    "J1_real_6seg":    ("real_h264_720p.mp4", SIX_SEGMENTS),
+    "J2_fb_6seg":      ("fb_sd_h264.mp4", SIX_SEGMENTS),
+    "J3_mkv_start":    ("real_h264_720p.mp4", [{"start": 30.3, "end": 40}]),
+    "J4_mkv_heaac":    ("fb_sd_h264.mp4", [{"start": 30.3, "end": 40}, {"start": 50, "end": 55}]),
+    "J5_mp4_start":    ("fb_sd_h264.mp4", [{"start": 30.3, "end": 40}]),  # copied: pre-roll and edit list
+    # HEVC (x265: open GOPs with CRA keyframes and RASL leading pictures; and closed GOPs)
+    "E1_hevc_cuts":    ("synth_hevc.mp4", [{"start": 5, "end": 9}, {"start": 12, "end": 17}]),
+    "E2_hevc_fades":   ("synth_hevc.mp4", [{"start": 3, "end": 13, "fadein": 2, "fadeout": 2}]),
+    "E3_hevc_short":   ("synth_hevc.mp4", [{"start": 1, "end": 2}]),
+    "E4_hevc_closed":  ("synth_hevc_closed.mp4", [{"start": 3, "end": 9, "fadein": 1, "fadeout": 1}, {"start": 12, "end": 17}]),
+    "E5_hevc_real":    ("real_hevc.mp4", TWO_SEGMENTS_REAL),
+    "E6_hevc_720p":    ("real_hevc_720p.mp4", TWO_SEGMENTS_REAL),
 }
 EXPECTED_FAILURES = {"X_vp9_10bit"}  # smartcut can't re-encode 10/12-bit VP9 (profile 2/3)
 OUTPUT_EXT = {case: ".webm" for case in CASES if case.startswith("W")}  # default .mp4
+OUTPUT_EXT.update({"J3_mkv_start": ".mkv", "J4_mkv_heaac": ".mkv"})
 
 # Verdict thresholds (correct outputs measured: fade errors <= 0.04, gaps <= 1.1 frames, |A-V| <= 20 ms)
 MAX_FADE_ERR_SYNTH, MAX_FADE_ERR_REAL = 0.08, 0.15
 MAX_GAP_FRAMES, MAX_AV_MS = 1.5, 60
+MAX_SYNC_MS = 1.5  # per segment; re-encoded joins measured <= 0.4 ms (Matroska timestamps are rounded to 1 ms)
 MAX_STREAM_END_FRAMES = 0.5  # the video stream must end where its last frame does
 
 
@@ -199,9 +222,17 @@ def measure_audio(o_track, s_track, o_offset, tone, segs, starts, lengths, v_dur
             a_gain[m] = np.where(s_rms[idx] > 1e-3, o_rms[m] / s_rms[idx], np.nan)
         a_ideal[m] = ideal_gain(u, lengths[k], ai, ao)
     a_err, afade = np.abs(a_gain - a_ideal), a_ideal < 0.999
-    flat = ~afade & np.isfinite(a_gain)
+    # Windows touching the 3 ms fades at joins (re-encoded audio) are neither: join_sync.py measures the joins
+    near_join = np.zeros(len(at), bool)
+    for k in range(1, len(segs)):
+        if segs[k]["start"] != segs[k - 1]["end"]:
+            near_join |= np.abs(at - starts[k]) < win / 2 + join_sync.JOIN_FADE
+    afade &= ~near_join
+    flat = ~afade & ~near_join & np.isfinite(a_gain)
     r = {"a_duration": len(o_audio) / o_rate if o_rate else 0}
-    r["av_diff_ms"] = (r["a_duration"] - v_duration) * 1000
+    # Where the decoded audio ends against the end of the last picture (both from the first frame). Not the lengths:
+    # in Matroska the encoder priming decodes before the first frame, at negative times.
+    r["av_diff_ms"] = (o_offset + r["a_duration"] - v_duration) * 1000
     r["a_fade_max_err"] = float(np.nanmax(a_err[afade])) if afade.any() and np.isfinite(a_err[afade]).any() else None
     r["a_flat_min_gain"] = float(np.nanmin(a_gain[flat])) if flat.any() else None
     r["a_flat_max_gain"] = float(np.nanmax(a_gain[flat])) if flat.any() else None
@@ -278,6 +309,26 @@ def analyse(media, out_dir, case, src_name, segs, out_path):
 
     tone = src_name.startswith("synth_") and "heaac" not in src_name
     max_err = MAX_FADE_ERR_SYNTH if tone else MAX_FADE_ERR_REAL
+
+    # A/V sync per segment (real audio, first track): the output audio around the middle of each segment's video
+    # against the source. Not for tones (ambiguous) or resampled audio (Opus in WebM from 44.1 kHz).
+    res["sync_ms"] = None
+    if o_audios and s_audios and not tone and o_audios[0][1] == s_audios[0][1]:
+        (ox, rate, oa0), (sx, _, sa0) = o_audios[0], s_audios[0]
+        n, worst = 0, 0.0
+        for s in segs:
+            kept = s_vt[(s_vt >= st + s["start"] - 1e-9) & (s_vt < st + s["end"] - 1e-9)]
+            if not len(kept) or n >= len(o_vt):
+                break
+            S, V = float(kept[0]), float(o_vt[n])  # the segment's first frame, in the source and in the output
+            n += len(kept)
+            u = max(0.0, (float(kept[-1]) - S - join_sync.WIN) / 2)
+            lag, _ = join_sync.find(sx.astype(np.float64), sa0, rate, ox.astype(np.float64), oa0, V + u, S + u)
+            if np.isfinite(lag):
+                worst = max(worst, abs(lag))
+        res["sync_ms"] = worst * 1000
+        if res["sync_ms"] > MAX_SYNC_MS:
+            problems.append("A/V sync")
     if res["v_frames"] != res["v_frames_expected"]:
         problems.append("frame count")
     if res["v_stream_s"] is not None and abs(res["v_stream_s"] - res["v_duration"]) * fps > MAX_STREAM_END_FRAMES:
@@ -353,7 +404,7 @@ def main():
         return "-" if x is None else (f"{x:.{nd}f}" if isinstance(x, float) else str(x))
 
     print(f"\n{'case':<20}{'verdict':<9}{'sec':>7}{'dur/exp':>13}{'stream':>7}{'frames/exp':>12}{'gap':>5}{'same':>5}{'A-V ms':>8}"
-          f"{'vFadeErr':>9}{'aFadeErr':>9}{'aFlat min/max':>15}  notes")
+          f"{'sync ms':>8}{'vFadeErr':>9}{'aFadeErr':>9}{'aFlat min/max':>15}  notes")
     failures = 0
     for case, r in results.items():
         if "skipped" in r:
@@ -371,7 +422,7 @@ def main():
         failures += verdict == "FAIL"
         print(f"{case:<20}{verdict:<9}{r['seconds']:>7.1f}{r['v_duration']:>7.2f}/{r['expected_s']:<5.1f}{f(r['v_stream_s']):>7}"
               f"{r['v_frames']:>6}/{r['v_frames_expected']:<5}{f(r['v_max_gap_frames'], 1):>5}{r['v_identical_frames']:>5}"
-              f"{r['av_diff_ms']:>8.0f}{f(r['v_fade_max_err']):>9}{f(r['a_fade_max_err']):>9}"
+              f"{r['av_diff_ms']:>8.0f}{f(r.get('sync_ms'), 1):>8}{f(r['v_fade_max_err']):>9}{f(r['a_fade_max_err']):>9}"
               f"{f(r['a_flat_min_gain']):>8}/{f(r['a_flat_max_gain'])}  {', '.join(r['problems'] + [f'dips {d}' for d in r.get('a_dips_at', [])][:1] + other_tracks(r))}")
     return 1 if failures else 0
 

@@ -25,11 +25,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run_cases import CASES, TWO_SEGMENTS_REAL, pin_to_one_core  # noqa: E402
 
 # More resolutions for --calibrate (run by name; not in run_cases.py, they're slow). real_*_1080p.mp4: any 1080p
-# H.264 clip and its VP9/AV1 transcodes (make_test_media.py's --real settings without the scaling)
+# H.264 clip and its VP9/AV1/HEVC transcodes (make_test_media.py's --real settings without the scaling)
 CALIBRATION_CASES = {
     "RH10_h264_1080p": ("real_h264_1080p.mp4", TWO_SEGMENTS_REAL),
     "RV10_vp9_1080p":  ("real_vp9_1080p.mp4", TWO_SEGMENTS_REAL),
     "RA10_av1_1080p":  ("real_av1_1080p.mp4", TWO_SEGMENTS_REAL),
+    "RE10_hevc_1080p": ("real_hevc_1080p.mp4", TWO_SEGMENTS_REAL),
 }
 
 

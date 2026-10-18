@@ -13,6 +13,8 @@ keyframe interval) are always generated:
     synth_av1.mp4             AV1 Main 8-bit (SVT-AV1)
     synth_vp9_10bit.mp4       VP9 profile 2, 10-bit (smartcut can't re-encode this: expected failure)
     synth_av1_10bit.mp4       AV1 Main 10-bit
+    synth_hevc.mp4            HEVC Main 8-bit (x265 defaults: open GOPs, so CRA keyframes with RASL leading pictures)
+    synth_hevc_closed.mp4     HEVC Main 8-bit, closed GOPs (IDR keyframes)
     synth_h264_baseline.mp4   H.264 Constrained Baseline (like YouTube format 18)
     synth_h264_60fps.mp4      60 fps, 2 s GOPs
     synth_portrait.mp4        720x1280
@@ -22,8 +24,9 @@ keyframe interval) are always generated:
 
 --real CLIP.mp4 (any H.264 + AAC clip, e.g. a downloaded music video) additionally derives:
 
-    real_h264.mp4 (copy), real_vp9.mp4, real_av1.mp4 (5 s-ish GOPs, like YouTube),
-    real_h264_720p.mp4, real_vp9_720p.mp4, real_av1_720p.mp4 (upscaled, for speed comparisons)
+    real_h264.mp4 (copy), real_vp9.mp4, real_av1.mp4, real_hevc.mp4 (5 s-ish GOPs, like YouTube),
+    real_h264_720p.mp4, real_vp9_720p.mp4, real_av1_720p.mp4, real_hevc_720p.mp4 (upscaled, for speed comparisons)
+    The HEVC ones carry no x265 options, like camera footage (see below).
 
 Not generated (FFmpeg can't encode HE-AAC, and real-world encoders matter): synth_heaac.mp4 / real_fb_vp9.mp4 /
 fb_sd_h264.mp4. To make synth_heaac.mp4, mux any HE-AAC track (e.g. Facebook audio) with synth_h264.mp4's video:
@@ -96,6 +99,7 @@ def main():
     ff = args.ffmpeg
     vp9 = ["-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "32", "-g", "60", "-keyint_min", "60", "-cpu-used", "4", "-row-mt", "1"]
     av1 = ["-c:v", "libsvtav1", "-crf", "35", "-preset", "8", "-g", "60"]
+    hevc = ["-c:v", "libx265", "-preset", "fast", "-crf", "28", "-x265-params", "keyint=60:min-keyint=60:scenecut=0:log-level=error"]
 
     ok = {
         "synth_h264.mp4": counter_clip(ff, out, "synth_h264.mp4", (640, 360), 30, 60, 48),
@@ -111,6 +115,9 @@ def main():
                                          "synth_vp9_opus.webm"], out)
     ok["synth_av1.mp4"] = transcode(ff, out, "synth_h264.mp4", "synth_av1.mp4", av1)
     ok["synth_av1_10bit.mp4"] = transcode(ff, out, "synth_h264.mp4", "synth_av1_10bit.mp4", [*av1, "-pix_fmt", "yuv420p10le"])
+    ok["synth_hevc.mp4"] = transcode(ff, out, "synth_h264.mp4", "synth_hevc.mp4", hevc)
+    ok["synth_hevc_closed.mp4"] = transcode(ff, out, "synth_h264.mp4", "synth_hevc_closed.mp4",
+                                            [*hevc[:-1], hevc[-1] + ":open-gop=0"])
     ok["synth_2audio.mp4"] = add_audio_track(ff, out, "synth_h264.mp4", "synth_2audio.mp4", ["-c:a:1", "ac3", "-b:a:1", "192k"])
     ok["synth_2audio_mp3.mp4"] = add_audio_track(ff, out, "synth_h264.mp4", "synth_2audio_mp3.mp4",
                                                  ["-c:a:1", "libmp3lame", "-b:a:1", "128k"])
@@ -121,9 +128,13 @@ def main():
         up = ["-vf", "scale=1280:720"]
         rvp9 = ["-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "33", "-g", "150", "-cpu-used", "4", "-row-mt", "1"]
         rav1 = ["-c:v", "libsvtav1", "-crf", "35", "-preset", "8", "-g", "150"]
-        for name, vargs in (("real_vp9.mp4", rvp9), ("real_av1.mp4", rav1),
+        # No x265 info SEI, like camera footage: smartcut then re-encodes with x265's defaults (with it, it reuses
+        # the source's x265 options, as for synth_hevc.mp4)
+        rhevc = ["-c:v", "libx265", "-preset", "fast", "-crf", "26", "-x265-params", "keyint=150:info=0:log-level=error"]
+        for name, vargs in (("real_vp9.mp4", rvp9), ("real_av1.mp4", rav1), ("real_hevc.mp4", rhevc),
                             ("real_h264_720p.mp4", [*up, "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-g", "150"]),
-                            ("real_vp9_720p.mp4", [*up, *rvp9]), ("real_av1_720p.mp4", [*up, *rav1])):
+                            ("real_vp9_720p.mp4", [*up, *rvp9]), ("real_av1_720p.mp4", [*up, *rav1]),
+                            ("real_hevc_720p.mp4", [*up, *rhevc])):
             ok[name] = transcode(ff, out, "real_h264.mp4", name, vargs)
 
     for name, good in ok.items():
