@@ -13,6 +13,7 @@ from smartcut.media_container import MediaContainer
 from smartcut.media_utils import VideoExportMode
 from smartcut.misc_data import AudioExportInfo, CutSegment, FadeInfo, SegmentWithFade
 from smartcut.track_cutters import (
+    EDIT_LIST_FORMATS,
     RecodeAudioCutter,
     SubtitleCutter,
     audio_needs_recode,
@@ -441,6 +442,14 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             for sub_track_i in range(len(media_container.subtitle_tracks)):
                 subtitle_out_stream = create_subtitle_output_stream(media_container, output_av_container, sub_track_i)
                 generators.append(SubtitleCutter(media_container, subtitle_out_stream, sub_track_i))
+
+            # MP4 writes the edit lists that place the first video frame and end the audio in the movie timescale:
+            # FFmpeg's default of 1000 rounds them down to the ms, so the video started up to 1 ms early (fork fix)
+            if format_name in EDIT_LIST_FORMATS:
+                timescale = next((s.time_base.denominator for s in output_av_container.streams.video if s.time_base),
+                                 next((s.sample_rate for s in output_av_container.streams.audio if s.sample_rate), None))
+                if timescale:
+                    output_av_container.options['movie_timescale'] = str(timescale)
 
             output_av_container.start_encoding()
             if progress is not None:
