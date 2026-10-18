@@ -395,6 +395,10 @@ class RecodeAudioCutter:
 
             if self.buf.shape[1] == 0 and not pending:
                 self.buf_start = buf_end = frame_start  # first frame after a restart (may precede the requested start)
+            elif abs(frame_start - buf_end) <= self.rate * time_base:
+                # Contiguous: timestamps rounded to the time base (1 ms in Matroska: AAC frames of 21.33 ms came at
+                # 0, 21, 43 ms, ..., and the 16-32 sample "gaps" and "overlaps" clicked, fork fix)
+                pass
             elif frame_start > buf_end:  # gap in the source audio: keep timing with silence
                 samples = np.concatenate([np.zeros((self.channels, frame_start - buf_end), np.float32), samples], axis=1)
             elif frame_start < buf_end:  # overlap (timestamp rounding): skip what we already have
