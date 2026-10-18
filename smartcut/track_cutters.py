@@ -90,6 +90,7 @@ class PassthruAudioCutter:
 
 
 _OPUS_DECODERS = ('opus', 'libopus')
+_OPUS_ENCODERS = ('libopus', 'opus')
 _OPUS_PREROLL = Fraction(80, 1000)  # RFC 7845: decode at least 80 ms before the first sample that is used
 # Codecs whose frames overlap their neighbours (MDCT), so a copy needs the frame before its first one
 _OVERLAP_DECODERS = ('aac', 'aac_fixed', 'ac3', 'ac3_fixed', 'eac3')
@@ -312,6 +313,10 @@ class RecodeAudioCutter:
     its first, unless the user's audio fade on that side is longer: a hard cut between unrelated audio clicks. Not at
     the very start or end of the output, and not between segments that are contiguous in the source.
 
+    An output that starts mid-stream gets a lead-in in MP4-family outputs (fork addition, see LEAD_IN). Matroska /
+    WebM have no edit list to skip it, and Opus none that all players use (see _lead_in): there the encoder starts
+    cold, at the cut.
+
     Environment Variables:
         SMARTCUT_DEBUG_AUDIO_FADE: Set to '1' to print the gain range and peak reduction of each faded
                                    cut segment to stderr
@@ -323,8 +328,14 @@ class RecodeAudioCutter:
     # On a steady tone the largest sample step at a hard-cut join was 5-11x the tone's own largest step; with 3 ms
     # ramps on both sides, 1.0x (as at a copied join: 1.3-1.4x)
     JOIN_FADE = Fraction(3, 1000)
+    # Source audio before a mid-stream start, fed to the encoder at negative timestamps in MP4-family outputs, whose
+    # edit list skips it (as the copy's pre-roll packets): the encoder then starts with the signal already running.
+    # From a cold start a 440 Hz tone came out x1.23 too loud in the first 10 ms (encoder onset); with it, x1.00.
+    LEAD_IN = Fraction(80, 1000)
 
-    def __init__(self, media_container: MediaContainer, out_stream: AudioStream, track_index: int) -> None:
+    def __init__(self, media_container: MediaContainer, out_stream: AudioStream, track_index: int,
+                 output_av_container: OutputContainer | None = None) -> None:
+        """output_av_container: the output, for its format: MP4-family outputs get the lead-in (see LEAD_IN)."""
         self.track = media_container.audio_tracks[track_index]
         self.out_stream = out_stream
         self.encoder = out_stream.codec_context
@@ -345,9 +356,15 @@ class RecodeAudioCutter:
         self.buf_start = 0
         self.next_packet: int | None = None  # None: the decoder must be (re)started before decoding
         self.resampler: av.AudioResampler | None = None
+        # Until the first piece: whether it gets the lead-in (Opus: no, see _lead_in)
+        self.lead_in = (output_av_container is not None and (output_av_container.format.name or '') in EDIT_LIST_FORMATS
+                        and self.encoder.name not in _OPUS_ENCODERS)
 
     def segment(self, cut_segment: CutSegment) -> list[Packet]:
         packets: list[Packet] = []
+        if self.lead_in:
+            self.lead_in = False
+            packets.extend(self._lead_in(cut_segment))
 
         # Keep the audio locked to the video timeline: pad with silence where the source had no audio,
         # drop samples if rounding put us ahead.
@@ -371,6 +388,21 @@ class RecodeAudioCutter:
     def finish(self) -> list[Packet]:
         """Flush the encoder at the end of all segments."""
         return self._mux_ready(self.encoder.encode(None))
+
+    def _lead_in(self, first_piece: CutSegment) -> list[Packet]:
+        """Encode the LEAD_IN of source audio before the first piece, at negative timestamps, if the output starts
+        mid-stream (fork addition). It gets the first piece's gain: silence before a fade-in.
+
+        Not for Opus: its pre-skip in the stream header, which players may use instead of the edit list, is written
+        by the encoder before any audio comes in and would not cover the lead-in."""
+        if _first_copied_packet(self.track, first_piece.start_time) == 0:
+            return []  # starts with the source's audio: the encoder starts as the source's did
+        start = round(first_piece.start_time * self.rate)
+        n = round(self.LEAD_IN * self.rate)
+        chunk = self._take(start - n, start)
+        if not chunk.shape[1]:
+            return []
+        return self._encode(self._apply_fade(chunk, start - chunk.shape[1], first_piece), pts=-chunk.shape[1])
 
     def _fade_durations(self, cut_segment: CutSegment) -> tuple[Fraction, Fraction]:
         """Fade-in and fade-out of the segment this piece belongs to: the user's audio fades, and at least JOIN_FADE
@@ -476,14 +508,18 @@ class RecodeAudioCutter:
                 buf_end += samples.shape[1]
         return buf_end
 
-    def _encode(self, samples: np.ndarray) -> list[Packet]:
+    def _encode(self, samples: np.ndarray, pts: int | None = None) -> list[Packet]:
+        """Encode samples at the end of the output so far, or (pts) before its start: the lead-in."""
         if samples.shape[1] == 0:
             return []
         frame = av.AudioFrame.from_ndarray(np.ascontiguousarray(samples, np.float32), format='fltp', layout=self.layout_name)
         frame.sample_rate = self.rate
         frame.time_base = Fraction(1, self.rate)
-        frame.pts = self.samples_out
-        self.samples_out += samples.shape[1]
+        if pts is None:
+            frame.pts = self.samples_out
+            self.samples_out += samples.shape[1]
+        else:
+            frame.pts = pts
         return self._mux_ready(self.encoder.encode(frame))
 
     def _mux_ready(self, packets: list[Packet]) -> list[Packet]:

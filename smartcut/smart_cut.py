@@ -431,7 +431,7 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                     if track_export_settings is not None and track_export_settings.codec == 'passthru':
                         if track_i in recode_tracks:
                             audio_out_stream = create_recode_audio_output_stream(media_container, output_av_container, track_i)
-                            generators.append(RecodeAudioCutter(media_container, audio_out_stream, track_i))
+                            generators.append(RecodeAudioCutter(media_container, audio_out_stream, track_i, output_av_container))
                         else:
                             audio_out_stream = create_audio_output_stream(media_container, output_av_container, track_i)
                             generators.append(passthru_audio_cutter(media_container, audio_out_stream, track_i,
