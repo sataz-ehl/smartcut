@@ -106,8 +106,8 @@ def _cra_leading_frames(media_container: MediaContainer, cut_segments: list[CutS
 
 class _WorkProgress:
     def __init__(self, progress: WorkProgressCallback | None, cancel_object: CancelObject | None, media_container: MediaContainer,
-                 cut_segments: list[CutSegment], recode_audio: int, *, include_video: bool = True) -> None:
-        """recode_audio: the number of audio tracks re-encoded as a whole (audio fades)."""
+                 cut_segments: list[CutSegment], recode_audio: list[int], *, include_video: bool = True) -> None:
+        """recode_audio: per cut piece, the number of audio tracks its output file re-encodes as a whole."""
         self.progress = progress
         self.cancel_object = cancel_object
         self.frame_cost = 0.0
@@ -135,9 +135,9 @@ class _WorkProgress:
                     weight += frames * _COPY_COST_PER_FRAME
                 if leading is not None:
                     self.video_total += leading[i] * self.frame_cost
-            if recode_audio:  # pieces at the file edges reach 10 s past it (make_adjusted_segment_times)
+            if recode_audio[i]:  # pieces at the file edges reach 10 s past it (make_adjusted_segment_times)
                 weight += (max(0.0, float(min(s.end_time, media_end) - max(s.start_time, media_start)))
-                           * _AUDIO_RECODE_COST_PER_SECOND * recode_audio)
+                           * _AUDIO_RECODE_COST_PER_SECOND * recode_audio[i])
             self.piece_weights.append(weight)
         self.total = (self.video_total + sum(self.piece_weights)) or 1.0
         self.video_done = 0.0
@@ -283,31 +283,35 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
     # Video: GOPs that overlap a video fade region are re-encoded in addition to the partial GOPs at cut
     # points that make_cut_segments already marked; GOPs between the fades stay passthrough (fast).
     # Audio: every GOP of a segment with fades carries fade_info for the audio cutter.
+    # Every piece gets its segment's bounds: fades, and the short audio fades at joins, are timed from them.
+    piece_segment = []  # per cut piece, the index of its segment
     segment_idx = 0
     for cut_seg in cut_segments:
         # Find which original segment this cut_segment belongs to
         while segment_idx < len(adjusted_segment_times) and cut_seg.start_time >= adjusted_segment_times[segment_idx][1]:
             segment_idx += 1
+        piece_segment.append(segment_idx)
 
-        fade_info = fade_infos[segment_idx] if segment_idx < len(fade_infos) else None
         cut_seg.fade_info = None
-        if fade_info is None:
+        if segment_idx >= len(basic_segments):
             continue
-
-        video_fadein = fade_info.video_fadein_duration or 0
-        video_fadeout = fade_info.video_fadeout_duration or 0
-        if not (video_fadein > 0 or video_fadeout > 0 or (fade_info.audio_fadein_duration or 0) > 0
-                or (fade_info.audio_fadeout_duration or 0) > 0):
-            continue
-
         # Fade bounds in the same timeline as the cut segments and frame times, i.e. including the
         # container start_time. Use the requested times rather than adjusted_segment_times, which become
         # -10 / duration + 10 at the file edges and would break fades there.
         orig_seg_start = basic_segments[segment_idx][0] + media_container.start_time
         orig_seg_end = basic_segments[segment_idx][1] + media_container.start_time
-        cut_seg.fade_info = fade_info
         cut_seg.orig_segment_start = orig_seg_start
         cut_seg.orig_segment_end = orig_seg_end
+
+        fade_info = fade_infos[segment_idx]
+        if fade_info is None:
+            continue
+        video_fadein = fade_info.video_fadein_duration or 0
+        video_fadeout = fade_info.video_fadeout_duration or 0
+        if not (video_fadein > 0 or video_fadeout > 0 or (fade_info.audio_fadein_duration or 0) > 0
+                or (fade_info.audio_fadeout_duration or 0) > 0):
+            continue
+        cut_seg.fade_info = fade_info
 
         overlaps_video_fade = (
             (video_fadein > 0 and cut_seg.start_time < orig_seg_start + video_fadein)
@@ -337,12 +341,42 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
 
     else:
         output_files = [(out_path, adjusted_segment_times[-1])]
-    has_audio_fades = any(seg.fade_info is not None and
-                          (seg.fade_info.audio_fadein_duration is not None or seg.fade_info.audio_fadeout_duration is not None)
-                          for seg in cut_segments)
+
+    # The cut pieces of each output file, and its joins (fork addition): consecutive pieces that aren't contiguous in
+    # the source. The pieces of one segment are, and so are segments that touch.
+    file_pieces: list[range] = []
+    file_has_joins: list[bool] = []
+    for _, (_, file_end) in output_files:
+        first = last = file_pieces[-1].stop if file_pieces else 0
+        while last < len(cut_segments) and cut_segments[last].start_time < file_end:
+            last += 1
+        file_pieces.append(range(first, last))
+        starts_at_join, ends_at_join = set(), set()  # segment indices
+        for i in range(first + 1, last):
+            if cut_segments[i].start_time != cut_segments[i - 1].end_time:
+                starts_at_join.add(piece_segment[i])
+                ends_at_join.add(piece_segment[i - 1])
+        for i in range(first, last):
+            cut_segments[i].join_before = piece_segment[i] in starts_at_join
+            cut_segments[i].join_after = piece_segment[i] in ends_at_join
+        file_has_joins.append(bool(starts_at_join))
+
+    def recode_tracks_of(file_index: int, format_name: str) -> set[int]:
+        """The audio tracks of output file file_index that are re-encoded as a whole (see RecodeAudioCutter): every one
+        if its pieces have audio fades, else those a copy wouldn't be exact for (fork addition)."""
+        pieces = [cut_segments[i] for i in file_pieces[file_index]]
+        if audio_export_info is None or not pieces:
+            return set()
+        has_audio_fades = any(seg.fade_info is not None and
+                              (seg.fade_info.audio_fadein_duration is not None or seg.fade_info.audio_fadeout_duration is not None)
+                              for seg in pieces)
+        return {i for i, t in enumerate(audio_export_info.output_tracks[:len(media_container.audio_tracks)])
+                if t is not None and t.codec == 'passthru'
+                and (has_audio_fades or audio_needs_recode(media_container, format_name, i, pieces[0], file_has_joins[file_index]))}
+
     work = None
     previously_done_segments = 0
-    for output_path_segment in output_files:
+    for file_index, output_path_segment in enumerate(output_files):
         if cancel_object is not None and cancel_object.cancelled:
             break
         with av.open(output_path_segment[0], 'w') as output_av_container, ExitStack() as cleanup:
@@ -351,17 +385,18 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             include_video = True
             if output_av_container.format.name in ['ogg', 'mp3', 'm4a', 'ipod', 'flac', 'wav']: #ipod is the real name for m4a, I guess
                 include_video = False
-            # Audio tracks re-encoded as a whole: every one with audio fades, in WebM those it can't hold (Opus), and
-            # MP3 when this file's audio jumps (several segments, or a start after the media start)
-            file_segments = [output_path_segment[1]] if segment_mode else adjusted_segment_times
-            has_joins = len(file_segments) > 1 or file_segments[0][0] > media_container.start_time
-            recode_tracks = {i for i, t in enumerate(audio_export_info.output_tracks[:len(media_container.audio_tracks)])
-                             if t is not None and t.codec == 'passthru'
-                             and (has_audio_fades or audio_needs_recode(media_container, output_av_container, i, has_joins))
-                             } if audio_export_info is not None else set()
+            format_name = output_av_container.format.name or ''
+            recode_tracks = recode_tracks_of(file_index, format_name)
             if work is None and (isinstance(progress, WorkProgressCallback) or cancel_object is not None):
+                # Per piece, the audio tracks its file re-encodes (segment mode: the other files are named like this one,
+                # so they have its format)
+                recode_audio = [0] * len(cut_segments)
+                for k, pieces in enumerate(file_pieces):
+                    count = len(recode_tracks if k == file_index else recode_tracks_of(k, format_name))
+                    for i in pieces:
+                        recode_audio[i] = count
                 work = _WorkProgress(progress if isinstance(progress, WorkProgressCallback) else None, cancel_object,
-                                     media_container, cut_segments, len(recode_tracks), include_video=include_video)
+                                     media_container, cut_segments, recode_audio, include_video=include_video)
 
                         # Preserve container attachments (e.g., MKV attachments) when supported by the output format
             container_name = (output_av_container.format.name or "").lower()
@@ -388,8 +423,9 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                 for factory in external_generator_factories:
                     generators.append(factory(output_av_container))
 
-            # Any audio fade (has_audio_fades): re-encode the whole audio track with one encoder (see
-            # RecodeAudioCutter). Without audio fades the audio is copied untouched, unless WebM can't hold it.
+            # Re-encode the whole audio track with one encoder (see RecodeAudioCutter) with audio fades, or when a copy
+            # wouldn't be exact (audio_needs_recode: joins, a mid-stream start without an exact pre-roll copy, WebM).
+            # Otherwise the audio is copied untouched.
             if audio_export_info is not None:
                 for track_i, track_export_settings in enumerate(audio_export_info.output_tracks):
                     if track_export_settings is not None and track_export_settings.codec == 'passthru':
@@ -399,7 +435,7 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                         else:
                             audio_out_stream = create_audio_output_stream(media_container, output_av_container, track_i)
                             generators.append(passthru_audio_cutter(media_container, audio_out_stream, track_i,
-                                                                    cut_segments[previously_done_segments],
+                                                                    cut_segments[file_pieces[file_index].start],
                                                                     output_av_container))
 
             for sub_track_i in range(len(media_container.subtitle_tracks)):
@@ -409,15 +445,13 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             output_av_container.start_encoding()
             if progress is not None:
                 progress.emit(len(cut_segments))
-            for s in cut_segments[previously_done_segments:]:
+            for piece_index in file_pieces[file_index]:
+                s = cut_segments[piece_index]
                 if cancel_object is not None and cancel_object.cancelled:
-                    break
-                if s.start_time >= output_path_segment[1][1]: # Go to the next output file
                     break
 
                 if progress is not None:
                     progress.emit(previously_done_segments)
-                piece_index = previously_done_segments
                 previously_done_segments += 1
                 assert s.start_time < s.end_time, f"Invalid segment: start_time {s.start_time} >= end_time {s.end_time}"
                 try:

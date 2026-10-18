@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Tests that process_segments() keeps every audio track: copied without fades, each re-encoded as a whole with
-audio fades, and each one as long as the video and faded like the first.
+Tests that process_segments() keeps every audio track: copied when the copy is exact (no fades, no join), each
+re-encoded as a whole with audio fades or a join, and each one as long as the video and faded like the first.
 
 Source: video + AAC 440 Hz (48 kHz stereo) + AC-3 880 Hz (44.1 kHz mono), made with PyAV (no media needed).
 The regression harness has more (HE-AAC and MP3 second tracks): cases M1-M4 in regression/run_cases.py.
@@ -61,17 +61,32 @@ def read_tracks(path: Path) -> tuple[float, list[tuple[str, int, np.ndarray]]]:
     return video_s, tracks
 
 
+def packets_of(path: Path) -> list[set[bytes]]:
+    with av.open(str(path)) as c:
+        found: list[set[bytes]] = [set() for _ in c.streams.audio]
+        for p in c.demux(*c.streams.audio):
+            if p.size:
+                found[list(c.streams.audio).index(p.stream)].add(bytes(p))
+    return found
+
+
 def rms(x: np.ndarray) -> float:
     return float(np.sqrt((x ** 2).mean()))
 
 
-def check(src: Path, out: Path, segments: list[dict], fades: bool) -> str | None:
+def check(src: Path, out: Path, segments: list[dict], fades: bool, copied: bool) -> str | None:
     if not smartcut.process_segments(str(src), str(out), segments):
         return "process_segments failed"
     _, src_tracks = read_tracks(src)
     video_s, tracks = read_tracks(out)
     if len(tracks) != len(TRACKS):
         return f"{len(tracks)} audio tracks, expected {len(TRACKS)}"
+    for k, (out_packets, src_packets) in enumerate(zip(packets_of(out), packets_of(src)), start=1):
+        same = len(out_packets & src_packets)
+        if copied and same < len(out_packets):
+            return f"track {k}: {same}/{len(out_packets)} packets copied, expected a copy"
+        if not copied and same > 2:
+            return f"track {k}: {same}/{len(out_packets)} packets copied, expected a re-encode"
     for k, ((name, rate, x), (_, _, sx)) in enumerate(zip(tracks, src_tracks), start=1):
         if name != TRACKS[k - 1][0] or rate != TRACKS[k - 1][1]:
             return f"track {k}: {name} {rate} Hz, expected {TRACKS[k - 1][0]} {TRACKS[k - 1][1]} Hz"
@@ -89,14 +104,15 @@ def check(src: Path, out: Path, segments: list[dict], fades: bool) -> str | None
 
 
 def main() -> int:
-    cases = [("no fades: tracks copied", [{"start": 1, "end": 3}, {"start": 3.5, "end": 5}], False),
-             ("audio fades: each track re-encoded", [{"start": 1, "end": 4, "fadein": 1, "fadeout": 1}], True)]
+    cases = [("no fades, no join: tracks copied", [{"start": 1, "end": 4}], False, True),
+             ("no fades, a join: each track re-encoded", [{"start": 1, "end": 3}, {"start": 3.5, "end": 5}], False, False),
+             ("audio fades: each track re-encoded", [{"start": 1, "end": 4, "fadein": 1, "fadeout": 1}], True, False)]
     failed = 0
     with tempfile.TemporaryDirectory() as d:
         src = Path(d) / "two_tracks.mp4"
         make_source(src)
-        for i, (name, segments, fades) in enumerate(cases):
-            problem = check(src, Path(d) / f"out{i}.mp4", segments, fades)
+        for i, (name, segments, fades, copied) in enumerate(cases):
+            problem = check(src, Path(d) / f"out{i}.mp4", segments, fades, copied)
             if problem:
                 failed += 1
                 print(f"✗ FAIL - {name}: {problem}")

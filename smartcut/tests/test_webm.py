@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Tests .webm outputs. WebM holds only Opus and Vorbis audio, so other audio (e.g. AAC) is re-encoded to Opus as a
-whole track, with or without audio fades; Opus audio is copied when there are no audio fades.
+whole track, with or without audio fades. Opus audio is copied when the copy is exact: no audio fades, no join, and a
+start with the stream (WebM has no edit list to start a copy exactly mid-stream, so mid-stream starts re-encode).
 
 Checks: the output decodes completely, the audio track is Opus at 48 kHz and as long as the video, fades have the
 right gain, and copied Opus packets are byte-identical to the source's. Sources (VP9 + AAC, VP9 + Opus) are made
@@ -60,8 +61,8 @@ def audio_of(path: Path) -> tuple[str, int, np.ndarray, list[bytes]]:
     return name, rate, x, packets
 
 
-def check(src: Path, out: Path, fades: bool, copied: bool) -> str | None:
-    segment = {"start": 1, "end": 4, **({"audio_fadein": 1, "audio_fadeout": 1} if fades else {})}
+def check(src: Path, out: Path, fades: bool, copied: bool, start: float = 1) -> str | None:
+    segment = {"start": start, "end": start + 3, **({"audio_fadein": 1, "audio_fadeout": 1} if fades else {})}
     if not smartcut.process_segments(str(src), str(out), [segment]):
         return "process_segments failed"
     with av.open(str(out)) as c:
@@ -117,11 +118,13 @@ def main() -> int:
         problem = check_h264_rejected(tmp / "h264_aac.mp4", tmp / "h264.webm")
         failed += problem is not None
         print(f"✗ FAIL - H.264 video into .webm: {problem}" if problem else "✓ PASS - H.264 video into .webm: clear error")
-        cases = [("AAC -> Opus, no fades", "aac", False, False), ("AAC -> Opus, audio fades", "aac", True, False),
-                 ("Opus copied, no fades", "libopus", False, True), ("Opus re-encoded, audio fades", "libopus", True, False)]
-        for i, (name, codec, fades, copied) in enumerate(cases):
+        cases = [("AAC -> Opus, no fades", "aac", False, False, 1), ("AAC -> Opus, audio fades", "aac", True, False, 1),
+                 ("Opus copied from the start, no fades", "libopus", False, True, 0),
+                 ("Opus re-encoded from mid-stream, no fades", "libopus", False, False, 1),
+                 ("Opus re-encoded, audio fades", "libopus", True, False, 1)]
+        for i, (name, codec, fades, copied, start) in enumerate(cases):
             total += 1
-            problem = check(sources[codec], tmp / f"out{i}.webm", fades, copied)
+            problem = check(sources[codec], tmp / f"out{i}.webm", fades, copied, start)
             if problem:
                 failed += 1
                 print(f"✗ FAIL - {name}: {problem}")
