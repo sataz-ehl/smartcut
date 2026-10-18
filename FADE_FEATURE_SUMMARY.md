@@ -59,7 +59,8 @@ High-level API for programmatic use (Gradio, web apps):
 - `process_segments()`: several segments, each with its own fades (dicts or `CutSegmentConfig`)
 - `CutSegmentConfig`: segment configuration; `end=None` means the end of the video
 
-Both keep every audio track, like the CLI (with audio fades each one is re-encoded as a whole). They validate that
+Both keep every audio track, like the CLI: copied when the copy is exact, otherwise re-encoded as a whole (see
+"Audio" below). They validate that
 start < end (raising `ValueError` with "Invalid segment ..."), sort segments by start time,
 and report progress as `progress_callback(current, total)`: thousandths of the estimated work (total is 1000).
 Re-encoding a GOP can take a thousand times longer than copying one, so `smart_cut()` weighs re-encoded frames
@@ -86,10 +87,10 @@ smartcut.process_segments("in.mp4", "out.mp4", [
 ## Implementation
 | File | Fade-related code |
 |---|---|
-| `misc_data.py` | `FadeInfo` (video/audio fade-in/out durations), `SegmentWithFade`; `CutSegment.fade_info`, `orig_segment_start/end` |
-| `smart_cut.py` | `smart_cut()` accepts `SegmentWithFade` lists; attaches fade info to the cut pieces and marks the GOPs that overlap a video fade for re-encoding; picks `RecodeAudioCutter` when any segment has an audio fade |
+| `misc_data.py` | `FadeInfo` (video/audio fade-in/out durations), `SegmentWithFade`; `CutSegment.fade_info`, `orig_segment_start/end`, `join_before/join_after` |
+| `smart_cut.py` | `smart_cut()` accepts `SegmentWithFade` lists; attaches fade info and segment bounds to the cut pieces, marks the GOPs that overlap a video fade for re-encoding, finds each output's joins and picks `RecodeAudioCutter` for the audio tracks a copy wouldn't be exact for; sets the MP4 movie timescale |
 | `video_cutter.py` | `VideoCutter._apply_fade_to_frame()` / `_fade_yuv_frame()`: per-frame video fade in the re-encode path; faster VP9/AV1 encoder settings |
-| `track_cutters.py` | `RecodeAudioCutter` + `create_recode_audio_output_stream()`: audio fades |
+| `track_cutters.py` | `audio_needs_recode()`: copy or re-encode; `RecodeAudioCutter` + `create_recode_audio_output_stream()`: audio fades, join fades, lead-in, bitrate (`_recode_audio_bitrate()`); `PrerollPassthruAudioCutter` / `OpusPassthruAudioCutter`: exact copies into MP4 |
 | `__main__.py` | CLI parsing of the fade keywords, multiple `--keep` |
 | `__init__.py` | High-level API above |
 
@@ -106,36 +107,150 @@ smartcut.process_segments("in.mp4", "out.mp4", [
   At 1080p this takes ~14 ms per frame, against ~39 ms for the earlier RGB round trip.
 
 ### Audio
-- If any segment has an audio fade, each audio track is decoded and re-encoded **as a whole** by one continuous
-  encoder; otherwise audio is copied. Mixing re-encoded packets (faded segments) with copied packets (others) in
-  one track left the encoder's buffered samples misplaced at the joins (an audible tick) and flushed at the end.
-- The output stream is created from the encoder rather than copied from the source, so the stream header matches
-  the packets: AAC and HE-AAC sources become AAC-LC (FFmpeg can't encode HE-AAC) at the source bitrate but at
-  least 128 kbps. Other codecs are re-encoded with their own encoder when FFmpeg has one, else AAC.
-- MP3 tracks are re-encoded as a whole whenever the output has a join or starts mid-stream: an MP3 frame can take
-  bits from earlier frames (the bit reservoir), so copied MP3 had ~50 ms of silence after every join. They are
-  re-encoded at 256 kbps or more: below that LAME scales the input down (0.95 up to 160 kbps).
-- Copied Opus that starts mid-stream includes the 80 ms of earlier packets that Opus decoders need as pre-roll, and
-  the stream's pre-skip is set to their length, so decoders discard them (`OpusPassthruAudioCutter`). Before, the
-  copy rose from ~40 % of the level over its first 80 ms. In MKV/WebM all streams then start ~75 ms later, in sync.
-- Copied AAC and AC-3 into MP4/MOV/M4A that starts mid-stream also includes the frames just before the cut
-  (`PrerollPassthruAudioCutter`), at times before the output start; the MP4 edit list skips them. Before, the
-  audio began at the first whole frame after the cut (up to a frame, 13-33 ms, after the video) and its first
-  ~20 ms were low (frames overlap). Matroska has no edit list, so copies into .mkv start as before. Joins are
-  unchanged: a copied AAC track still has a short level change at each join, and the joins shift A/V by up to
-  a frame (~20 ms) each, because whole frames are copied.
-- `.webm` outputs: WebM holds only Opus and Vorbis audio, so other tracks (e.g. AAC, HE-AAC) are always
-  re-encoded to Opus as a whole track (48 kHz, at least 128 kbps), fades or not. Opus/Vorbis tracks are copied
-  when there are no audio fades. Other containers are unchanged.
-- `.webm` outputs need VP8, VP9 or AV1 video, and smartcut doesn't re-encode the whole video: other video (e.g.
-  H.264) fails before anything is written, with "WebM output needs VP8, VP9 or AV1 video; this video is H.264: use
-  .mp4 or .mkv" (`OutputFormatError`; `process_segments` returns False, the CLI exits with 1).
-- Audio is cut sample-accurately to each cut piece and kept locked to the video timeline (silence is inserted
-  where the source has no audio). After a jump the decoder restarts two packets early, so the first kept samples
-  decode cleanly.
-- The gain is a per-sample linear ramp (vectorised with numpy).
-- Cost: roughly 1.3 s per minute of kept audio on a desktop CPU with FFmpeg's default AAC coder. The `fast` AAC
-  coder was evaluated (about 1.8x faster) and rejected: it left audible holes in the treble.
+**Copy only when the copy is exact; otherwise re-encode the whole track** (`audio_needs_recode()` in
+`track_cutters.py`).
+
+- A copy keeps the source's packets, which are whole frames. It is used only when it is exact: no audio fade in that
+  output, and
+  - **no join**: the output's segments are contiguous in the source (a single segment, or segments that touch);
+  - **a start that a copy can match**: with the source's audio, or mid-stream into an MP4-family output
+    (.mp4/.mov/.m4a) for AAC, AC-3/E-AC-3 and Opus. These copies include the packets just before the cut
+    (pre-roll: 50 ms for AAC/AC-3, 80 ms for Opus), at times before the output start. The MP4 edit list skips them,
+    and for Opus also the pre-skip, which is set to their length (`PrerollPassthruAudioCutter`,
+    `OpusPassthruAudioCutter`). Before PR #27 a mid-stream copy began at the first whole frame after the cut (up to
+    a frame after the video), and its first ~20 ms were low. A pre-roll that reaches the stream's first packet is
+    exact too.
+  - in WebM, an Opus or Vorbis track (the only audio WebM holds).
+- Otherwise every audio track of that output is re-encoded as one continuous stream (`RecodeAudioCutter`): decoded,
+  cut sample-accurately to each cut piece, faded, and fed to one encoder. That covers any codec when:
+  - the output has a join or an audio fade;
+  - it starts mid-stream into Matroska/WebM (no edit list);
+  - it starts mid-stream with a codec that has no pre-roll copy (MP3, FLAC, PCM, ...). FLAC and PCM re-encode
+    losslessly.
+  - it is a WebM output and the track's codec isn't Opus or Vorbis (re-encoded to Opus).
+
+  Mixing re-encoded and copied packets in one track instead left the encoder's buffered samples misplaced at the
+  joins (an audible tick).
+- **Why joins aren't copied.** Six segments, five joins, no fades, MP4, measured with
+  `tests/regression/join_sync.py` (level in 5 ms windows against the source, outside the 3 ms join fades):
+
+  | | AAC-LC 44.1 kHz copied (before) | re-encoded (now) | HE-AAC 48 kHz copied (before) | re-encoded (now) |
+  |---|---|---|---|---|
+  | Largest A/V offset of a segment, as players play the audio | 15.5 ms | 0.4 ms | 27.1 ms | 0.4 ms |
+  | Samples missing / overlapping by pts | 918 / 263 | 0 / 0 | 1344 / 32 | 0 / 0 |
+  | Level at the joins | x0.48-x1.97 | x0.91-x1.02 | x0.13-x9.93 | x0.96-x1.04 |
+  | Level inside the segments (re-encoding alone) | x1.00 | x0.82-x1.22 | x1.00 | x0.88-x1.14 |
+
+  - Copied joins drift because a copy can only keep whole frames: each piece starts up to a frame after its cut and
+    its last frame runs up to a frame past its end. MP4 stores the gaps and overlaps in the timestamps, but players
+    play the decoded samples one after another, so the offset takes a random walk.
+  - AAC and AC-3 frames overlap their neighbours (MDCT), so the frame at a join decodes as a mix of both sides.
+  - Copied MP3 had ~50 ms of silence after every join: a frame can take bits from earlier frames (the bit reservoir).
+- **Fades at joins.** At every join of a re-encoded track, the earlier segment fades out over its last 3 ms and the
+  later one fades in over its first 3 ms (`RecodeAudioCutter.JOIN_FADE`).
+  - Not at the very start or end of the output, and not between segments that touch.
+  - On a side with a user audio fade, the longer of the two applies.
+  - Edits with fades get them too: before, their re-encoded joins were hard cuts.
+  - Measured on a steady 440 Hz tone, largest sample step near a join ÷ the tone's own largest step: hard cut
+    5.0-11.0x (an audible click), with the fades 1.0x (copied joins: 1.3-1.4x).
+- **Start of a re-encoded track.** When the output starts mid-stream, MP4-family outputs feed the encoder 80 ms of
+  the source audio before the cut (`RecodeAudioCutter.LEAD_IN`).
+  - It goes in at negative timestamps, and the edit list skips it, the same mechanism as the copy's pre-roll. Its
+    `media_time` is the lead-in plus the encoder delay, e.g. 3528 + 1024 samples at 44.1 kHz.
+  - The encoder then starts with the signal already running. On a 440 Hz tone the first 20 ms came out at x1.00 of
+    the source (AAC, AC-3, MP3), A/V +0.05 ms. From a cold start the first 10 ms were x1.23 (encoder onset).
+  - The lead-in takes the first segment's gain, so it is silent before a fade-in.
+  - Real music re-encoded from a cold start was x0.94-1.09 in the first 40 ms, within the re-encoding's own range.
+  - Exceptions, which start cold at the cut:
+    - **Opus in MP4.** Its stream header's pre-skip (PreSkip in `dOps`), which some players may use instead of the
+      edit list, is written by the encoder when it opens, before any audio, and PyAV can't change it afterwards.
+      With a lead-in FFmpeg was exact (it follows the edit list), but a player that follows the pre-skip would play
+      80 ms of audio from before the cut, 80 ms late. Cold start, first 20 ms: x0.93-0.96 on a tone (a 2.7x step at
+      the onset), x0.91-0.96 on noise. The app never writes Opus into MP4.
+    - **Matroska / WebM.** There's no edit list, and players would play a lead-in at its negative time. Cold start,
+      first 20 ms in 2.5 ms windows: AAC into MKV x0.94-1.28 on noise (x0.94-1.61 on a tone); Opus into WebM
+      x0.76-1.10 on noise (x0.90-0.96 on a tone). Before, both were silent for the first 15-20 ms: copies started a
+      frame late, and Opus copies shifted all streams by 73 ms.
+- **Matroska / WebM timing.** FFmpeg 8 (PyAV 16) writes the encoder's delay as the track's CodecDelay (AAC 1024
+  samples, Opus 312) and keeps those samples at negative timestamps, so nothing is shifted.
+  - Re-encoded AAC into MKV: container start -23 ms, the video exactly where it belongs, audio content +0.5 ms.
+  - Matroska stores timestamps in milliseconds, so A/V there is exact to about ±1 ms.
+- **End.**
+  - A copy's last packet runs up to a frame past the end of the output. In MP4 its duration is shortened to end at
+    the cut, so the track and its edit list end there, as FFmpeg's own encoders' last packets do.
+  - Players that honour the edit list's end (QuickTime/AVFoundation) stop exactly there.
+  - FFmpeg ignores it (PyAV 16 / FFmpeg 8 and the ffmpeg 7.1 CLI) and decodes the whole last frame. Copied audio
+    then runs on past the last picture: 8 ms in a 9.7 s AAC-LC cut, 28 ms in a 10 s HE-AAC one, at most one frame.
+    Re-encoded tracks run on by the encoder's padding (e.g. 17 ms).
+  - Making FFmpeg stop exactly would need the last frame re-encoded. Left as is (decided).
+- **MP4 movie timescale.** MP4-family outputs set the muxer's `movie_timescale` to the video stream's timescale
+  (the first audio track's sample rate without video).
+  - The edit lists that delay the first video frame to its place after the cut, and end the audio, are written in
+    the movie timescale. With FFmpeg's default of 1000, rounded down, the video started up to 1 ms early: 0.02897 s
+    instead of 0.02995 s, so the audio played ~1 ms late against the picture.
+- **Output stream.** It is created from the encoder rather than copied from the source, so the stream header
+  matches the packets.
+  - Encoder: the source codec's own when FFmpeg has one (AAC and HE-AAC → FFmpeg's AAC, which writes AAC-LC since
+    it can't encode HE-AAC; MP3 → LAME; Opus; Vorbis; AC-3; FLAC, ...), else AAC. In WebM, anything but Opus or
+    Vorbis → Opus.
+  - The sample rate and channels are kept, unless the encoder can't do the rate (Opus: 48 kHz; AC-3: 32/44.1/48).
+- **Bitrate of re-encoded audio** (`_recode_audio_bitrate()` in `track_cutters.py`, for each track separately; the
+  lead-in and the join fades go through the same encoder):
+  1. **The source's average bitrate.**
+     - As its stream reports it. MP4 always does, with the average, so VBR sources get their average.
+     - Otherwise it is computed from the track's packets: total size × 8 ÷ the time those packets span. Matroska and
+       WebM usually report none, e.g. for Opus.
+     - Lossless sources (FLAC, ALAC, PCM) count as unknown: their rate says nothing about a lossy one's. A PCM source
+       cut into .webm asked libopus for 1536 kb/s, which it refuses, and the cut failed.
+  2. **At least a floor.**
+     - 64 kb/s per channel, mono counted as two: 128 kb/s for mono and stereo, 384 kb/s for 5.1. It applies to AAC,
+       Opus, Vorbis, AC-3/E-AC-3 and others. Typical AC-3 sources (192 kb/s stereo, 384-448 kb/s 5.1) keep their own
+       rate.
+     - MP3: 256 kb/s whatever the channels. Below that LAME scales the input down (0.95 up to 160 kb/s): -0.45 dB per
+       re-encode.
+     - HE-AAC sources thus become AAC-LC at 128 kb/s or more: 48 → 128 kb/s, outputs ~11 % bigger.
+     - Mono at 64 kb/s fared worse. A 64 kb/s mono version of a music clip, 6 segments, re-encoded at 64 kb/s: level
+       x0.64-1.20 inside the segments (99.8 % of 5 ms windows) and x0.90-1.10 at the joins. At 128 kb/s: x0.64-1.04
+       and x0.92-1.02. On a steady tone at 70 kb/s, the level jumped up to x1.51 for ~20 ms after a join fade.
+  3. **At most what the encoder accepts.** The encoder is opened with the rate (1.4 ms per try).
+     - If it refuses, the highest rate it accepts below that is used. libopus takes at most 256 kb/s per channel;
+       libvorbis about 89-249 kb/s per channel, depending on the sample rate.
+     - The rate it reports after opening is used: aac lowers a too-high rate to 6144 bits per channel per frame
+       (e.g. 576 kb/s for stereo at 48 kHz), ac3 to 640 kb/s.
+     - MP3 is capped at 320 kb/s: LAME takes any rate.
+     - Examples: an AC-3 640 kb/s source cut into .webm → Opus at 512 kb/s; AAC 5.1 at 192 kb/s → 384 kb/s.
+  4. Lossless targets (FLAC, ALAC, PCM) get no bitrate: they re-encode losslessly.
+
+  What comes out:
+  - AAC at a 128 kb/s target came out at 128.2-134.7 kb/s (FFmpeg's AAC runs up to 5 % over).
+  - Opus is VBR and averages below its target on music: an 85 kb/s Opus source at the 128 kb/s floor came out at
+    115 kb/s.
+  - An AAC 256 kb/s and an Opus 192 kb/s source in MKV/WebM came out at about their own rate.
+- **WebM video.** `.webm` outputs need VP8, VP9 or AV1 video, and smartcut doesn't re-encode the whole video. Other
+  video (e.g. H.264) fails before anything is written, with "WebM output needs VP8, VP9 or AV1 video; this video is
+  H.264: use .mp4 or .mkv" (`OutputFormatError`; `process_segments` returns False, the CLI exits with 1).
+- **Timing.** Audio is kept locked to the video timeline: silence is inserted where the source has no audio.
+  - After a jump the decoder restarts four packets early, so the first kept samples decode cleanly (Opus needs
+    80 ms, MP3 the frames a frame takes bits from).
+  - Decoded frames count as contiguous when their timestamps differ by up to one tick of the time base. In Matroska
+    (1 ms ticks) AAC frames of 21.33 ms arrive at 0, 21, 43 ms, and each "gap" or "overlap" of 16-32 samples
+    became inserted or dropped samples: clicks of 6.6-11.5x a tone's largest step, also with fades.
+- **Gain.** A per-sample linear ramp (vectorised with numpy).
+- **Cost.** The whole-track re-encode with FFmpeg's default AAC coder (decoding included) took 0.029-0.030 s per
+  second of kept audio on one desktop core. The `fast` AAC coder was evaluated (about 1.8x faster) and rejected: it
+  left audible holes in the treble.
+
+  Typical app edits without fades, one core, minimum of 3 runs, before (audio copied) and now (re-encoded):
+
+  | Source (audio) | Segments (audio kept) | Time | Peak memory over the process before | Output size |
+  |---|---|---|---|---|
+  | real_h264_720p (AAC-LC 44.1 kHz) | 2 (30 s) | 5.21 → 5.71 s | +120 → +128 MB | 3.24 → 3.26 MB |
+  | real_h264_720p | 3 (41.8 s) | 8.13 → 9.20 s | +122 → +132 MB | 4.54 → 4.56 MB |
+  | fb_sd_h264 (HE-AAC 48 kHz) | 2 (30 s) | 3.00 → 3.89 s | +45 → +61 MB | 2.62 → 2.91 MB |
+  | fb_sd_h264 | 3 (41.8 s) | 6.58 → 7.92 s | +46 → +61 MB | 3.42 → 3.83 MB |
+
+  That's 0.5-1.3 s more per edit, 0.017-0.032 s per second of kept audio. HE-AAC outputs grow by ~11 %: they become
+  AAC-LC at 128 kbps.
 
 ### VP9 / AV1
 - Re-encoded GOPs use `cpu-used=5` (VP9) and `cpu-used=8` (libaom-av1), plus `row-mt`. On one CPU core this made
@@ -156,7 +271,7 @@ smartcut.process_segments("in.mp4", "out.mp4", [
 export SMARTCUT_DEBUG_AUDIO_FADE=1
 smartcut input.mp4 output.mp4 --keep 2:fadein:2,8
 ```
-Prints one line per faded cut piece to stderr:
+Prints one line per cut piece that fades (also the 3 ms fades at joins) to stderr:
 ```
 [AUDIO_FADE] t=0.000..1.999s | gain 0.000..1.000 | peak 0.250000 → 0.249850 (0.1% reduction)
 ```
@@ -175,10 +290,11 @@ Run from the repo root (tests live in `smartcut/tests/`):
 | `verify_audio_fade.py` | Measured audio level ramps for fade-in, fade-out, both |
 | `test_cancel.py` | Cancelling (also midway through re-encoding, with and without progress), steady progress, input closed |
 | `test_last_frame.py` | Cuts keep their last frame, also when they end with re-encoded frames (H.264, VP9, AV1, fades) |
-| `test_multitrack.py` | Every audio track is kept: copied without audio fades, each re-encoded as a whole with them |
-| `test_webm.py` | `.webm` outputs: AAC re-encoded to Opus (with and without fades), Opus copied |
-| `test_audio_joins.py` | No gaps or ramps at joins and at the start of cut audio (MP3, Opus) |
-| `regression/` | Measurement-based regression harness, test media generator and diagnostic tools (see its README) |
+| `test_multitrack.py` | Every audio track is kept: copied when exact, each re-encoded as a whole with a join or audio fades |
+| `test_webm.py` | `.webm` outputs: AAC re-encoded to Opus (with and without fades), Opus copied from the start, re-encoded from mid-stream |
+| `test_audio_bitrate.py` | Bitrate of re-encoded audio: from the packets when the source reports none, floors per channel, MP3, lossless sources, encoder limits; cuts at about the source's rate |
+| `test_audio_joins.py` | Copied or re-encoded as the rule says; A/V sync within 1 ms at the start and every join; level and clicks at the joins (AAC, AC-3, MP3, Opus; MP4, MKV, WebM; HE-AAC with a media dir) |
+| `regression/` | Measurement-based regression harness, test media generator and diagnostic tools, e.g. `join_sync.py` for A/V sync at every join (see its README) |
 
 ## Usage Examples
 
@@ -265,5 +381,5 @@ smartcut input.mp4 output.mp4 \
 - Fade curve customization (linear, exponential, etc.)
 - Cross-fade between segments
 - Fade effects in `--cut` mode
-- Splicing re-encoded AAC-LC audio around fades into copied audio (faster than re-encoding the whole track, but
-  impossible for HE-AAC and risky at the splice points)
+- Splicing re-encoded AAC-LC audio around fades and joins into copied audio (faster than re-encoding the whole
+  track, but impossible for HE-AAC: FFmpeg can't encode it, and a splice moves the mismatch to the splice points)

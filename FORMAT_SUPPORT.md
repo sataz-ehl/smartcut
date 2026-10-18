@@ -58,7 +58,7 @@ SmartCut supports all major video container formats:
 - **Vorbis** (libvorbis) - passthrough or re-encoding
 - **FLAC** - lossless passthrough
 - **PCM** - 16-bit and 32-bit float
-- **Passthrough** - No re-encoding (default for all audio)
+- **Passthrough** - No re-encoding, when the copy is exact: no audio fade, no join, and a start a copy can match (see `FADE_FEATURE_SUMMARY.md`, Audio)
 
 ## Minimal Re-encoding Strategy
 
@@ -78,7 +78,7 @@ The core feature of smartcut is intelligent minimal re-encoding that preserves q
 
 **Video-Only Fades** (`videofadein`/`videofadeout`):
 - Selective GOP re-encoding - only re-encode GOPs overlapping fade regions
-- Audio uses passthrough (no re-encoding)
+- Audio uses passthrough when the copy is exact (one segment, or segments contiguous in the source)
 - Performance: **~17x faster** than full re-encoding
 - Trade-off: Fades may start/end 0.5-1 second early/late due to GOP boundaries
 - Example: 20-second segment with 2s fade-in/out:
@@ -86,10 +86,10 @@ The core feature of smartcut is intelligent minimal re-encoding that preserves q
   - 14-16 seconds passthrough (~70-80%)
 
 **Audio-Only Fades** (`audiofadein`/`audiofadeout`):
-- Re-encode all audio in affected segments
+- Re-encode each audio track as a whole, with one continuous encoder
 - Video uses passthrough (no re-encoding)
 - **~5x faster** than video fades
-- Audio sample-level fade application (`smartcut/cut_video.py:193-256`)
+- Audio sample-level fade application (`RecodeAudioCutter` in `smartcut/track_cutters.py`)
 
 **Mixed Fades** (e.g., `videofadein` + `audiofadeout`):
 - Each media type follows its own strategy
@@ -123,7 +123,7 @@ The core feature of smartcut is intelligent minimal re-encoding that preserves q
 
 ### Codec Tag Normalization
 
-(`smartcut/cut_video.py:574-608`)
+(`_normalize_output_codec_tag()` in `smartcut/video_cutter.py`)
 
 **MP4/MOV containers** normalize codec tags for compatibility:
 - H.264: Tag `27` (MPEG-TS) → `avc1` (MP4 standard)
@@ -132,7 +132,7 @@ The core feature of smartcut is intelligent minimal re-encoding that preserves q
 
 ### Format Detection
 
-(`smartcut/cut_video.py:1299-1315`)
+(`smart_cut()` in `smartcut/smart_cut.py`)
 
 - Output format automatically determined from file extension
 - Audio-only formats detected: 'ogg', 'mp3', 'm4a', 'ipod', 'flac', 'wav'
@@ -142,18 +142,18 @@ The core feature of smartcut is intelligent minimal re-encoding that preserves q
 ## Special Format Handling
 
 ### MPEG-2 Video
-(`smartcut/cut_video.py:820-822`)
+(`VideoCutter` in `smartcut/video_cutter.py`)
 - Special time base handling
 - Frame duration recalculation for proper packet timing
 
 ### H.265 CRA Frame Handling
-(`smartcut/cut_video.py:944-975`)
-- CRA (Clean Random Access) frames converted to BLA (Broken Link Access) when needed
-- Applies intelligent conversion logic
-- Only when stream continuity breaks (after cut or skip)
+(`VideoCutter.hybrid_recode_cra_segment()` in `smartcut/video_cutter.py`)
+- CRA (Clean Random Access) GOPs with RASL leading pictures (e.g. x265's default open GOPs): when stream continuity
+  breaks (after a cut or skip), the leading pictures are re-encoded and the CRA and its trailing pictures copied
+- Checked frame by frame on x265 open- and closed-GOP clips (regression cases `E1`-`E6`)
 
 ### H.264 NAL Unit Detection
-(`smartcut/cut_video.py:550-556`)
+(`smartcut/nal_tools.py`)
 - Safe keyframe detection for both MP4 and Annex B formats
 - Parameter sets preserved in output
 
@@ -171,18 +171,18 @@ All format combinations are tested in the test suite (see README lines 176-219):
 
 ## Performance Characteristics
 
-(`FADE_FEATURE_SUMMARY.md:334-371`)
+(see `FADE_FEATURE_SUMMARY.md`)
 
 | Scenario | Speed | Notes |
 |----------|-------|-------|
 | Smart cut (no fades) | Baseline | Only GOPs at cutpoints re-encoded |
-| Video-only fades | ~17x faster than full | Audio passthrough |
+| Video-only fades | ~17x faster than full | Audio passthrough when exact |
 | Audio-only fades | ~5x faster than full | Video passthrough |
 | Full re-encode | 100x slower | Processes entire video |
 
 ## Practical Recommendations
 
-1. **For fastest cutting**: Use `videofadein`/`videofadeout` to keep audio as passthrough
+1. **For fastest cutting**: Use `videofadein`/`videofadeout` and one segment (or segments that touch) to keep audio as passthrough
 2. **For format conversion**: MP4↔MKV conversions fully tested and optimized
 3. **For maximum compatibility**: Use MP4 with H.264 codec (most universal)
 4. **For archival**: Use MKV with H.265 (better compression, supports attachments)

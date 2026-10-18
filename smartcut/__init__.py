@@ -342,7 +342,7 @@ def process_segments(
             media_container=media_container,
             positive_segments=segments_with_fade,
             out_path=output_path,
-            # Every audio track, like the CLI (with audio fades each one is re-encoded as a whole)
+            # Every audio track, like the CLI (copied when exact, else each one re-encoded as a whole)
             audio_export_info=AudioExportInfo(output_tracks=[AudioExportSettings('passthru')] * len(media_container.audio_tracks)),
             video_settings=VideoSettings(
                 mode=VideoExportMode.SMARTCUT,
