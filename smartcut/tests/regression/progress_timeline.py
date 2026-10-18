@@ -8,9 +8,13 @@ the share of the time elapsed (0 = perfectly even). The time before the first up
 input) is reported separately.
 
 --calibrate also times every cut piece (the whole loop iteration, muxing and audio passthrough included). It
-prints the re-encode cost per frame of each case, and per codec a fit of fixed + per-megapixel cost over the cases
-(run several resolutions: CALIBRATION_CASES adds 1080p). It also prints the cost per copied frame and per second
-of re-encoded audio, to compare with the _*_COST_* constants in smart_cut.py. Calibrate with --one-core.
+prints the re-encode cost per frame and the cost per copied frame of each case, and per codec a fit of fixed +
+per-megapixel cost over the cases (run several resolutions: CALIBRATION_CASES adds 1080p). It also prints the cost
+per copied frame and per second of re-encoded audio over all cases, to compare with the _*_COST_* constants in
+smart_cut.py. Calibrate with --one-core.
+
+CALIBRATION_CASES also has typical Smart Edit jobs of the app (P2*, P3*: H.264 720p, 2 or 3 segments, without fades
+and with 2 s fades on every segment), run by name.
 """
 import argparse
 import importlib
@@ -32,13 +36,26 @@ CALIBRATION_CASES = {
     "RA10_av1_1080p":  ("real_av1_1080p.mp4", TWO_SEGMENTS_REAL),
     "RE10_hevc_1080p": ("real_hevc_1080p.mp4", TWO_SEGMENTS_REAL),
 }
+# Typical Smart Edit jobs in the app (run by name), for how evenly progress moves: H.264 720p, 2 or 3 segments, without
+# fades and with the help's "most common" 2 s video and audio fades on every segment
+_FADES = {"fadein": 2, "fadeout": 2}
+_THREE = [{"start": 10.3, "end": 25}, {"start": 40.77, "end": 55}, {"start": 77.1, "end": 90}]
+CALIBRATION_CASES.update({
+    "P2_h264_720p":  ("real_h264_720p.mp4", [{"start": 20, "end": 35}, {"start": 60, "end": 75}]),
+    "P2F_h264_720p": ("real_h264_720p.mp4", [{"start": 20, "end": 35, **_FADES}, {"start": 60, "end": 75, **_FADES}]),
+    "P3_h264_720p":  ("real_h264_720p.mp4", _THREE),
+    "P3F_h264_720p": ("real_h264_720p.mp4", [{**seg, **_FADES} for seg in _THREE]),
+})
 
 
 def install_timers(stats):
     """Wrap the cutters to time every piece: the whole loop iteration in smart_cut (video, audio passthrough,
     subtitles, muxing), from the video cutter's start to _WorkProgress.piece_done. Encoder flushes (the frames
     still inside the encoder when a re-encoded run ends) are counted as re-encoding, not as the copy that triggers
-    them, and re-encoded audio separately."""
+    them, and re-encoded audio separately. A copied HEVC piece that re-encodes its leading pictures after a jump
+    (VideoCutter.hybrid_recode_cra_segment: it decodes the GOP before, then encodes those few frames) counts as
+    re-encoding those frames, as _WorkProgress counts it. Counted as copies, they made copied frames look 7x
+    dearer (249 instead of 35 us per frame over E5, E6, RE10, J1, J2, R2, RH7; E6 alone 1338 us)."""
     from smartcut import track_cutters, video_cutter
 
     work_progress = importlib.import_module("smartcut.smart_cut")._WorkProgress
@@ -51,10 +68,11 @@ def install_timers(stats):
         packets = orig_flush(self)
         stats["flush_s"] += time.perf_counter() - t
         stats["flush_packets"] += len(packets)
+        stats["flush_calls"] += 1
         return packets
 
     def segment(self, s):
-        frames = [0]  # frames fed to the encoder: one hook call each in a re-encoded piece
+        frames = [0]  # frames fed to the encoder: one hook call each, and one per encoder flush
         hook = self.on_frames_encoded
 
         def counting_hook(count):
@@ -63,8 +81,9 @@ def install_timers(stats):
                 hook(count)
 
         self.on_frames_encoded = counting_hook
+        hybrid = not s.require_recode and self._should_hybrid_recode_cra(s)
         piece.update(t=time.perf_counter(), flush_s=stats["flush_s"], audio_s=stats["audio_s"])
-        flushed_before = stats["flush_packets"]
+        flushed_before, flush_calls_before = stats["flush_packets"], stats["flush_calls"]
         try:
             packets = orig_segment(self, s)
         finally:
@@ -72,8 +91,10 @@ def install_timers(stats):
         ctx = self.in_stream.codec_context
         stats["megapixels"] = ctx.width * ctx.height / 1e6
         stats["codec"] = "av1" if "av1" in (ctx.name or "") else ctx.name  # as in smart_cut._WorkProgress
-        piece.update(recode=s.require_recode,
-                     frames=frames[0] if s.require_recode else len(packets) - (stats["flush_packets"] - flushed_before))
+        if s.require_recode or hybrid:
+            piece.update(recode=True, frames=frames[0] - (stats["flush_calls"] - flush_calls_before))
+        else:
+            piece.update(recode=False, frames=len(packets) - (stats["flush_packets"] - flushed_before))
         return packets
 
     def piece_done(self, index):
@@ -122,7 +143,7 @@ def main():
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"{'case':<16} {'total s':>7} {'first s':>7} {'updates':>7} {'max gap s':>9} {'at %':>5} {'max off %':>9}"
-          + ("  re-encode ms/frame at MP" if args.calibrate else ""))
+          + ("  re-encode ms/frame at MP  copy us/frame" if args.calibrate else ""))
     recode_points = defaultdict(list)  # codec -> (megapixels, seconds per re-encoded frame, frames) per case
     for case in args.cases or CASES:
         src, segs = CASES[case] if case in CASES else CALIBRATION_CASES[case]
@@ -147,6 +168,10 @@ def main():
         frames = stats["recode_frames"] - before.get("recode_frames", 0.0)
         seconds = (stats["recode_s"] + stats["flush_s"]) - (before.get("recode_s", 0.0) + before.get("flush_s", 0.0))
         per_frame = f"  {seconds / frames * 1000:7.1f} at {stats['megapixels']:.2f}" if args.calibrate and frames else ""
+        copy_frames = stats["copy_frames"] - before.get("copy_frames", 0.0)
+        if args.calibrate and copy_frames:
+            copy_us = (stats["copy_s"] - before.get("copy_s", 0.0)) / copy_frames * 1e6
+            per_frame = f"{per_frame or ' ' * 18}  {copy_us:13.0f}"
         if args.calibrate and frames:
             recode_points[stats["codec"]].append((stats["megapixels"], seconds / frames, frames))
         print(f"{case:<16} {total:7.1f} {first:7.1f} {len(calls):7d} {gap:9.2f} {at * 100:5.0f} {off * 100:9.1f}{per_frame}")

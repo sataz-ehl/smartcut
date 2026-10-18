@@ -70,11 +70,19 @@ class CancelObject:
 #   (synthetic clips re-encode 2-3x cheaper). libvpx and libaom have a fixed part, so per megapixel alone
 #   underestimated small frames (360x360 VP9: 12 ms measured, 10 ms estimated) and overestimated 1080p (VP9 101 ms
 #   vs 155, AV1 265 ms vs 373). x264 has none measurable (and 0.047 per megapixel, the fit, made progress no more
-#   even than 0.04). hevc: x265 with its default settings, as for camera footage (sources without x265's options in
-#   their headers; with them smartcut reuses the source's settings: x265 -preset fast cost 0.006 + 0.013 per
-#   megapixel), fitted on real clips at 360p, 720p and 1080p (9.4-46.7 ms per frame).
-# - A copied frame costs the whole loop: remuxing, audio passthrough and muxing (24-48 us measured; timing the
-#   video cutter alone gave 14-19 us).
+#   even than 0.04).
+# - hevc: x265 with its default settings, as for camera footage (sources without x265's options in their headers;
+#   with them smartcut reuses the source's settings). Fitted on real clips at 360p, 720p and 1080p while x265's
+#   threads escaped the one-core pinning (9.4-46.7 ms per frame, on ~4.8 cores). On one core x265 takes 19.5 / 71 /
+#   163-179 ms per frame at 360p / 720p / 1080p without a thread pool (0.0 + 0.08 per megapixel), and 43-49 /
+#   108-116 / 181-182 ms with the 1-thread pool it uses on a 1-CPU machine (on Windows, varying up to 2x). Kept,
+#   as with 0.0 + 0.08 progress was no more even (largest distance from an even pace, one core, no pool):
+#   2 segments at 720p 13.6-14.6 % -> 16.3 %; with fades 10.8-11.7 % -> 12.7-13.3 % (360p 10.6-11.2 % ->
+#   12.4-13.7 %, 1080p 13.5 % -> 16.3-16.7 %); 3 segments with fades at 1080p 9.2-9.5 % -> 9.5-10.0 %; 6 segments
+#   at 720p 6.6-6.9 % -> 6.8-7.0 %.
+# - A copied frame costs the whole loop: remuxing, audio passthrough and muxing: 32-34 us over 23 cases at
+#   360p-1080p (23-45 us per case, idle machine), timing the video cutter alone 14-19 us. HEVC pieces that re-encode
+#   their leading pictures count as re-encoding (calibrated as copies, they made copied frames look 7x dearer).
 _RECODE_COST_PER_FRAME = {'h264': (0.0, 0.04), 'hevc': (0.005, 0.02), 'vp9': (0.009, 0.046), 'av1': (0.025, 0.117)}
 _RECODE_COST_PER_FRAME_OTHER = (0.005, 0.1)  # (seconds per frame, seconds per megapixel-frame)
 _COPY_COST_PER_FRAME = 0.000035
