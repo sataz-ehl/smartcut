@@ -89,6 +89,92 @@ class PassthruAudioCutter:
         return []
 
 
+_OPUS_DECODERS = ('opus', 'libopus')
+_OPUS_PREROLL = Fraction(80, 1000)  # RFC 7845: decode at least 80 ms before the first sample that is used
+# Codecs whose frames overlap their neighbours (MDCT), so a copy needs the frame before its first one
+_OVERLAP_DECODERS = ('aac', 'aac_fixed', 'ac3', 'ac3_fixed', 'eac3')
+_OVERLAP_PREROLL = Fraction(50, 1000)  # the packet holding the cut point and at least one before it
+_EDIT_LIST_FORMATS = ('mov', 'mp4', 'ipod')  # FFmpeg names for .mov/.mp4/.m4a outputs
+
+
+class PrerollPassthruAudioCutter(PassthruAudioCutter):
+    """
+    Copies a track, with the packets just before a mid-stream start, which decoders run and discard (fork addition).
+
+    A copy that started mid-stream was decoded from a cold decoder: its first frames came out low (AAC frames overlap
+    their neighbours, as in AAC and AC-3; Opus decoders need 80 ms of pre-roll). The earlier packets covering `preroll` are copied too,
+    with timestamps before the start of the output. MP4 writes an edit list that skips them, so the audio also
+    starts exactly at the cut point instead of at the first whole packet after it.
+    """
+
+    def __init__(self, media_container: MediaContainer, out_stream: AudioStream, track_index: int,
+                 first_segment: CutSegment, preroll: Fraction) -> None:
+        super().__init__(media_container, out_stream, track_index)
+        self.preroll: list[Packet] = []
+        self.preroll_length = Fraction(0)
+        in_tb = cast(Fraction, self.track.av_stream.time_base)
+        if first_segment.start_time <= 0:
+            return
+        start = int(np.searchsorted(self.track.frame_times_pts, round(first_segment.start_time / in_tb)))  # as segment()
+        first, length = start, Fraction(0)
+        while first > 0 and length < preroll:
+            first -= 1
+            length += (self.track.packets[first].duration or 0) * in_tb
+        if length < preroll:  # the cut starts at the very beginning: nothing to run before it
+            return
+        self.preroll = [p for p in self.track.packets[first:start] if p.pts is not None and p.dts is not None]
+        self.preroll_length = length
+
+    def segment(self, cut_segment: CutSegment) -> list[Packet]:
+        packets = []
+        in_tb = cast(Fraction, self.track.av_stream.time_base)
+        for p in self.preroll:  # first piece only: the pre-roll packets, timed like segment() times the others
+            assert p.pts is not None and p.dts is not None  # filtered in __init__
+            packet = copy_packet(p)
+            packet.stream = self.out_stream
+            packet.pts = int(p.pts + (self.segment_start_in_output - cut_segment.start_time) / in_tb)
+            packet.dts = int(p.dts + (self.segment_start_in_output - cut_segment.start_time) / in_tb)
+            self.prev_pts, self.prev_dts = packet.pts, packet.dts
+            packets.append(packet)
+        self.preroll = []
+        return packets + super().segment(cut_segment)
+
+
+class OpusPassthruAudioCutter(PrerollPassthruAudioCutter):
+    """
+    Copies an Opus track, without a ramp at the start (fork addition).
+
+    A copy that starts mid-stream rose from ~40 % of the level over its first 80 ms, and the source's pre-skip
+    (meant for the stream start) also dropped ~6.5 ms of real audio. The pre-roll packets cover the 80 ms Opus
+    decoders need, and the stream's pre-skip is set to their length, so decoders discard them in any container. In
+    Matroska / WebM the muxer shifts all streams' timestamps by about that much to keep them non-negative, so A/V
+    stay in sync.
+    """
+
+    def __init__(self, media_container: MediaContainer, out_stream: AudioStream, track_index: int,
+                 first_segment: CutSegment) -> None:
+        super().__init__(media_container, out_stream, track_index, first_segment, _OPUS_PREROLL)
+        head = out_stream.codec_context.extradata
+        if not head or bytes(head[:8]) != b'OpusHead':
+            self.preroll = []  # no pre-skip to set: decoders would play the pre-roll
+        elif self.preroll:
+            head = bytearray(bytes(head))
+            head[10:12] = round(self.preroll_length * 48000).to_bytes(2, 'little')  # pre-skip, in 48 kHz samples
+            out_stream.codec_context.extradata = bytes(head)
+
+
+def passthru_audio_cutter(media_container: MediaContainer, out_stream: AudioStream, track_index: int,
+                          first_segment: CutSegment, output_av_container: OutputContainer | None = None) -> PassthruAudioCutter:
+    """The cutter that copies this track (fork addition): Opus, and AAC / AC-3 into MP4, get pre-roll packets (see
+    PrerollPassthruAudioCutter). Matroska has no edit list, so a copied AAC track there starts as before."""
+    name = media_container.audio_tracks[track_index].av_stream.codec_context.name
+    if name in _OPUS_DECODERS:
+        return OpusPassthruAudioCutter(media_container, out_stream, track_index, first_segment)
+    if name in _OVERLAP_DECODERS and output_av_container is not None and (output_av_container.format.name or '') in _EDIT_LIST_FORMATS:
+        return PrerollPassthruAudioCutter(media_container, out_stream, track_index, first_segment, _OVERLAP_PREROLL)
+    return PassthruAudioCutter(media_container, out_stream, track_index)
+
+
 # Encoder to use when re-encoding audio, keyed by FFmpeg decoder name (some decoders and encoders differ)
 _AUDIO_ENCODER_FOR_DECODER = {
     'aac': 'aac', 'aac_fixed': 'aac', 'aac_latm': 'aac',
@@ -98,6 +184,12 @@ _AUDIO_ENCODER_FOR_DECODER = {
 }
 _LOSSLESS_AUDIO_PREFIXES = ('flac', 'alac', 'pcm_')
 _MIN_RECODE_AUDIO_BITRATE = 128_000  # HE-AAC sources (~64 kbps) become AAC-LC, which needs more bits
+# LAME's presets scale the input down below 256 kbps to leave headroom (0.95 up to 160 kbps, 0.97 at 192, 0.98 at
+# 224), and the ffmpeg CLI does the same: each re-encode would lower the level ~0.45 dB (fork addition)
+_MIN_RECODE_AUDIO_BITRATE_FOR = {'libmp3lame': 256_000}
+# Decoders whose copied packets break after a jump: an MP3 frame can take bits from earlier frames (the bit
+# reservoir), so after a join ~50 ms decode as silence. Such tracks are re-encoded when the output has a join.
+_JOIN_UNSAFE_AUDIO_DECODERS = ('mp3', 'mp3float')
 
 
 def _recode_audio_encoder_name(decoder_name: str, webm: bool = False) -> str:
@@ -120,10 +212,13 @@ def _is_webm(output_av_container: OutputContainer) -> bool:
     return (output_av_container.format.name or '') == 'webm'
 
 
-def audio_needs_recode(media_container: MediaContainer, output_av_container: OutputContainer, track_index: int) -> bool:
-    """True if the track can't be copied into this output: Opus/Vorbis-only WebM and another codec (fork addition)."""
+def audio_needs_recode(media_container: MediaContainer, output_av_container: OutputContainer, track_index: int,
+                       has_joins: bool = False) -> bool:
+    """True if the track can't be copied cleanly into this output (fork addition): Opus/Vorbis-only WebM and another
+    codec, or MP3 when the output joins pieces (or starts mid-stream)."""
     name = media_container.audio_tracks[track_index].av_stream.codec_context.name
-    return _is_webm(output_av_container) and name not in _WEBM_AUDIO_DECODERS
+    return ((_is_webm(output_av_container) and name not in _WEBM_AUDIO_DECODERS)
+            or (has_joins and name in _JOIN_UNSAFE_AUDIO_DECODERS))
 
 
 def create_recode_audio_output_stream(
@@ -151,7 +246,7 @@ def create_recode_audio_output_stream(
     out_stream.codec_context.layout = in_ctx.layout
     if not codec_name.startswith(_LOSSLESS_AUDIO_PREFIXES):
         source_bitrate = track.av_stream.bit_rate or in_ctx.bit_rate or 0
-        out_stream.codec_context.bit_rate = max(source_bitrate, _MIN_RECODE_AUDIO_BITRATE)
+        out_stream.codec_context.bit_rate = max(source_bitrate, _MIN_RECODE_AUDIO_BITRATE_FOR.get(codec_name, _MIN_RECODE_AUDIO_BITRATE))
     out_stream.time_base = Fraction(1, rate)
     out_stream.metadata.update(track.av_stream.metadata)
     out_stream.disposition = cast(Disposition, track.av_stream.disposition.value)
@@ -172,7 +267,9 @@ class RecodeAudioCutter:
                                    cut segment to stderr
     """
 
-    PREROLL_PACKETS = 2  # after a jump, decode a couple of earlier packets so the kept samples decode cleanly
+    # After a jump, decode a few earlier packets so the kept samples decode cleanly: 4 cover the 80 ms Opus decoders
+    # need, and the earlier MP3 frames a frame takes bits from (with 2, a cut MP3 started with 13-25 ms of silence)
+    PREROLL_PACKETS = 4
 
     def __init__(self, media_container: MediaContainer, out_stream: AudioStream, track_index: int) -> None:
         self.track = media_container.audio_tracks[track_index]

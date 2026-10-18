@@ -13,13 +13,13 @@ from smartcut.media_container import MediaContainer
 from smartcut.media_utils import VideoExportMode
 from smartcut.misc_data import AudioExportInfo, CutSegment, FadeInfo, SegmentWithFade
 from smartcut.track_cutters import (
-    PassthruAudioCutter,
     RecodeAudioCutter,
     SubtitleCutter,
     audio_needs_recode,
     create_audio_output_stream,
     create_recode_audio_output_stream,
     create_subtitle_output_stream,
+    passthru_audio_cutter,
 )
 from smartcut.video_cutter import (
     VideoCutter,
@@ -166,6 +166,25 @@ class _WorkProgress:
             self.progress.emit_fraction(min(1.0, (min(self.video_done, self.video_total) + self.pieces_done) / self.total))
 
 
+class OutputFormatError(ValueError):
+    """The output container can't hold the input's video codec (fork addition)."""
+
+
+_CODEC_NAMES = {'h264': 'H.264', 'hevc': 'H.265 (HEVC)', 'mpeg4': 'MPEG-4 Part 2', 'mpeg2video': 'MPEG-2'}
+
+
+def _check_webm_video(media_container: MediaContainer, out_path: str, video_settings: VideoSettings) -> None:
+    """WebM holds only VP8, VP9 and AV1 video, and smartcut copies the video except around cuts (fork addition).
+    Say so before writing anything: FFmpeg's error named an encoder ("'webm' format does not support 'libx264'")."""
+    stream = media_container.video_stream
+    if os.path.splitext(out_path)[1].lower() != '.webm' or stream is None or video_settings.codec_override != 'copy':
+        return
+    name = stream.codec_context.name or ''
+    if name not in ('vp8', 'vp9', 'libvpx', 'libvpx-vp9') and 'av1' not in name:  # AV1 decoders: libdav1d, av1, ...
+        raise OutputFormatError(f"WebM output needs VP8, VP9 or AV1 video; this video is {_CODEC_NAMES.get(name, name.upper())}: "
+                                "use .mp4 or .mkv")
+
+
 def make_adjusted_segment_times(positive_segments: list[tuple[Fraction, Fraction]], media_container: MediaContainer) -> list[tuple[Fraction, Fraction]]:
     adjusted_segment_times = []
     EPSILON = Fraction(1, 1_000_000)
@@ -248,6 +267,7 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
               external_generator_factories: list[StreamGeneratorFactory] | None = None) -> Exception | None:
     if video_settings is None:
         video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.NORMAL)
+    _check_webm_video(media_container, out_path, video_settings)
 
     # Handle both legacy tuple format and new SegmentWithFade format
     if positive_segments and isinstance(positive_segments[0], SegmentWithFade):
@@ -333,10 +353,13 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             include_video = True
             if output_av_container.format.name in ['ogg', 'mp3', 'm4a', 'ipod', 'flac', 'wav']: #ipod is the real name for m4a, I guess
                 include_video = False
-            # Audio tracks re-encoded as a whole: every one with audio fades, and in WebM those it can't hold (Opus)
+            # Audio tracks re-encoded as a whole: every one with audio fades, in WebM those it can't hold (Opus), and
+            # MP3 when this file's audio jumps (several segments, or a start after the media start)
+            file_segments = [output_path_segment[1]] if segment_mode else adjusted_segment_times
+            has_joins = len(file_segments) > 1 or file_segments[0][0] > media_container.start_time
             recode_tracks = {i for i, t in enumerate(audio_export_info.output_tracks[:len(media_container.audio_tracks)])
                              if t is not None and t.codec == 'passthru'
-                             and (has_audio_fades or audio_needs_recode(media_container, output_av_container, i))
+                             and (has_audio_fades or audio_needs_recode(media_container, output_av_container, i, has_joins))
                              } if audio_export_info is not None else set()
             if work is None and (isinstance(progress, WorkProgressCallback) or cancel_object is not None):
                 work = _WorkProgress(progress if isinstance(progress, WorkProgressCallback) else None, cancel_object,
@@ -377,7 +400,9 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                             generators.append(RecodeAudioCutter(media_container, audio_out_stream, track_i))
                         else:
                             audio_out_stream = create_audio_output_stream(media_container, output_av_container, track_i)
-                            generators.append(PassthruAudioCutter(media_container, audio_out_stream, track_i))
+                            generators.append(passthru_audio_cutter(media_container, audio_out_stream, track_i,
+                                                                    cut_segments[previously_done_segments],
+                                                                    output_av_container))
 
             for sub_track_i in range(len(media_container.subtitle_tracks)):
                 subtitle_out_stream = create_subtitle_output_stream(media_container, output_av_container, sub_track_i)

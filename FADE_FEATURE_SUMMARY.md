@@ -112,9 +112,24 @@ smartcut.process_segments("in.mp4", "out.mp4", [
 - The output stream is created from the encoder rather than copied from the source, so the stream header matches
   the packets: AAC and HE-AAC sources become AAC-LC (FFmpeg can't encode HE-AAC) at the source bitrate but at
   least 128 kbps. Other codecs are re-encoded with their own encoder when FFmpeg has one, else AAC.
+- MP3 tracks are re-encoded as a whole whenever the output has a join or starts mid-stream: an MP3 frame can take
+  bits from earlier frames (the bit reservoir), so copied MP3 had ~50 ms of silence after every join. They are
+  re-encoded at 256 kbps or more: below that LAME scales the input down (0.95 up to 160 kbps).
+- Copied Opus that starts mid-stream includes the 80 ms of earlier packets that Opus decoders need as pre-roll, and
+  the stream's pre-skip is set to their length, so decoders discard them (`OpusPassthruAudioCutter`). Before, the
+  copy rose from ~40 % of the level over its first 80 ms. In MKV/WebM all streams then start ~75 ms later, in sync.
+- Copied AAC and AC-3 into MP4/MOV/M4A that starts mid-stream also includes the frames just before the cut
+  (`PrerollPassthruAudioCutter`), at times before the output start; the MP4 edit list skips them. Before, the
+  audio began at the first whole frame after the cut (up to a frame, 13-33 ms, after the video) and its first
+  ~20 ms were low (frames overlap). Matroska has no edit list, so copies into .mkv start as before. Joins are
+  unchanged: a copied AAC track still has a short level change at each join, and the joins shift A/V by up to
+  a frame (~20 ms) each, because whole frames are copied.
 - `.webm` outputs: WebM holds only Opus and Vorbis audio, so other tracks (e.g. AAC, HE-AAC) are always
   re-encoded to Opus as a whole track (48 kHz, at least 128 kbps), fades or not. Opus/Vorbis tracks are copied
   when there are no audio fades. Other containers are unchanged.
+- `.webm` outputs need VP8, VP9 or AV1 video, and smartcut doesn't re-encode the whole video: other video (e.g.
+  H.264) fails before anything is written, with "WebM output needs VP8, VP9 or AV1 video; this video is H.264: use
+  .mp4 or .mkv" (`OutputFormatError`; `process_segments` returns False, the CLI exits with 1).
 - Audio is cut sample-accurately to each cut piece and kept locked to the video timeline (silence is inserted
   where the source has no audio). After a jump the decoder restarts two packets early, so the first kept samples
   decode cleanly.
@@ -162,6 +177,7 @@ Run from the repo root (tests live in `smartcut/tests/`):
 | `test_last_frame.py` | Cuts keep their last frame, also when they end with re-encoded frames (H.264, VP9, AV1, fades) |
 | `test_multitrack.py` | Every audio track is kept: copied without audio fades, each re-encoded as a whole with them |
 | `test_webm.py` | `.webm` outputs: AAC re-encoded to Opus (with and without fades), Opus copied |
+| `test_audio_joins.py` | No gaps or ramps at joins and at the start of cut audio (MP3, Opus) |
 | `regression/` | Measurement-based regression harness, test media generator and diagnostic tools (see its README) |
 
 ## Usage Examples
