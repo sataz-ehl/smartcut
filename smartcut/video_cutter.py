@@ -443,8 +443,9 @@ class VideoCutter:
             # represent the original video's settings.
             x265_params.append('info=0')
 
-            if self.log_level is not None:
-                x265_params.append(f'log_level={self.log_level}')
+            # Quiet by default, as the output stream's own x265-params (fork fix): sources without x265's options in their
+            # headers (camera footage) printed x265's info log for every re-encoded run
+            x265_params.append(f'log_level={self.log_level if self.log_level is not None else "error"}')
 
             if self.video_settings.quality == VideoExportQuality.LOSSLESS:
                 x265_params.append('lossless=1')
