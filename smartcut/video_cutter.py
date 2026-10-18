@@ -749,31 +749,25 @@ class VideoCutter:
         if s.gop_index > 0:
             decoder_priming_dts = self.media_container.gop_start_times_dts[s.gop_index - 1]
 
-        # Decode leading + CRA frames, collect packets for later remux
+        # Decode leading + CRA frames, collect packets for later remux. Only this GOP's frames are kept (fork fix): the
+        # priming GOP's frames just feed the decoder, and keeping them held a whole decoded GOP (720p: 152 frames,
+        # 200 MB, to re-encode 4 leading frames)
         collected_packets: list[Packet] = []
-        all_frames: list[VideoFrame] = []
+        gop_frames: list[VideoFrame] = []
+        gop_start_time = self.media_container.gop_start_times_pts_s[s.gop_index]
 
         for frame in self.fetch_frame(s.gop_start_dts, leading_end_dts, s.end_time,
                                        decoder_priming_dts, collected_packets):
-            if frame.pts is not None:
-                all_frames.append(frame)
+            if frame.pts is not None and frame.pts * (frame.time_base if frame.time_base is not None else self.in_time_base) >= gop_start_time:
+                gop_frames.append(frame)
 
         # Get CRA PTS (collected_packets has only non-leading packets, i.e., just CRA)
         assert len(collected_packets) > 0, "No CRA packet found in GOP"
         cra_pts = collected_packets[0].pts
         assert cra_pts is not None, "CRA packet has no PTS"
 
-        # Get GOP start time to filter out priming frames from previous GOPs
-        gop_start_time = self.media_container.gop_start_times_pts_s[s.gop_index]
-
-        # Leading frames: PTS >= GOP start AND PTS < CRA PTS (will be encoded)
-        # Filter by GOP start to exclude priming frames from previous GOPs
-        leading_frames = [
-            f for f in all_frames
-            if f.pts is not None
-            and f.pts * (f.time_base if f.time_base is not None else self.in_time_base) >= gop_start_time
-            and f.pts < cra_pts
-        ]
+        # Leading frames: this GOP's frames before the CRA (will be encoded)
+        leading_frames = [f for f in gop_frames if f.pts is not None and f.pts < cra_pts]
         leading_frames.sort(key=lambda f: f.pts if f.pts is not None else 0)
 
         # Encode leading frames with same timing formula as remux_segment
