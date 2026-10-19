@@ -31,30 +31,40 @@ What it does:
    and resolution, plus the app's typical edits.
    - It times every encoder run, piece and audio track (progress_timeline.install_timers).
    - It records every progress call, to replay it under other costs.
-3. Checks the cores used: CPU time / wall time per encoder run. Above the cores expected, the pinning didn't hold, as
-   x265's threads once escaped it; then nothing is adopted. Below 0.85 of one core, something else used the CPU.
-4. Fits the costs per codec (progress_timeline.fit_recode_cost; one resolution: a factor on the built-in shape), the
-   copy cost per frame and the audio cost per second. Codecs not calibrated get their costs in use, scaled by the
-   calibrated codecs' median speed ratio.
-5. Compares how evenly progress moves under the costs in use and the new ones, on the app's typical edits:
-   - replayed (the same recorded progress calls, through smart_cut._WorkProgress);
-   - in fresh real runs, interleaved (--repeat).
-6. Adopts the new costs only if both comparisons are more even: it writes them to the file smartcut reads
-   (SMARTCUT_PROGRESS_COSTS, else ~/.config/smartcut/progress_costs.json or %APPDATA%\\smartcut\\, or --out). The
-   previous file is kept as progress_costs.previous.json. Otherwise it writes progress_costs.candidate.json next to
-   it and leaves the file alone. It reports both either way.
+   - It releases memory after every edit, as the app does (release_memory), and prints what is left.
+3. Checks the cores used: CPU time / wall time per encoder run (and per real run). Above the cores expected, the
+   pinning didn't hold, as x265's threads once escaped it. On one core, below LOW_CPU (0.85): other load.
+4. Fits the costs per codec (progress_timeline.fit_recode_cost; one resolution: a factor on the shape of the costs in
+   use), the copy cost per frame and the audio cost per second. Codecs not calibrated get their costs in use, scaled
+   by the calibrated codecs' median speed ratio.
+5. Compares how evenly progress moves under the costs in use and new ones, replaying the recorded progress calls
+   through smart_cut._WorkProgress (the same timings for both):
+   - held-out check: costs fitted without the held-out edits (every edit at the app edits' height, 720p, and the
+     Facebook clip's), on those edits' calibration runs;
+   - real runs: fresh runs of the app's typical edits, interleaved (--repeat), under the costs fitted on all edits.
+6. The adoption rule (the regression README, "The adoption rule"): adopts the costs fitted on all the edits only if
+   both comparisons are more even by at least ADOPT_MARGIN (0.5) points, and not with --quick, when the pinning
+   didn't hold, when the CPU check warned, or without a held-out check (one resolution). It writes them to the file
+   smartcut reads (SMARTCUT_PROGRESS_COSTS, else ~/.config/smartcut/progress_costs.json or %APPDATA%\\smartcut\\, or
+   --out), keeping the previous file as progress_costs.previous.json. Otherwise it writes
+   progress_costs.candidate.json next to it and leaves the file alone. Either way it prints the comparison and
+   "ADOPTED: ..." or "NOT ADOPTED: <every reason>. ...". Files are written to a temporary file next to them and
+   renamed over them (os.replace).
 
 Time, on one desktop core (the built-in costs' machine; a server core may be slower):
 - --make-media: H.264, VP9, AV1 at 360/720/1080p, ~20 min (VP9 ~10, AV1 ~7, HEVC another ~12); 6 min on a
   6-core / 12-thread desktop. 74 MB for a 1080p clip and a Facebook one.
 - calibration, default: ~10 min of edits, plus ~4 min of real runs per --repeat (14 min in all, measured). With 4
   cores, 7 min.
-- --quick (360p, 45 s): ~2 min.
+- --quick (360p, 45 s): ~2 min. A smoke check, not a calibration: it never adopts.
 The plan's estimate is printed first.
 
 Run it at a quiet time: other load on the CPU shows as a CPU / wall ratio below 1 and makes the timings noisy.
 """
 import argparse
+import contextlib
+import ctypes
+import gc
 import hashlib
 import json
 import os
@@ -66,8 +76,13 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from smartcut.progress_costs import ProgressCosts
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]  # the smartcut repo root (smartcut/tests/regression/ -> ...)
@@ -89,6 +104,11 @@ LAYOUTS = {
     "P3": [(10.3, 25), (40.77, 55), (77.1, 90)],
 }
 FADES = {"fadein": 2, "fadeout": 2}
+# The adoption rule (the regression README, "The adoption rule"): the new costs must be more even than the costs in
+# use by at least ADOPT_MARGIN points on average, in both checks. Between two timing samples of the same edits, the
+# mean paired difference over the held-out edits varied by 0.08-0.18 points (sigma); a smaller gain isn't visible.
+ADOPT_MARGIN = 0.5
+LOW_CPU = 0.85  # on one core, CPU time / wall time below this: something else used the CPU
 # For the estimates, measured on one desktop core (Oct 2026): ms per frame to make the clips at 360/720/1080p, and
 # seconds per edit of a 90 s excerpt (FB2: Facebook's 360p H.264 + HE-AAC)
 MAKE_MS_PER_FRAME = {"h264": (9, 19, 28), "vp9": (34, 89, 166), "av1": (30, 58, 104), "hevc": (43, 103, 181)}
@@ -189,7 +209,7 @@ def make_media(clip: Path, out: Path, *, codecs: list[str], resolutions: list[in
     manifest = {"recipe": MEDIA_RECIPE, "excerpt": length, "made": datetime.now(UTC).isoformat(timespec="seconds"),
                 "ffmpeg": ffmpeg_version, "source": {"name": clip.name, "sha256": source_hash, **src},
                 "facebook": facebook.name if facebook else None, "files": files}
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    write_atomic(manifest_path, json.dumps(manifest, indent=2) + "\n")
     print(f"wrote {manifest_path}")
 
 
@@ -232,20 +252,24 @@ def segments(layout: str, fades: bool, length: float) -> list[dict]:
     return [{"start": round(a * scale, 3), "end": round(b * scale, 3), **(FADES if fades else {})} for a, b in LAYOUTS[layout]]
 
 
-def plan_cases(manifest: dict, codecs: list[str], resolutions: list[int], quick: bool) -> tuple[list[dict], list[str]]:
-    """The calibration edits and the names of the app edits among them (compared for evenness)."""
+def plan_cases(manifest: dict, codecs: list[str], resolutions: list[int], quick: bool) -> tuple[list[dict], list[str], list[str]]:
+    """The calibration edits, the names of the app edits among them (also run fresh, as real runs), and of the held-out
+    edits: every edit at the app edits' height (720p, or the largest below) and the Facebook clip's. The held-out
+    check fits costs on the other edits and judges them on these."""
     length = manifest["excerpt"]
     files = {(e["codec"], e["height"]): name for name, e in manifest["files"].items() if not e["facebook"]}
     heights = sorted({h for c, h in files if c in codecs and h in resolutions})
     if quick:
         heights = heights[:1]
     app_height = max([h for h in heights if h <= 720], default=heights[0]) if heights else None
-    cases, app = [], []
+    cases, app, held = [], [], []
 
-    def add(name: str, file: str, layout: str, fades: bool, is_app: bool) -> None:
+    def add(name: str, file: str, layout: str, fades: bool, *, is_app: bool, is_held: bool) -> None:
         cases.append({"name": name, "file": file, "segments": segments(layout, fades, length)})
         if is_app:
             app.append(name)
+        if is_held:
+            held.append(name)
 
     for codec in codecs:
         for h in heights:
@@ -253,15 +277,29 @@ def plan_cases(manifest: dict, codecs: list[str], resolutions: list[int], quick:
                 continue
             for fades in (False, True):
                 name = f"P2{'F' if fades else ''}_{codec}_{h}p"
-                add(name, files[(codec, h)], "P2", fades, h == app_height and (codec == "h264" or not fades))
+                add(name, files[(codec, h)], "P2", fades, is_app=h == app_height and (codec == "h264" or not fades),
+                    is_held=h == app_height)
         if codec == "h264" and not quick and (codec, app_height) in files:
             for fades in (False, True):
-                add(f"P3{'F' if fades else ''}_h264_{app_height}p", files[(codec, app_height)], "P3", fades, True)
+                add(f"P3{'F' if fades else ''}_h264_{app_height}p", files[(codec, app_height)], "P3", fades, is_app=True, is_held=True)
     fb = next((name for name, e in manifest["files"].items() if e["facebook"]), None)
     if fb:
-        add("FB2", fb, "P2", False, True)
-        add("FB2F", fb, "P2", True, False)
-    return cases, app
+        add("FB2", fb, "P2", False, is_app=True, is_held=True)
+        add("FB2F", fb, "P2", True, is_app=False, is_held=True)
+    return cases, app, held
+
+
+def split_problem(cases: list[dict], held: list[str], manifest: dict) -> str | None:
+    """Why the held-out check can't be made, or None: every codec held out needs edits of its own to fit on."""
+    def codec(case: dict) -> str:
+        return manifest["files"][case["file"]]["codec"]
+    fit_codecs = {codec(c) for c in cases if c["name"] not in held}
+    missing = sorted({codec(c) for c in cases if c["name"] in held} - fit_codecs)
+    if not fit_codecs:
+        return "all the edits are at one resolution, the check needs two (see --resolutions)"
+    if missing:
+        return f"{', '.join(missing)} has edits at one resolution only, the check needs two (see --resolutions)"
+    return None
 
 
 def estimate_seconds(case: dict, manifest: dict) -> float:
@@ -318,6 +356,51 @@ def install_recorder(record: dict) -> None:
         setattr(work, name, wrapper)
 
 
+def release_memory() -> None:
+    """Between edits, as the app does after every edit (video_downloader.release_memory): the garbage collector, then
+    glibc's malloc_trim(0) hands the memory freed back to the OS. Without it freed codec buffers stay mapped, and a
+    957 MB server can swap during the later edits, which slows their timings."""
+    gc.collect()
+    if sys.platform.startswith("linux"):
+        with contextlib.suppress(OSError, AttributeError):  # not glibc (e.g. musl)
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+
+
+def resident_mb() -> float | None:
+    """This process's resident memory in MB (Linux: /proc; Windows: its working set); None where unknown."""
+    try:
+        if sys.platform.startswith("linux"):
+            return int(Path("/proc/self/statm").read_text().split()[1]) * os.sysconf("SC_PAGE_SIZE") / 2**20  # pyright: ignore[reportAttributeAccessIssue]
+        if sys.platform == "win32":
+            from ctypes import wintypes  # noqa: PLC0415
+
+            class Counters(ctypes.Structure):  # PROCESS_MEMORY_COUNTERS
+                _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                            *((name, ctypes.c_size_t) for name in ("PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                                                                    "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
+                                                                    "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage"))]
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+            kernel32.K32GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
+            counters = Counters(cb=ctypes.sizeof(Counters))
+            if kernel32.K32GetProcessMemoryInfo(kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb):
+                return counters.WorkingSetSize / 2**20
+    except (OSError, ValueError, AttributeError, IndexError):
+        pass
+    return None
+
+
+def run_edits(cases: list[dict], run) -> dict:  # noqa: ANN001 (run: case -> its result)
+    """Each case's result; after each edit the memory is released (release_memory) and what is left recorded."""
+    edits = {}
+    for case in cases:
+        result = run(case)
+        release_memory()
+        result["rss_mb"] = resident_mb()
+        edits[case["name"]] = result
+    return edits
+
+
 def run_edit(media: Path, case: dict, out_dir: Path, record: dict | None = None) -> dict:
     import smartcut  # noqa: PLC0415
     calls = []
@@ -337,22 +420,22 @@ def run_edit(media: Path, case: dict, out_dir: Path, record: dict | None = None)
 def child_measure(spec: dict) -> dict:
     """Calibration edits with timers and the recorder: the runs to fit, the copy and audio costs, the records."""
     info = child_setup(spec["cores"])
-    from collections import defaultdict  # noqa: PLC0415
-
     import progress_timeline  # noqa: PLC0415
     stats, runs, record = defaultdict(float), [], {}
     progress_timeline.install_timers(stats, runs)
     install_recorder(record)
     media, out_dir = Path(spec["media"]), Path(spec["out_dir"])
-    edits = {}
-    for case in spec["cases"]:
-        first = len(runs)
+
+    def run(case: dict) -> dict:
+        first, before = len(runs), dict(stats)
         result = run_edit(media, case, out_dir, record)
         for r in runs[first:]:
             r["case"] = case["name"]
-        edits[case["name"]] = result
+        result["stats"] = {k: stats[k] - before.get(k, 0.0) for k in ("copy_s", "copy_frames", "audio_s", "audio_media_s")}
         print(f"  {case['name']:<18} {result['end']:6.1f} s", flush=True)
-    return {"info": info, "runs": runs, "stats": dict(stats), "edits": edits}
+        return result
+
+    return {"info": info, "runs": runs, "stats": dict(stats), "edits": run_edits(spec["cases"], run)}
 
 
 def child_real(spec: dict) -> dict:
@@ -361,7 +444,7 @@ def child_real(spec: dict) -> dict:
     record: dict = {}
     install_recorder(record)
     media, out_dir = Path(spec["media"]), Path(spec["out_dir"])
-    return {"info": info, "edits": {case["name"]: run_edit(media, case, out_dir, record) for case in spec["cases"]}}
+    return {"info": info, "edits": run_edits(spec["cases"], lambda case: run_edit(media, case, out_dir, record))}
 
 
 def run_child(mode: str, spec: dict, costs_file: Path, work: Path) -> dict:
@@ -410,15 +493,28 @@ def _at720(cost: tuple) -> float:
     return cost[0] + cost[1] * 0.9216
 
 
-def fit(measured: dict, old) -> tuple[object, dict]:  # noqa: ANN001
-    """The new costs and notes on the fit."""
+def edit_stats(measured: dict, names: list[str] | None) -> dict:
+    """Copy and audio times over the named edits (None: all). Recordings without per-edit stats give the totals."""
+    edits = measured["edits"]
+    if names is None or not all("stats" in edits[n] for n in names):
+        return measured["stats"]
+    total: dict[str, float] = defaultdict(float)
+    for n in names:
+        for k, v in edits[n]["stats"].items():
+            total[k] += v
+    return total
+
+
+def fit(measured: dict, old, names: list[str] | None = None) -> "tuple[ProgressCosts, dict]":  # noqa: ANN001
+    """The costs fitted on the runs of the named edits (None: all of them), and notes on the fit."""
     import numpy as np  # noqa: PLC0415
     import progress_timeline  # noqa: PLC0415
 
     from smartcut import progress_costs  # noqa: PLC0415
     by_codec: dict[str, list] = {}
     for r in measured["runs"]:
-        by_codec.setdefault(r["codec"], []).append(r)
+        if names is None or r["case"] in names:
+            by_codec.setdefault(r["codec"], []).append(r)
     recode, notes, ratios = {}, {"codecs": {}}, []
     for codec, runs in sorted(by_codec.items()):
         mps = sorted({round(r["mp"], 4) for r in runs})
@@ -436,7 +532,7 @@ def fit(measured: dict, old) -> tuple[object, dict]:  # noqa: ANN001
             recode[codec] = (round(fixed * speed, 6), round(per_mp * speed, 6), busy, round(fade * speed, 6))
             scaled.append(codec)
     notes["scaled"] = {"codecs": scaled, "factor": round(speed, 3)}
-    st = measured["stats"]
+    st = edit_stats(measured, names)
     copy = st["copy_s"] / st["copy_frames"] if st.get("copy_frames") else old.copy_per_frame
     audio = st["audio_s"] / st["audio_media_s"] if st.get("audio_media_s") else old.audio_per_second
     notes["copy us per frame"] = round(copy * 1e6, 1)
@@ -446,23 +542,87 @@ def fit(measured: dict, old) -> tuple[object, dict]:  # noqa: ANN001
     return progress_costs.ProgressCosts(recode, round(copy, 9), round(audio, 6), "candidate"), notes
 
 
-def core_check(measured: dict) -> tuple[list[str], bool, dict]:
-    """Warnings, whether the pinning held, and the CPU / wall ratio per codec."""
+def core_check(measured: dict) -> tuple[list[str], list[str], dict]:
+    """Warnings that the pinning didn't hold, warnings of other load (one core), and the CPU / wall ratio per codec,
+    from the encoder runs of 0.5 s or more."""
     expected = measured["info"]["expected_cores"]
-    warnings, held, per_codec = [], True, {}
+    escaped, loaded, per_codec = [], [], {}
     for r in measured["runs"]:
         if r["s"] >= 0.5:
             per_codec.setdefault(r["codec"], []).append(r["cpu"] / r["s"])
     for codec, ratios in per_codec.items():
         worst, median = max(ratios), statistics.median(ratios)
         if worst > expected * 1.15 + 0.1:
-            held = False
-            warnings.append(f"{codec}: an encoder run used {worst:.2f} cores, more than the {expected} this process may use: "
-                            "its threads escaped the pinning (as x265's once did); these timings are not this machine's")
-        if expected == 1 and median < 0.85:
-            warnings.append(f"{codec}: encoder runs got {median:.2f} of the core (median): something else used the CPU "
-                            "(another process, or the VM's steal time); rerun at a quiet time")
-    return warnings, held, {c: round(statistics.median(v), 2) for c, v in per_codec.items()}
+            escaped.append(f"{codec}: an encoder run used {worst:.2f} cores, more than the {expected} this process may use: "
+                           "its threads escaped the pinning (as x265's once did); these timings are not this machine's")
+        if expected == 1 and median < LOW_CPU:
+            loaded.append(f"{codec}: encoder runs got {median:.2f} of the core (median): something else used the CPU "
+                          "(another process, or the VM's steal time); rerun at a quiet time")
+    return escaped, loaded, {c: round(statistics.median(v), 2) for c, v in per_codec.items()}
+
+
+def real_core_check(result: dict) -> tuple[list[str], list[str]]:
+    """As core_check, for the real runs (no timers there: whole edits of 1 s or more)."""
+    expected = result["info"]["expected_cores"]
+    escaped, loaded = [], []
+    for name, edit in result["edits"].items():
+        if edit["end"] < 1.0:
+            continue
+        used = edit["cpu"] / edit["end"]
+        if used > expected * 1.15 + 0.1:
+            escaped.append(f"real run {name} used {used:.2f} cores, more than the {expected} expected: the pinning didn't hold")
+        if expected == 1 and used < LOW_CPU:
+            loaded.append(f"real run {name} got {used:.2f} of the core: something else used the CPU; rerun at a quiet time")
+    return escaped, loaded
+
+
+def decide(*, quick: bool, pinned: bool, quiet: bool, no_split: str | None, held_out: tuple[float, float],
+           real: tuple[float, float]) -> tuple[bool, list[str]]:
+    """The adoption rule: whether to adopt the new costs, and the reasons not to. held_out and real are the mean
+    evenness (%, in use and new) of the held-out check and of the real runs; both must improve by ADOPT_MARGIN."""
+    reasons = []
+    if quick:
+        reasons.append("--quick is a smoke check, not a calibration")
+    if not pinned:
+        reasons.append("the pinning didn't hold")
+    if not quiet:
+        reasons.append("the CPU check warned of other load")
+    if no_split:
+        reasons.append(f"no held-out check: {no_split}")
+    elif not (held_out[1] <= held_out[0] - ADOPT_MARGIN and real[1] <= real[0] - ADOPT_MARGIN):
+        reasons.append(f"not more even by {ADOPT_MARGIN} points (held-out edits {held_out[0]:.1f} -> {held_out[1]:.1f} %, "
+                       f"real runs {real[0]:.1f} -> {real[1]:.1f} %)")
+    return not reasons, reasons
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Write text to path through a temporary file in its folder and os.replace(): readers (smartcut at a process's
+    first edit) see the old file or the new one, never part of it, also if this process stops midway."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
+def save_costs(target: Path, text: str, adopt: bool) -> Path:
+    """Adopted: text to target, the file it replaces kept as progress_costs.previous.json. Otherwise text to
+    progress_costs.candidate.json next to it, target unchanged. Returns the file written."""
+    if adopt:
+        if target.exists():
+            write_atomic(target.with_name("progress_costs.previous.json"), target.read_text(encoding="utf-8"))
+        write_atomic(target, text)
+        return target
+    candidate = target.with_name("progress_costs.candidate.json")
+    write_atomic(candidate, text)
+    return candidate
 
 
 def mean(values: list[float]) -> float:
@@ -511,7 +671,7 @@ def main() -> None:
     ap.add_argument("--media", type=Path, metavar="DIR", help="the test clips (with a clip: made there if needed)")
     ap.add_argument("--codecs", default=",".join(DEFAULT_CODECS), help=f"of {', '.join(CODECS)} (default: %(default)s)")
     ap.add_argument("--resolutions", default=",".join(map(str, DEFAULT_RESOLUTIONS)), help="heights (default: %(default)s)")
-    ap.add_argument("--quick", action="store_true", help="the smallest resolution, 2-segment edits; a 45 s excerpt when making media")
+    ap.add_argument("--quick", action="store_true", help="a smoke check that never adopts: the smallest resolution, 2-segment edits; a 45 s excerpt when making media")
     ap.add_argument("--cores", type=int, help="measure on N cores, as on an N-CPU machine (default: the cores this process gets)")
     ap.add_argument("--repeat", type=int, default=1, help="real runs of each set of costs (default: %(default)s)")
     ap.add_argument("--out", type=Path, help="where to write (default: the file smartcut reads)")
@@ -544,7 +704,9 @@ def main() -> None:
     if args.quick:
         resolutions = resolutions[:1]  # the smallest asked for
     manifest = check_media(media, codecs, resolutions)
-    cases, app = plan_cases(manifest, codecs, resolutions, args.quick)
+    cases, app, held = plan_cases(manifest, codecs, resolutions, args.quick)
+    no_split = split_problem(cases, held, manifest)
+    fit_on = [c["name"] for c in cases if c["name"] not in held]
     target = args.out or progress_costs.progress_costs_path()
     old, messages = progress_costs.load(target)
     for _, text in messages:
@@ -553,8 +715,11 @@ def main() -> None:
     edits_s = sum(estimate_seconds(c, manifest) for c in cases)
     real_s = sum(estimate_seconds(c, manifest) for c in real_cases) * 2 * args.repeat
     print(f"\nplan: {len(cases)} calibration edits ({', '.join(c['name'] for c in cases)})")
+    print(f"      held out: {', '.join(held)}" + (f" (no held-out check: {no_split})" if no_split else f"; fitted without them on {', '.join(fit_on)}"))
     print(f"      then the app edits {', '.join(app)} with the costs in use and the new ones, {args.repeat}x each")
     print(f"      cores: {args.cores or 'as this process gets them'}; media {media} (excerpt {manifest['excerpt']:.0f} s)")
+    if args.quick:
+        print("      --quick: a smoke check; it writes the candidate only, never the file smartcut reads")
     print(f"estimated: ~{edits_s / 60:.1f} min of edits + ~{real_s / 60:.1f} min of real runs on one desktop core "
           "(one server core may be slower; more cores, faster)")
     if args.estimate:
@@ -572,31 +737,39 @@ def main() -> None:
     failed = [n for n, e in measured["edits"].items() if not e["ok"]]
     if failed:
         sys.exit(f"edits failed: {', '.join(failed)}")
+    memory = [e["rss_mb"] for e in measured["edits"].values() if e.get("rss_mb") is not None]
+    if memory:
+        print(f"  memory after each edit, released: {min(memory):.0f}-{max(memory):.0f} MB")
 
-    warnings, held, ratios = core_check(measured)
+    escaped, loaded, ratios = core_check(measured)
     print(f"\ncores: {measured['info']['expected_cores']} expected (this process may use {measured['info']['available_cpus']}"
           f"{', pinned to CPUs ' + str(measured['info']['cpus']) if 'cpus' in measured['info'] else ''}); "
           f"CPU / wall per encoder run, median: {ratios}")
-    if warnings:
-        banner(warnings)
+    if escaped or loaded:
+        banner(escaped + loaded)
 
     new, notes = fit(measured, old)
-    print("\nfitted (fixed s, per_mp s, busy, fade s/MP):")
+    held_fit = fit(measured, old, fit_on)[0] if not no_split else None
+    print("\nfitted on all the edits (fixed s, per_mp s, busy, fade s/MP):")
     for codec, values in sorted(new.recode.items()):
         n = notes["codecs"].get(codec)
         what = (f"{n['runs']} runs, median error {n['median run error %']} %, a 720p frame {n['was']} -> {n['ms per 720p frame']} ms"
-                + (" (one resolution: built-in shape kept)" if n["shape kept"] else "")) if n else \
+                + (" (one resolution: shape in use kept)" if n["shape kept"] else "")) if n else \
             f"not calibrated: costs in use x {notes['scaled']['factor']}"
         print(f"  {codec:<5} {values}  {what}")
     print(f"  copy  {notes['copy us per frame']} us per frame (in use {old.copy_per_frame * 1e6:.1f}); "
           f"audio {notes['audio s per second']} s per second (in use {old.audio_per_second})")
+    if held_fit is not None:
+        print("  without the held-out edits: " + ", ".join(f"{c} {held_fit.recode[c]}" for c in sorted(notes["codecs"])))
 
     print("\nevenness, largest distance from an even pace at the updates (%), in use -> new:")
     replayed = {}
     for name, edit in measured["edits"].items():
         recorded = evenness_of(edit["calls"], edit["end"])
-        r_old, r_new = replay(edit, old), replay(edit, new)
-        replayed[name] = {"recorded": round(recorded[0], 2), "in use": round(r_old[0], 2), "new": round(r_new[0], 2)}
+        r_old = replay(edit, old)
+        replayed[name] = {"recorded": round(recorded[0], 2), "in use": round(r_old[0], 2), "new": round(replay(edit, new)[0], 2)}
+        if held_fit is not None and name in held:
+            replayed[name]["held-out fit"] = round(replay(edit, held_fit)[0], 2)
         if abs(r_old[0] - recorded[0]) > 0.5:
             print(f"  NOTE {name}: the replay ({r_old[0]:.1f} %) doesn't match the run ({recorded[0]:.1f} %)")
     real = {name: {"in use": [], "new": []} for name in app}  # each fresh run as it went, with its set of costs
@@ -614,27 +787,37 @@ def main() -> None:
                 real[name][label].append(round(evenness_of(edit["calls"], edit["end"])[0], 2))
                 paired[name]["in use"].append(round(replay(edit, old)[0], 2))
                 paired[name]["new"].append(round(replay(edit, new)[0], 2))
-                if edit["cpu"] / edit["end"] > result["info"]["expected_cores"] * 1.15 + 0.1:
-                    held = False
-                    banner([f"real run {name} used {edit['cpu'] / edit['end']:.2f} cores, more than the "
-                            f"{result['info']['expected_cores']} expected: the pinning didn't hold"])
-    print(f"\n  {'edit':<18} {'calibration runs':>17} {'real runs, paired':>19}   real runs as they went")
-    for name in app:
-        r, q, pr = replayed[name], real[name], paired[name]
-        print(f"  {name:<18} {r['in use']:7.1f} -> {r['new']:5.1f}  {mean(pr['in use']):7.1f} -> {mean(pr['new']):5.1f}     "
-              f"{'/'.join(map(str, q['in use']))} -> {'/'.join(map(str, q['new']))}")
-    rep_old, rep_new = mean([replayed[n]["in use"] for n in app]), mean([replayed[n]["new"] for n in app])
+            run_escaped, run_loaded = real_core_check(result)
+            if run_escaped or run_loaded:
+                banner(run_escaped + run_loaded)
+            escaped += run_escaped
+            loaded += run_loaded
+    print(f"\n  {'edit':<18} {'held-out check':>15} {'real runs, paired':>19}   real runs as they went")
+    for name in held if held_fit is not None else app:
+        r = replayed[name]
+        check = f"{r['in use']:7.1f} -> {r['held-out fit']:5.1f}" if "held-out fit" in r else f"{'':>16}"
+        live = ""
+        if name in app:
+            pr, q = paired[name], real[name]
+            live = f"  {mean(pr['in use']):7.1f} -> {mean(pr['new']):5.1f}     {'/'.join(map(str, q['in use']))} -> {'/'.join(map(str, q['new']))}"
+        print(f"  {name:<18} {check}{live}")
+    held_old = mean([replayed[n]["in use"] for n in held if "held-out fit" in replayed[n]])
+    held_new = mean([replayed[n]["held-out fit"] for n in held if "held-out fit" in replayed[n]])
     real_old, real_new = mean([v for n in app for v in paired[n]["in use"]]), mean([v for n in app for v in paired[n]["new"]])
     live_old, live_new = mean([v for n in app for v in real[n]["in use"]]), mean([v for n in app for v in real[n]["new"]])
-    print(f"  {'mean':<18} {rep_old:7.1f} -> {rep_new:5.1f}  {real_old:7.1f} -> {real_new:5.1f}     {live_old:.1f} -> {live_new:.1f}")
+    held_text = f"{held_old:7.1f} -> {held_new:5.1f}" if held_fit is not None else f"{'(none)':>16}"
+    print(f"  {'mean':<18} {held_text}  {real_old:7.1f} -> {real_new:5.1f}     {live_old:.1f} -> {live_new:.1f}")
     all_old = mean([v["in use"] for v in replayed.values()])
     all_new = mean([v["new"] for v in replayed.values()])
-    print(f"  all {len(replayed)} calibration edits, replayed: {all_old:.1f} -> {all_new:.1f}")
-    print("  calibration runs: replayed under both sets (the runs the new costs were fitted on). Real runs, paired: every\n"
-          "  fresh run replayed under both sets, the same timings for both: this and the calibration runs decide. As they\n"
-          "  went: each run with its own set; noisy (the same short edit varies a few % from run to run).")
+    print(f"  all {len(replayed)} calibration edits, replayed under the new costs (fitted on them): {all_old:.1f} -> {all_new:.1f}")
+    print(f"  Held-out check: the held-out edits' calibration runs, replayed under the costs in use and costs fitted\n"
+          f"  without them. Real runs, paired: fresh runs of the app edits, each replayed under the costs in use and the\n"
+          f"  new ones (fitted on all the edits), the same timings for both. Adopted if both are more even by at least\n"
+          f"  {ADOPT_MARGIN} points. As they went: each run with its own costs; noisy (the same short edit varies a few % from\n"
+          f"  run to run).")
 
-    adopt = held and rep_new < rep_old and real_new < real_old
+    adopt, reasons = decide(quick=args.quick, pinned=not escaped, quiet=not loaded, no_split=no_split,
+                            held_out=(held_old, held_new), real=(real_old, real_new))
     import importlib  # noqa: PLC0415
 
     import av  # noqa: PLC0415
@@ -652,32 +835,28 @@ def main() -> None:
     }
     comparison = {
         "evenness": {"calibration runs, replayed": replayed, "real runs, paired": paired, "real runs, as they went": real,
-                     "means": {"calibration runs, app edits": [round(rep_old, 2), round(rep_new, 2)],
+                     "means": {"held-out check": [round(held_old, 2), round(held_new, 2)] if held_fit is not None else None,
                                "real runs, paired": [round(real_old, 2), round(real_new, 2)],
                                "real runs, as they went": [round(live_old, 2), round(live_new, 2)],
                                "calibration runs, all": [round(all_old, 2), round(all_new, 2)]}},
+        "held_out": held, "fitted_without_them_on": fit_on, "held_out_fit": json.loads(progress_costs.to_json(held_fit))["recode_cost"]
+        if held_fit is not None else None,
+        "margin": ADOPT_MARGIN, "not_adopted_because": reasons,
         "costs_before": json.loads(progress_costs.to_json(old))}
     text = progress_costs.to_json(new, measured_info, {**comparison, "adopted": adopt})
     progress_costs.parse(json.loads(text))  # what smartcut will read must load
-    target.parent.mkdir(parents=True, exist_ok=True)
-    verdict = f"calibration runs {rep_old:.1f} -> {rep_new:.1f} %, real runs {real_old:.1f} -> {real_new:.1f} %"
+    written = save_costs(target, text, adopt)
     if adopt:
-        if target.exists():
-            shutil.copy2(target, target.with_name("progress_costs.previous.json"))
-        target.write_text(text)
-        print(f"\nADOPTED: more even ({verdict}). Wrote {target}")
+        print(f"\nADOPTED: more even by at least {ADOPT_MARGIN} points (held-out edits {held_old:.1f} -> {held_new:.1f} %, "
+              f"real runs {real_old:.1f} -> {real_new:.1f} %). Wrote {written}")
         print("smartcut reads it at the first edit of a process: restart the app (e.g. sudo systemctl restart gradio-apps).")
     else:
-        candidate = target.with_name("progress_costs.candidate.json")
-        candidate.write_text(text)
-        why = "the pinning didn't hold" if not held else f"not more even ({verdict})"
-        print(f"\nNOT ADOPTED: {why}. {target} unchanged; the candidate is in {candidate}")
+        print(f"\nNOT ADOPTED: {'; '.join(reasons)}. {target} unchanged; the candidate is in {written}")
     print(f"smartcut reads {progress_costs.progress_costs_path()} "
           f"({'SMARTCUT_PROGRESS_COSTS' if os.environ.get(progress_costs.ENV_VAR) else 'the default for this user'})"
           + ("; --out wrote elsewhere: point SMARTCUT_PROGRESS_COSTS at it" if args.out and args.out != progress_costs.progress_costs_path() else ""))
     if not args.work:
         shutil.rmtree(work, ignore_errors=True)
-
 
 if __name__ == "__main__":
     main()
