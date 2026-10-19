@@ -151,6 +151,24 @@ The core feature of smartcut is intelligent minimal re-encoding that preserves q
 - CRA (Clean Random Access) GOPs with RASL leading pictures (e.g. x265's default open GOPs): when stream continuity
   breaks (after a cut or skip), the leading pictures are re-encoded and the CRA and its trailing pictures copied
 - Checked frame by frame on x265 open- and closed-GOP clips (regression cases `E1`-`E6`)
+- Also in Matroska / WebM sources, where the first GOP's start in decoding order is unknown (below): a cut from inside
+  the first GOP into the next failed there before (fork fix; regression cases `K3`, `K4`)
+
+### Matroska / WebM Sources
+(see `FADE_FEATURE_SUMMARY.md`, Video)
+- **Segment times count from the container start**, the earliest first timestamp of any stream, as FFmpeg's `-ss`
+  does (decided, as upstream). Matroska has no edit list, so it keeps the audio encoder's delay in the timeline
+  (AAC: 1024 samples, 21 ms at 48 kHz; Opus: 6.5 ms): the container starts that much before the first video frame.
+  An MP4 whose audio was encoded into it hides the delay in its edit list. So the same cut of the same content can
+  keep one frame more from the MKV than from the MP4, and place every frame up to the delay earlier: 79 frames
+  instead of 78, the first 18 ms after the cut instead of 30 ms, for two segments from 1.37 s of a 30 fps clip with
+  AAC.
+- **No DTS stored.** FFmpeg gives the first packets of a file (as many as the codec's reorder delay) none, so the
+  first GOP's start in decoding order is unknown. Packets without a DTS count as at the last DTS seen, and the first
+  ones as where decoding starts (`VideoCutter.fetch_frame`).
+- Measured frame by frame (regression cases `K1`-`K7`, `smartcut/tests/test_matroska_source.py`): H.264, HEVC, VP9 and
+  AV1 sources in MKV / WebM, cut into MKV, WebM and MP4, and MP4 sources into MKV, with and without fades, on and off
+  keyframes: every frame is the one expected, in its place.
 
 ### H.264 NAL Unit Detection
 (`smartcut/nal_tools.py`)
@@ -183,7 +201,7 @@ All format combinations are tested in the test suite (see README lines 176-219):
 ## Practical Recommendations
 
 1. **For fastest cutting**: Use `videofadein`/`videofadeout` and one segment (or segments that touch) to keep audio as passthrough
-2. **For format conversion**: MP4↔MKV conversions fully tested and optimized
+2. **For format conversion**: MP4↔MKV conversions fully tested and optimized (cut times in an MKV count from its container start, up to the audio encoder's delay before the video: see Matroska / WebM Sources)
 3. **For maximum compatibility**: Use MP4 with H.264 codec (most universal)
 4. **For archival**: Use MKV with H.265 (better compression, supports attachments)
 5. **For streaming**: Use VP9 or AV1 in WebM or MP4

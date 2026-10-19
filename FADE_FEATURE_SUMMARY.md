@@ -112,6 +112,24 @@ smartcut.process_segments("in.mp4", "out.mp4", [
   table each (8/10/12-bit planar, limited or full range). The result goes into a new frame, because the decoder
   may still use the decoded frame as a reference. Other pixel formats (e.g. NV12) fall back to fading in RGB24.
   At 1080p this takes ~14 ms per frame, against ~39 ms for the earlier RGB round trip.
+- **Segment times count from the container start** (decided, as upstream): the earliest first timestamp of any
+  stream, as FFmpeg's `-ss` and players' timelines count. A cut keeps the frames with start <= t < end on that
+  timeline, and the output's time 0 is the cut, so its first frame comes as long after 0 as that frame came after the
+  segment start. A segment from the file start (0) starts at the first video frame.
+  - **So the same content can cut differently in Matroska / WebM and in MP4.** Matroska has no edit list: it keeps
+    the audio encoder's delay in the timeline, at negative timestamps (AAC 1024 samples, 21 ms at 48 kHz; Opus 312,
+    6.5 ms), or, remuxed by FFmpeg, with the video starting that much after the audio. An MP4 whose audio was encoded
+    into it hides the delay in its edit list, so there the container starts with the first video frame (a remux from
+    MKV can keep the offset). A cut can then keep one frame more (or fewer) from the MKV, and place every frame up to
+    the delay earlier.
+  - Example: 2 segments from 1.37 s (1.37-2.5, 3.1-4.6) of a 30 fps clip with AAC in MKV, video from 0 and audio from
+    -21 ms. 1.37 s is pts 1.349, so frame 1.367 is kept: 79 frames, the first 18 ms after the cut. From the same
+    video made as MP4: 78 frames, the first 30 ms after it. With Opus in WebM (audio from -7 ms): 79 frames, the first
+    4 ms after. FFmpeg's `-ss 1.37 -to 2.5` keeps the same 34 frames from both Matroska files.
+  - Measured on frame-counter clips (H.264, HEVC, VP9, AV1; MKV, WebM, MP4 sources and outputs; cuts on and off
+    keyframes, ending on a keyframe, from the file start, with and without fades): every output frame is the source
+    frame expected, within 0.0 ms of its place (MP4 into MKV: ±0.3 ms; MP4 outputs: up to 1 ms early, the movie
+    timescale).
 
 ### Audio
 **Copy the track, unless it joins segments, fades, or is lossless and starts mid-stream; then re-encode it as a
@@ -317,6 +335,16 @@ whole, if that can be done faithfully** (decided; `audio_needs_recode()` and `re
   prime the decoder. Only the GOP's own frames are kept now: all the decoded frames were, a whole GOP (720p: 152
   frames, 200 MB, for 4 leading frames), and that piece set the edit's peak. 720p, 2 segments with fades:
   +470 → +297 MB, same output.
+- HEVC open GOPs in Matroska / WebM sources (fork fix, pre-existing upstream): a cut from inside the first GOP whose
+  next GOP was copied failed (`pts (-1349) < dts (419)`, `process_segments` returned False), with or without fades,
+  into any container.
+  - Matroska stores no DTS, so FFmpeg gives the first packets of a file none (as many as the codec's reorder delay),
+    and the first GOP's start in decoding order is unknown.
+  - Priming the next GOP's leading pictures from it therefore decodes from the file start. Packets without a DTS
+    counted as at the start of the GOP being re-encoded, so the file's first packets were collected as that GOP's own
+    and copied after the cut.
+  - They now count as at the DTS of the last packet that had one, and the first ones as where decoding starts
+    (`VideoCutter.fetch_frame`). Sources whose packets all have a DTS (MP4) take the same path as before.
 - HEVC sources with x265's options in their headers: smartcut reuses them (they make the re-encoded GOPs match), but
   not the threads of the machine that encoded the source (`frame-threads`, `numa-pools`, `lookahead-threads`):
   from a 12-thread PC they gave a 1-CPU server a 12-thread pool and 3 frame threads. Without them, one core,
@@ -352,6 +380,7 @@ Run from the repo root (tests live in `smartcut/tests/`):
 | `verify_audio_fade.py` | Measured audio level ramps for fade-in, fade-out, both |
 | `test_cancel.py` | Cancelling (also midway through re-encoding, with and without progress, and in the encoder's last flush), steady progress, input closed (also after a cancel in the last flush) |
 | `test_last_frame.py` | Cuts keep their last frame, also when they end with re-encoded frames (H.264, VP9, AV1, fades) |
+| `test_matroska_source.py` | Matroska / WebM sources (H.264, HEVC with open GOPs, VP9; AAC / Opus at negative timestamps) into MKV / WebM and MP4: exactly the frames from the container start's timeline, each in its place; HEVC from inside the first GOP into the next (failed before the fix) |
 | `test_multitrack.py` | Every audio track is kept: copied when exact, each re-encoded as a whole with a join or audio fades |
 | `test_webm.py` | `.webm` outputs: AAC re-encoded to Opus (with and without fades), Opus copied from the start, re-encoded from mid-stream |
 | `test_audio_bitrate.py` | Bitrate of re-encoded audio: from the packets when the source reports none, floors per channel, MP3, lossless sources, encoder limits; cuts at about the source's rate |
