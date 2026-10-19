@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Tests .webm outputs. WebM holds only Opus and Vorbis audio, so other audio (e.g. AAC) is re-encoded to Opus as a
-whole track, with or without audio fades; Opus audio is copied when there are no audio fades.
+whole track, with or without audio fades. Opus audio is copied without audio fades or a join, also from mid-stream
+(decided: from the first whole packet after the cut, as WebM has no edit list).
 
 Checks: the output decodes completely, the audio track is Opus at 48 kHz and as long as the video, fades have the
 right gain, and copied Opus packets are byte-identical to the source's. Sources (VP9 + AAC, VP9 + Opus) are made
@@ -17,9 +18,11 @@ import sys
 import tempfile
 from fractions import Fraction
 from pathlib import Path
+from typing import cast
 
 import av
 import numpy as np
+from av import AudioStream, VideoStream
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (tests live in smartcut/tests/)
 
@@ -32,10 +35,10 @@ def make_source(path: Path, audio_codec: str, video_codec: str = "libvpx-vp9") -
     """VP9 (or other) video and a 440 Hz tone, keyframe every second."""
     rate = 48000
     with av.open(str(path), "w") as out:
-        video = out.add_stream(video_codec, rate=FPS)
+        video = cast(VideoStream, out.add_stream(video_codec, rate=FPS))
         video.width, video.height, video.pix_fmt = 160, 96, "yuv420p"
         video.codec_context.options = {"g": "30", "cpu-used": "8", "deadline": "realtime"} if "vpx" in video_codec else {"g": "30"}
-        audio = out.add_stream(audio_codec, rate=rate, layout="stereo")
+        audio = cast(AudioStream, out.add_stream(audio_codec, rate=rate, layout="stereo"))
         n = rate // FPS
         for i in range(SECONDS * FPS):
             frame = av.VideoFrame.from_ndarray(np.full((96, 160, 3), 40 + i % 150, np.uint8), format="rgb24")
@@ -51,20 +54,20 @@ def make_source(path: Path, audio_codec: str, video_codec: str = "libvpx-vp9") -
 
 
 def audio_of(path: Path) -> tuple[str, int, np.ndarray, list[bytes]]:
-    with av.open(str(path)) as c:
+    with contextlib.closing(av.open(str(path))) as c:  # closing(): PyAV types __exit__ as maybe swallowing errors
         s = c.streams.audio[0]
         name, rate = s.codec_context.name, s.sample_rate
         packets = [bytes(p) for p in c.demux(s) if p.size]
-    with av.open(str(path)) as c:
+    with contextlib.closing(av.open(str(path))) as c:
         x = np.concatenate([f.to_ndarray().astype(np.float64).mean(axis=0) for f in c.decode(audio=0)])
     return name, rate, x, packets
 
 
-def check(src: Path, out: Path, fades: bool, copied: bool) -> str | None:
-    segment = {"start": 1, "end": 4, **({"audio_fadein": 1, "audio_fadeout": 1} if fades else {})}
+def check(src: Path, out: Path, fades: bool, copied: bool, start: float = 1) -> str | None:
+    segment = {"start": start, "end": start + 3, **({"audio_fadein": 1, "audio_fadeout": 1} if fades else {})}
     if not smartcut.process_segments(str(src), str(out), [segment]):
         return "process_segments failed"
-    with av.open(str(out)) as c:
+    with contextlib.closing(av.open(str(out))) as c:
         frames = sum(1 for _ in c.decode(video=0))
     if frames != 3 * FPS:
         return f"{frames} video frames decoded, expected {3 * FPS}"
@@ -109,7 +112,7 @@ def main() -> int:
     failed = total = 0
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
-        sources = {"aac": tmp / "vp9_aac.mp4", "libopus": tmp / "vp9_opus.webm"}
+        sources = {"aac": tmp / "vp9_aac.mp4", "libopus": tmp / "vp9_opus.webm", "pcm_s16le": tmp / "vp9_pcm.mkv"}
         for codec, path in sources.items():
             make_source(path, codec)
         make_source(tmp / "h264_aac.mp4", "aac", "libx264")
@@ -117,11 +120,14 @@ def main() -> int:
         problem = check_h264_rejected(tmp / "h264_aac.mp4", tmp / "h264.webm")
         failed += problem is not None
         print(f"✗ FAIL - H.264 video into .webm: {problem}" if problem else "✓ PASS - H.264 video into .webm: clear error")
-        cases = [("AAC -> Opus, no fades", "aac", False, False), ("AAC -> Opus, audio fades", "aac", True, False),
-                 ("Opus copied, no fades", "libopus", False, True), ("Opus re-encoded, audio fades", "libopus", True, False)]
-        for i, (name, codec, fades, copied) in enumerate(cases):
+        cases = [("AAC -> Opus, no fades", "aac", False, False, 1), ("AAC -> Opus, audio fades", "aac", True, False, 1),
+                 ("PCM (1536 kb/s) -> Opus at a lossy rate", "pcm_s16le", False, False, 1),
+                 ("Opus copied from the start, no fades", "libopus", False, True, 0),
+                 ("Opus copied from mid-stream, no fades", "libopus", False, True, 1),
+                 ("Opus re-encoded, audio fades", "libopus", True, False, 1)]
+        for i, (name, codec, fades, copied, start) in enumerate(cases):
             total += 1
-            problem = check(sources[codec], tmp / f"out{i}.webm", fades, copied)
+            problem = check(sources[codec], tmp / f"out{i}.webm", fades, copied, start)
             if problem:
                 failed += 1
                 print(f"✗ FAIL - {name}: {problem}")

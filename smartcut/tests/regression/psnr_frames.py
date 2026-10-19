@@ -10,7 +10,7 @@ import av
 import numpy as np
 
 
-def luma_frames(path, first, count):
+def luma_frames(path: str, first: int, count: int) -> list[np.ndarray]:
     out = []
     with av.open(path) as c:
         for i, f in enumerate(c.decode(c.streams.video[0])):

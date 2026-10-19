@@ -7,34 +7,40 @@ Tests for process_segments() cancellation, progress and resource handling.
 3. The input file is closed afterwards, also after an error (on Windows an open file can't be deleted)
 4. Cancelling midway through a re-encoded piece stops it within a frame, not at the end of the piece, also
    without progress_callback; cancel_check isn't asked again once it returned True, so True once is enough
-5. Progress is reported as thousandths of the work, rising steadily to 1000, also during re-encoding
+5. Cancelling during the encoder's last flush (at the end of the output) stops it within a frame too, and the
+   input is closed
+6. Progress is reported as thousandths of the work, rising steadily to 1000, also during re-encoding
 
 Usage (from the repo root):
     python smartcut/tests/test_cancel.py
 """
 import gc
+import importlib
 import os
 import sys
 import tempfile
 from fractions import Fraction
 from pathlib import Path
+from typing import NoReturn
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (tests live in smartcut/tests/)
 
-import smartcut  # noqa: E402
-from smartcut.media_container import MediaContainer  # noqa: E402
-from smartcut.smart_cut import make_adjusted_segment_times, make_cut_segments  # noqa: E402
-from smartcut.tests.generate_synthetic_video import generate_test_video  # noqa: E402
-from smartcut.video_cutter import VideoCutter  # noqa: E402
+import smartcut
+from smartcut.media_container import MediaContainer
+from smartcut.misc_data import CutSegment
+from smartcut.smart_cut import make_adjusted_segment_times, make_cut_segments
+from smartcut.tests.generate_synthetic_video import generate_test_video
+from smartcut.video_cutter import VideoCutter
 
 SEGMENTS = [{"start": 2, "end": 8, "fadein": 1, "fadeout": 1}, {"start": 12, "end": 18}]
+LAST_FLUSH_SEGMENTS = [{"start": 2, "end": 8}, {"start": 12, "end": 17.5}]  # ends mid-GOP: re-encoded to the end
 
 
-def test_cancel_stops_and_removes_output(tmp: Path, src: Path):
+def test_cancel_stops_and_removes_output(tmp: Path, src: Path) -> None:
     out = tmp / "cancelled.mp4"
     calls = {"n": 0}
 
-    def cancel_after_3():
+    def cancel_after_3() -> bool:
         calls["n"] += 1
         return calls["n"] > 3
 
@@ -43,11 +49,11 @@ def test_cancel_stops_and_removes_output(tmp: Path, src: Path):
     assert not out.exists(), "partial output was not removed"
 
 
-def test_no_cancel_polls_and_succeeds(tmp: Path, src: Path):
+def test_no_cancel_polls_and_succeeds(tmp: Path, src: Path) -> None:
     out = tmp / "complete.mp4"
     calls = {"n": 0}
 
-    def never():
+    def never() -> bool:
         calls["n"] += 1
         return False
 
@@ -56,7 +62,7 @@ def test_no_cancel_polls_and_succeeds(tmp: Path, src: Path):
     assert calls["n"] >= 2, f"cancel_check polled only {calls['n']} times"
 
 
-def test_input_closed(tmp: Path, src: Path):
+def test_input_closed(tmp: Path, src: Path) -> None:
     copy = tmp / "input_copy.mp4"
     copy.write_bytes(src.read_bytes())
     assert smartcut.process_segments(str(copy), str(tmp / "from_copy.mp4"), SEGMENTS)
@@ -70,7 +76,7 @@ def test_input_closed_after_error(tmp: Path, src: Path) -> None:
     copy.write_bytes(src.read_bytes())
     real_segment = VideoCutter.segment
 
-    def failing_segment(self, cut_segment):
+    def failing_segment(self: VideoCutter, cut_segment: CutSegment) -> NoReturn:
         raise RuntimeError("test error while cutting")
 
     VideoCutter.segment = failing_segment
@@ -109,12 +115,12 @@ def cancel_midway(tmp: Path, src: Path, with_progress: bool, once: bool = False)
         state["cancelled"] = state["cancelled"] or state["polls"] > threshold
         return state["polls"] == threshold + 1 if once else state["cancelled"]
 
-    def on_progress(current, total):
+    def on_progress(current: int, total: int) -> None:
         state["updates"] += 1
         state["updates_after"] += state["cancelled"]
 
-    kw = {"progress_callback": on_progress} if with_progress else {}
-    ok = smartcut.process_segments(str(src), str(out), SEGMENTS, cancel_check=check, **kw)
+    ok = smartcut.process_segments(str(src), str(out), SEGMENTS, cancel_check=check,
+                                   progress_callback=on_progress if with_progress else None)
     assert ok is False and not out.exists(), (f"not cancelled (ok={ok}) after {state['polls']} polls, more than "
                                               f"{threshold} needed, or the partial output was left")
     assert state["polls_after"] == 0, f"cancel_check was asked {state['polls_after']} more times after it returned True"
@@ -133,7 +139,56 @@ def test_cancel_true_only_once(tmp: Path, src: Path) -> None:
     cancel_midway(tmp, src, with_progress=True, once=True)
 
 
-def test_progress_steady(tmp: Path, src: Path):
+def run_watching_last_flush(src: Path, out: Path, cancel_at: int | None) -> tuple[bool, dict]:
+    """process_segments, counting the frames the encoder's last flush outputs (VideoCutter.finish). With cancel_at,
+    cancel_check answers True from that flushed frame on."""
+    sc = importlib.import_module("smartcut.smart_cut")
+    real_finish, real_encoded = VideoCutter.finish, sc._WorkProgress.frames_encoded
+    state = {"finishing": False, "flushed": 0, "after_cancel": 0, "cancel": False}
+
+    def finish(self):  # noqa: ANN001, ANN202
+        state["finishing"] = True
+        try:
+            return real_finish(self)
+        finally:
+            state["finishing"] = False
+
+    def frames_encoded(self, fed: int, out_frames: int) -> None:  # noqa: ANN001
+        if state["finishing"] and fed == 0:
+            state["after_cancel"] += state["cancel"]
+            state["flushed"] += 1
+            state["cancel"] = state["cancel"] or state["flushed"] == cancel_at
+        real_encoded(self, fed, out_frames)
+
+    VideoCutter.finish, sc._WorkProgress.frames_encoded = finish, frames_encoded
+    try:
+        ok = smartcut.process_segments(str(src), str(out), LAST_FLUSH_SEGMENTS, cancel_check=lambda: state["cancel"])
+    finally:
+        VideoCutter.finish, sc._WorkProgress.frames_encoded = real_finish, real_encoded
+    return ok, state
+
+
+def test_cancel_during_last_flush(tmp: Path, src: Path) -> None:
+    # The output ends with a re-encoded piece, so the encoder's last frames come out in finish()'s flush. A cancel
+    # there used to be ignored: every frame was still encoded, then the file removed.
+    ok, state = run_watching_last_flush(src, tmp / "flushed.mp4", None)
+    assert ok, "the edit failed"
+    assert state["flushed"] >= 6, f"the last flush output only {state['flushed']} frames: the test needs more"
+    out = tmp / "cancelled_in_flush.mp4"
+    copy = tmp / "input_copy_flush.mp4"  # the cancelled finish() must still close the input
+    copy.write_bytes(src.read_bytes())
+    gc.disable()  # PyAV containers are freed by the garbage collector only: it mustn't close the file by chance
+    try:
+        ok, state = run_watching_last_flush(copy, out, 3)
+        os.remove(copy)  # raises on Windows if the input was left open
+    finally:
+        gc.enable()
+    assert ok is False and not out.exists(), f"not cancelled (ok={ok}), or the partial output was left"
+    assert state["flushed"] == 3 and state["after_cancel"] == 0, \
+        f"the flush went on after the cancel: {state['after_cancel']} more frames ({state['flushed']} in all)"
+
+
+def test_progress_steady(tmp: Path, src: Path) -> None:
     # Video fades only (with audio fades, re-encoding this clip's audio is most of the work), covering the whole
     # 6 s segment: progress counts frames as the encoder outputs them, and on a many-core PC x264's frame threads
     # plus lookahead hold back ~60 frames, so a short re-encoded run would only report at its flush
@@ -147,7 +202,7 @@ def test_progress_steady(tmp: Path, src: Path):
     assert len(values) > 30, f"only {len(values)} updates: no progress during re-encoding"
 
 
-def main():
+def main() -> int:
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
         src = tmp / "input.mp4"
@@ -159,6 +214,7 @@ def main():
                  ("Cancel midway through a re-encoded piece stops within a frame", test_cancel_midway_through_reencoding),
                  ("Cancel midway also works without progress_callback", test_cancel_midway_without_progress),
                  ("A cancel_check that returns True only once still cancels", test_cancel_true_only_once),
+                 ("Cancel during the encoder's last flush stops it within a frame", test_cancel_during_last_flush),
                  ("Progress rises steadily to 1000, also during re-encoding", test_progress_steady)]
         failed = 0
         for name, test in tests:

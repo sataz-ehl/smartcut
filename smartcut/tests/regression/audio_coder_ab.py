@@ -15,15 +15,18 @@ For each re-encode, *_lost_x4.wav is (source - re-encode) amplified 4x: only the
 spectrograms.png shows source / default / fast side by side.
 """
 import sys
+from contextlib import closing  # with closing(av.open()): PyAV types a container's __exit__ as maybe swallowing errors
 from fractions import Fraction
 from pathlib import Path
+from typing import cast
 
 import av
 import matplotlib
+from av import AudioStream
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
+import matplotlib.pyplot as plt
+import numpy as np
 
 out, real_src = Path(sys.argv[1]), Path(sys.argv[2])
 out.mkdir(parents=True, exist_ok=True)
@@ -31,27 +34,27 @@ rng = np.random.default_rng(7)
 
 
 # ---------- synthetic drums ----------
-def drums(rate=48000, seconds=20.0, bpm=110):
+def drums(rate: int = 48000, seconds: float = 20.0, bpm: int = 110) -> tuple[np.ndarray, int]:
     n = int(rate * seconds)
     left, right = np.zeros(n), np.zeros(n)
 
-    def noise(length, lo, hi=None):
+    def noise(length: int, lo: float, hi: float | None = None) -> np.ndarray:
         spec = np.fft.rfft(rng.standard_normal(length))
         f = np.fft.rfftfreq(length, 1 / rate)
         spec[(f < lo) | ((f > hi) if hi else False)] = 0
         x = np.fft.irfft(spec, length)
         return x / (np.abs(x).max() + 1e-9)
 
-    def hit(at, sig, gain, pan):  # pan: -1 left .. +1 right
+    def hit(at: float, sig: np.ndarray, gain: float, pan: float) -> None:  # pan: -1 left .. +1 right
         i = int(at * rate)
         j = min(n, i + len(sig))
         left[i:j] += sig[: j - i] * gain * (1 - pan) / 2
         right[i:j] += sig[: j - i] * gain * (1 + pan) / 2
 
-    def env(length, decay):
+    def env(length: int, decay: float) -> np.ndarray:
         return np.exp(-np.arange(length) / rate / decay)
 
-    def partials(length, freqs):
+    def partials(length: int, freqs: list[int]) -> np.ndarray | float:  # sum(): float for no freqs
         tt = np.arange(length) / rate
         return sum(np.sin(2 * np.pi * f * tt + rng.uniform(0, 6.28)) for f in freqs) / len(freqs)
 
@@ -90,9 +93,9 @@ def drums(rate=48000, seconds=20.0, bpm=110):
 
 
 # ---------- encode / decode helpers (PyAV, same FFmpeg as smartcut) ----------
-def write(samples, rate, path, codec="aac", coder=None):
+def write(samples: np.ndarray, rate: int, path: Path, codec: str = "aac", coder: str | None = None) -> None:
     with av.open(str(path), "w") as o:
-        s = o.add_stream(codec, rate=rate)
+        s = cast(AudioStream, o.add_stream(codec, rate=rate))
         s.codec_context.layout = "stereo"
         if codec == "aac":
             s.codec_context.bit_rate = 128_000
@@ -106,8 +109,8 @@ def write(samples, rate, path, codec="aac", coder=None):
             o.mux(p)
 
 
-def read(path):
-    with av.open(str(path)) as c:
+def read(path: Path) -> tuple[np.ndarray, int]:
+    with closing(av.open(str(path))) as c:
         a = c.streams.audio[0]
         frames = [f for f in c.decode(a)]
     arr = np.concatenate([f.to_ndarray().astype(np.float32) for f in frames], axis=1)
@@ -116,7 +119,7 @@ def read(path):
     return arr, frames[0].sample_rate
 
 
-def align(ref, x, max_lag=4096):
+def align(ref: np.ndarray, x: np.ndarray, max_lag: int = 4096) -> tuple[np.ndarray, np.ndarray]:
     """Shift x so it lines up with ref (cross-correlation on the first 2 s)."""
     n = min(ref.shape[1], x.shape[1], 96000)
     r, y = ref[0, :n], x[0, :n]
@@ -129,7 +132,7 @@ def align(ref, x, max_lag=4096):
     return x[:, :m], ref[:, :m]
 
 
-def snr(ref, x, rate, min_hz=0):
+def snr(ref: np.ndarray, x: np.ndarray, rate: int, min_hz: float = 0) -> float:
     r, y = ref.mean(axis=0), x.mean(axis=0)
     if min_hz:
         R, Y = np.fft.rfft(r), np.fft.rfft(y)
@@ -140,28 +143,28 @@ def snr(ref, x, rate, min_hz=0):
     return 10 * np.log10(np.sum(r ** 2) / max(np.sum((r - y) ** 2), 1e-20))
 
 
-def copy_excerpt(src, t0, dur, dst):
+def copy_excerpt(src: Path, t0: float, dur: float, dst: Path) -> None:
     with av.open(str(src)) as c, av.open(str(dst), "w") as o:
         a = c.streams.audio[0]
         s = o.add_stream_from_template(a)
-        c.seek(int(max(t0 - 1, 0) / a.time_base), stream=a)
+        c.seek(int(max(t0 - 1, 0) / cast(Fraction, a.time_base)), stream=a)
         first = None
         for p in c.demux(a):
             if p.pts is None:
                 continue
-            t = float(p.pts * a.time_base)
+            t = float(p.pts * cast(Fraction, a.time_base))
             if t < t0:
                 continue
             if t >= t0 + dur:
                 break
             first = p.pts if first is None else first
             p.pts -= first
-            p.dts -= first
+            p.dts = cast(int, p.dts) - first
             p.stream = s
             o.mux(p)
 
 
-def most_treble_window(src, seconds=15):
+def most_treble_window(src: Path, seconds: int = 15) -> tuple[int, float]:
     x, rate = read(src)
     mono = x.mean(axis=0)
     hop = rate

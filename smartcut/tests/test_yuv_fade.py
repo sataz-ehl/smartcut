@@ -12,28 +12,30 @@ Usage (from the repo root):
 import sys
 from fractions import Fraction
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (tests live in smartcut/tests/)
-from av import VideoFrame  # noqa: E402
+from av import VideoFrame
 
-from smartcut.video_cutter import _fade_yuv_frame  # noqa: E402
+from smartcut.video_cutter import _fade_yuv_frame
 
 W, H = 642, 362  # sizes that give the planes line padding
 
 
-def make_frame(fmt, y_val, c_val, bits, with_timing=True):
+def make_frame(fmt: str, y_val: int, c_val: int, bits: int, with_timing: bool = True) -> VideoFrame:
     frame = VideoFrame(W, H, fmt)
     dtype = np.dtype(np.uint8) if bits == 8 else np.dtype("<u2")
     for i, plane in enumerate(frame.planes):
-        plane.update(np.full((plane.height, plane.line_size // dtype.itemsize), y_val if i == 0 else c_val, dtype))
+        # update() takes any buffer, e.g. an ndarray; PyAV's stub says bytes
+        plane.update(cast(bytes, np.full((plane.height, plane.line_size // dtype.itemsize), y_val if i == 0 else c_val, dtype)))
     if with_timing:
         frame.pts, frame.time_base = 1234, Fraction(1, 90000)
     return frame
 
 
-def plane_ranges(frame, bits):
+def plane_ranges(frame: VideoFrame, bits: int) -> list[tuple[int, int]]:
     dtype = np.dtype(np.uint8) if bits == 8 else np.dtype("<u2")
     ranges = []
     for plane in frame.planes:
@@ -42,7 +44,7 @@ def plane_ranges(frame, bits):
     return ranges
 
 
-def test_values():
+def test_values() -> None:
     cases = [  # format, bits, Y, C, alpha, black level
         ("yuv420p", 8, 200, 60, 0.5, 16), ("yuvj420p", 8, 200, 60, 0.5, 0), ("yuv444p", 8, 235, 240, 0.25, 16),
         ("yuv420p10le", 10, 800, 300, 0.5, 64), ("yuv422p10le", 10, 940, 64, 0.0, 64),
@@ -51,6 +53,7 @@ def test_values():
         src = make_frame(fmt, y, c, bits)
         before = plane_ranges(src, bits)
         out = _fade_yuv_frame(src, alpha)
+        assert out is not None, f"{fmt}: not faded in YUV"
         neutral = 1 << (bits - 1)
         exp_y, exp_c = round(black + (y - black) * alpha), round(neutral + (c - neutral) * alpha)
         got = plane_ranges(out, bits)
@@ -61,16 +64,16 @@ def test_values():
         assert plane_ranges(src, bits) == before, f"{fmt}: source frame was modified"
 
 
-def test_frame_without_time_base():
+def test_frame_without_time_base() -> None:
     out = _fade_yuv_frame(make_frame("yuv420p", 200, 60, 8, with_timing=False), 0.5)
     assert out is not None and out.time_base is None
 
 
-def test_unsupported_format_falls_back():
+def test_unsupported_format_falls_back() -> None:
     assert _fade_yuv_frame(VideoFrame(64, 64, "nv12"), 0.5) is None
 
 
-def main():
+def main() -> int:
     tests = [("Exact values for 8/10-bit, limited/full range, 4:2:0/4:2:2/4:4:4", test_values),
              ("Frame without time_base (decoded frames)", test_frame_without_time_base),
              ("Unsupported pixel format returns None (RGB fallback)", test_unsupported_format_falls_back)]

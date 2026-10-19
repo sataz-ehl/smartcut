@@ -15,11 +15,14 @@ Usage (from the repo root):
 """
 import sys
 import tempfile
+from contextlib import closing  # with closing(av.open()): PyAV types a container's __exit__ as maybe swallowing errors
 from fractions import Fraction
 from pathlib import Path
+from typing import cast
 
 import av
 import numpy as np
+from av import VideoStream
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (tests live in smartcut/tests/)
 
@@ -48,7 +51,7 @@ CUTS = [
 
 def make_source(path: Path, codec: str, options: dict[str, str], with_audio: bool, seconds: int = 4) -> None:
     with av.open(str(path), "w") as out:
-        stream = out.add_stream(codec, rate=FPS)
+        stream = cast(VideoStream, out.add_stream(codec, rate=FPS))
         stream.width, stream.height, stream.pix_fmt = 192, 108, "yuv420p"
         stream.codec_context.options = dict(options)
         audio = out.add_stream("aac", rate=48000, layout="mono") if with_audio else None
@@ -71,8 +74,8 @@ def make_source(path: Path, codec: str, options: dict[str, str], with_audio: boo
 
 
 def frame_times(path: Path) -> list[float]:
-    with av.open(str(path)) as c:
-        return [float(f.pts * f.time_base) for f in c.decode(video=0)]
+    with closing(av.open(str(path))) as c:
+        return [float(cast(int, f.pts) * cast(Fraction, f.time_base)) for f in c.decode(video=0)]
 
 
 def check_cut(src: Path, out: Path, segments: list[dict]) -> str | None:
@@ -84,7 +87,7 @@ def check_cut(src: Path, out: Path, segments: list[dict]) -> str | None:
     got = len(frame_times(out))
     if got != expected:
         return f"{got} frames decoded, expected {expected}"
-    with av.open(str(out)) as c:
+    with closing(av.open(str(out))) as c:
         vs = c.streams.video[0]
         if vs.duration is None or vs.time_base is None:
             return None  # e.g. Matroska: no per-stream duration

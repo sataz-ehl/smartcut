@@ -46,6 +46,7 @@ class MediaContainer:
     path: str
 
     video_frame_times_pts: np.ndarray
+    video_frame_sizes: np.ndarray  # bytes of each frame's packet, in the order of video_frame_times_pts (fork addition)
     video_frame_times: np.ndarray
     video_keyframe_indices: list[int]
     gop_start_times_pts_s: list[int] # Smallest pts in a GOP, in seconds
@@ -66,6 +67,7 @@ class MediaContainer:
         self.path = path
 
         frame_pts = []
+        frame_sizes = []  # per frame_pts entry: its packet's size (fork addition, for smart_cut's progress estimate)
         self.video_keyframe_indices = []
 
         self.av_container = av_container = av_open(path, 'r', metadata_errors='ignore')
@@ -207,6 +209,7 @@ class MediaContainer:
                 # Use PTS as fallback when DTS is None (common in exported segments)
                 last_seen_video_dts = packet.dts if packet.dts is not None else packet.pts
                 frame_pts.append(packet.pts)
+                frame_sizes.append(packet.size)
             elif packet.stream.type == 'audio':
                 track = stream_index_to_audio_track[packet.stream_index]
                 track.last_packet = packet
@@ -241,8 +244,9 @@ class MediaContainer:
                 self.gop_end_times_dts.append(fallback_dts)
             assert len(self.gop_start_times_dts) == len(self.gop_end_times_dts), \
                 f"GOP DTS array length mismatch: start={len(self.gop_start_times_dts)}, end={len(self.gop_end_times_dts)}"
-            frame_pts_sorted = np.sort(np.array(frame_pts))
-            self.video_frame_times_pts = frame_pts_sorted
+            order = np.argsort(np.array(frame_pts), kind='stable')
+            self.video_frame_times_pts = np.array(frame_pts)[order]
+            self.video_frame_sizes = np.array(frame_sizes, dtype=np.int64)[order]
 
         # Collect PTS arrays for audio tracks
         for t in self.audio_tracks:

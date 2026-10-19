@@ -1,0 +1,663 @@
+#!/usr/bin/env python3
+"""
+Tests of tests/regression/calibrate_progress.py.
+
+Unit tests (no encoding):
+1. The adoption rule: adopted only if both checks are more even by ADOPT_MARGIN and no edit is worse by more than
+   EDIT_GUARD in either, never with --quick, when the pinning didn't hold, when the CPU check warned, without the
+   Facebook clip, with one of the app's codecs not calibrated, or without a held-out check
+2. The held-out edits (the app's height and the Facebook clip's, always), and when there is no held-out check
+3. The costs fitted without the held-out edits use only the other edits' runs and copy / audio times
+4. The CPU checks: an encoder run or a real run on more cores than expected, or less than LOW_CPU of one core
+5. The files: adopted, the file is replaced through a temporary file in its folder and the one before kept as
+   progress_costs.previous.json; not adopted, only progress_costs.candidate.json is written; on Windows a replace
+   refused because another process has the file open is retried
+6. The measuring processes release memory after every edit
+7. --cores N takes one CPU per physical core (the fastest kind first on hybrid CPUs), from the real topology
+8. progress_timeline's evenness from the cut's real start: the start is when the video cutter starts the first piece,
+   before the first update, recorded afresh for every edit; measured from it, a wait before the first update counts
+9. main() on a synthetic two-resolution recording (the measuring processes and the media check replaced): decide()
+   gets the held-out check (the held-out edits replayed under the costs in use and those fitted without them), the
+   real runs' paired means (both runs, replayed under the costs in use and the all-edit fit), the same per edit, and
+   the app's codecs not calibrated (--codecs h264: vp9, av1), which the plan names
+10. main()'s temporary work folder is removed also when it stops early (a real run failed)
+11. Atomic writes while another thread loads the file every millisecond, or holds it open for 0.3 s: no write
+    fails, no read falls back to the built-in costs
+
+Smoke test of the harness on a short synthetic clip (H.264 only, --quick; needs the ffmpeg command on PATH or in
+SMARTCUT_TEST_FFMPEG, skipped without it; ~2 min):
+12. --make-media makes the clips and a manifest
+13. A --quick run checks the cores, fits, compares and says NOT ADOPTED: the file SMARTCUT_PROGRESS_COSTS names is
+    left as it was, and the candidate it writes loads with progress_costs.parse()
+14. main() in this process, the rule's verdict forced: decide() gets the run's facts (--quick, no Facebook clip, one
+    resolution, the pinning held), and an adoption replaces the file and keeps the one before as
+    progress_costs.previous.json
+15. A changed clip, or one the calibration needs but the media lacks, is refused
+
+Synthetic clips re-encode differently from real ones: the smoke test checks the harness works, not the costs.
+
+Usage (from the repo root):
+    python smartcut/tests/test_calibrate_progress.py
+"""
+import io
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+REGRESSION = ROOT / "smartcut" / "tests" / "regression"
+sys.path.insert(0, str(ROOT))
+sys.path.insert(1, str(REGRESSION))
+
+import calibrate_progress as cp  # noqa: E402  # pyright: ignore[reportMissingImports]
+import numpy as np  # noqa: E402
+import progress_timeline  # noqa: E402  # pyright: ignore[reportMissingImports]
+import run_cases  # noqa: E402  # pyright: ignore[reportMissingImports]
+
+from smartcut import progress_costs  # noqa: E402
+from smartcut.tests.generate_synthetic_video import generate_test_video  # noqa: E402
+
+HARNESS = REGRESSION / "calibrate_progress.py"
+M = cp.ADOPT_MARGIN
+
+
+# ------------------------------------------------------------------------------------------------------ unit tests
+
+def test_rule() -> None:
+    G = cp.EDIT_GUARD
+    edits = {"A": (5.0, 4.0), "B": (3.0, 3.0 + G)}  # B worse by exactly the guard: allowed
+    ok = {"quick": False, "pinned": True, "quiet": True, "facebook": True, "uncalibrated": [], "no_split": None,
+          "held_out_edits": edits, "real_edits": edits}
+    better, worse = (6.0, 6.0 - M), (5.0, 5.0 - M + 0.01)
+    assert cp.decide(**ok, held_out=better, real=better) == (True, []), "both checks better by the margin: adopted"
+    for held, real in ((better, worse), (worse, better), (worse, worse), ((4.0, 4.5), better)):
+        adopt, reasons = cp.decide(**ok, held_out=held, real=real)
+        assert not adopt and len(reasons) == 1 and "not more even by" in reasons[0], (held, real, reasons)
+    for change, words in (({"quick": True}, "--quick"), ({"pinned": False}, "pinning"), ({"quiet": False}, "CPU check"),
+                          ({"facebook": False}, "no Facebook clip: no held-out footage"),
+                          ({"uncalibrated": ["vp9", "av1"]}, "vp9, av1 not calibrated: their costs would be the costs in use"),
+                          ({"uncalibrated": ["av1"]}, "av1 not calibrated: its costs"),
+                          ({"no_split": "one resolution"}, "no held-out check: one resolution")):
+        adopt, reasons = cp.decide(**{**ok, **change}, held_out=better, real=better)
+        assert not adopt and reasons == [r for r in reasons if words in r] and reasons, (change, reasons)
+    # The per-edit guard: one edit worse by more than EDIT_GUARD in either check, however much better the means are
+    bad = {**edits, "P2_h264_720p": (3.68, 3.68 + G + 0.02)}
+    for check, change in (("held-out check", {"held_out_edits": bad}), ("real runs", {"real_edits": bad})):
+        adopt, reasons = cp.decide(**{**ok, **change}, held_out=(9.0, 2.0), real=(9.0, 2.0))
+        assert not adopt and reasons == [f"P2_h264_720p worse by {G + 0.02:.2f} points in the {check} (3.7 -> 5.2 %)"], (check, reasons)
+    adopt, reasons = cp.decide(**{**ok, "held_out_edits": bad, "real_edits": bad, "no_split": "one resolution"},
+                               held_out=better, real=better)
+    assert not adopt and len(reasons) == 2 and "in the real runs" in reasons[1], "no held-out check: its edits aren't judged"
+
+
+def manifest_for(heights: list[int], facebook: bool) -> dict:
+    files = {f"{c}_{h}p.mp4": {"codec": c, "height": h, "facebook": False} for c in ("h264", "vp9") for h in heights}
+    if facebook:
+        files["fb.mp4"] = {"codec": "h264", "height": 360, "facebook": True}
+    return {"excerpt": 90.0, "files": files}
+
+
+def test_held_out() -> None:
+    manifest = manifest_for([360, 720, 1080], True)
+    cases, app, held = cp.plan_cases(manifest, ["h264", "vp9"], [360, 720, 1080], False)
+    assert held == ["P2_h264_720p", "P2F_h264_720p", "P3_h264_720p", "P3F_h264_720p", "P2_vp9_720p", "P2F_vp9_720p", "FB2", "FB2F"], held
+    assert set(app) <= set(held), "the real runs must be of held-out edits"
+    assert {"FB2", "FB2F"} <= set(held), "the Facebook clip's edits must be held out"
+    assert cp.split_problem(cases, held, manifest) is None
+    one = manifest_for([720], False)
+    cases, app, held = cp.plan_cases(one, ["h264", "vp9"], [720], False)
+    assert len(held) == len(cases) and "one resolution" in cp.split_problem(cases, held, one)
+    cases, app, held = cp.plan_cases(manifest, ["h264", "vp9"], [360], True)  # --quick
+    assert cp.split_problem(cases, held, manifest), "--quick has no held-out check"
+    mixed = manifest_for([360, 720], False)  # vp9 at 720p only: nothing to fit it on
+    mixed["files"].pop("vp9_360p.mp4")
+    cases, app, held = cp.plan_cases(mixed, ["h264", "vp9"], [360, 720], False)
+    assert "vp9" in (cp.split_problem(cases, held, mixed) or ""), cp.split_problem(cases, held, mixed)
+
+
+def test_fit_without_held_out() -> None:
+    def run(case: str, mp: float, s: float) -> dict:
+        return {"codec": "h264", "mp": mp, "s": s, "cpu": s, "n": 100, "busy": 100.0, "faded": 0, "case": case}
+    stats = {"A": {"copy_s": 0.1, "copy_frames": 1000, "audio_s": 1.0, "audio_media_s": 40.0},
+             "B": {"copy_s": 0.1, "copy_frames": 1000, "audio_s": 1.0, "audio_media_s": 40.0},
+             "C": {"copy_s": 5.0, "copy_frames": 1000, "audio_s": 30.0, "audio_media_s": 40.0}}
+    measured = {"runs": [run("A", 0.23, 0.6), run("B", 2.07, 5.2), run("C", 0.92, 30.0)],
+                "edits": {n: {"stats": v} for n, v in stats.items()},
+                "stats": {k: sum(v[k] for v in stats.values()) for k in stats["A"]}}
+    without_c = {"runs": measured["runs"][:2], "edits": {n: measured["edits"][n] for n in "AB"},
+                 "stats": {k: stats["A"][k] + stats["B"][k] for k in stats["A"]}}
+    held_fit = cp.fit(measured, progress_costs.BUILT_IN, ["A", "B"])[0]
+    expected = cp.fit(without_c, progress_costs.BUILT_IN)[0]
+    assert held_fit.recode["h264"] == expected.recode["h264"], (held_fit.recode["h264"], expected.recode["h264"])
+    assert held_fit.copy_per_frame == expected.copy_per_frame and held_fit.audio_per_second == expected.audio_per_second
+    assert cp.fit(measured, progress_costs.BUILT_IN)[0].recode["h264"] != held_fit.recode["h264"], "C must change the full fit"
+
+
+def test_cpu_checks() -> None:
+    def measured(cores: int, ratio: float) -> dict:
+        return {"info": {"expected_cores": cores}, "runs": [{"codec": "h264", "s": 2.0, "cpu": 2.0 * ratio}] * 3}
+    assert cp.core_check(measured(1, 0.99))[:2] == ([], []), "an idle core: no warning"
+    escaped, loaded, _ = cp.core_check(measured(1, 1.6))
+    assert escaped and not loaded, "1.6 cores on one: the pinning didn't hold"
+    escaped, loaded, _ = cp.core_check(measured(1, 0.7))
+    assert loaded and not escaped, "0.7 of one core: other load"
+    assert cp.core_check(measured(4, 2.5))[:2] == ([], []), "four cores: no load check"
+    assert cp.core_check(measured(4, 5.0))[0], "five cores on four"
+
+    def real(cores: int, ratio: float, end: float = 3.0) -> dict:
+        return {"info": {"expected_cores": cores}, "edits": {"P2": {"end": end, "cpu": end * ratio}}}
+    assert cp.real_core_check(real(1, 0.98)) == ([], [])
+    assert cp.real_core_check(real(1, 0.7))[1] and not cp.real_core_check(real(1, 0.7))[0]
+    assert cp.real_core_check(real(1, 1.5))[0]
+    assert cp.real_core_check(real(1, 0.5, end=0.5)) == ([], []), "too short to judge"
+
+
+def test_files(tmp: Path) -> None:
+    folder = tmp / "costs"
+    folder.mkdir()
+    target = folder / "progress_costs.json"
+    target.write_text("old\n", encoding="utf-8")
+    replaced = []
+    real_replace = os.replace
+
+    def recording_replace(src, dst):  # noqa: ANN001, ANN202
+        replaced.append((Path(src), Path(dst)))
+        real_replace(src, dst)
+
+    os.replace = recording_replace
+    try:
+        written = cp.save_costs(target, "new\n", False)
+        assert written == folder / "progress_costs.candidate.json" and written.read_text() == "new\n"
+        assert target.read_text() == "old\n", "not adopted: the file must stay as it was"
+        written = cp.save_costs(target, "new\n", True)
+    finally:
+        os.replace = real_replace
+    assert written == target and target.read_text() == "new\n"
+    assert (folder / "progress_costs.previous.json").read_text() == "old\n", "the file before must be kept"
+    assert {dst for _, dst in replaced} == {target, folder / "progress_costs.previous.json", folder / "progress_costs.candidate.json"}, replaced
+    assert all(src.parent == dst.parent and src != dst for src, dst in replaced), f"not through a temporary file next to it: {replaced}"
+    assert sorted(p.name for p in folder.iterdir()) == ["progress_costs.candidate.json", "progress_costs.json",
+                                                        "progress_costs.previous.json"], "temporary files left"
+    real_replace = os.replace
+
+    def failing_replace(src, dst):  # noqa: ANN001, ANN202
+        raise OSError("disk full")
+
+    os.replace = failing_replace
+    try:
+        cp.save_costs(target, "newer\n", True)
+        raise AssertionError("the failure must be reported")
+    except OSError:
+        pass
+    finally:
+        os.replace = real_replace
+    assert target.read_text() == "new\n" and len(list(folder.iterdir())) == 3, "a failed write must leave the file and no temporary"
+
+    # Windows: a replace refused while another process has the file open (PermissionError) is retried; Linux raises
+    calls: list[str] = []
+
+    def busy_twice(src, dst):  # noqa: ANN001, ANN202
+        calls.append(sys.platform)
+        if len(calls) <= 2:
+            raise PermissionError(13, "Access is denied")
+        real_replace(src, dst)
+
+    saved_platform = sys.platform
+    os.replace = busy_twice
+    try:
+        sys.platform = "win32"
+        cp.write_atomic(target, "retried\n")
+        assert target.read_text() == "retried\n" and len(calls) == 3, calls
+        calls.clear()
+        sys.platform = "linux"
+        try:
+            cp.write_atomic(target, "linux\n")
+            raise AssertionError("on Linux a PermissionError must be raised at once")
+        except PermissionError:
+            assert len(calls) == 1, calls
+    finally:
+        os.replace, sys.platform = real_replace, saved_platform
+    assert target.read_text() == "retried\n" and len(list(folder.iterdir())) == 3, "no temporary file left"
+
+
+def test_memory_released() -> None:
+    events: list = []
+    saved = (cp.child_setup, cp.install_recorder, cp.run_edit, cp.release_memory, progress_timeline.install_timers)
+    cp.child_setup = lambda cores: {"available_cpus": 1, "expected_cores": 1}
+    cp.install_recorder = lambda record: None
+    progress_timeline.install_timers = lambda stats, runs: None
+    cp.run_edit = lambda media, case, out_dir, record=None: events.append(case["name"]) or {"ok": True, "end": 1.0}
+    cp.release_memory = lambda: events.append("released")
+    try:
+        spec = {"cores": None, "media": ".", "out_dir": ".", "cases": [{"name": "A"}, {"name": "B"}]}
+        result = cp.child_measure(spec)
+        assert events == ["A", "released", "B", "released"], f"calibration edits: {events}"
+        assert all("rss_mb" in e and "stats" in e for e in result["edits"].values()), result["edits"]
+        events.clear()
+        cp.child_real(spec)
+        assert events == ["A", "released", "B", "released"], f"real runs: {events}"
+    finally:
+        cp.child_setup, cp.install_recorder, cp.run_edit, cp.release_memory, progress_timeline.install_timers = saved
+    cp.release_memory()  # the real one runs (malloc_trim on Linux)
+    rss = cp.resident_mb()
+    assert rss is None or 1 < rss < 100_000, rss
+
+
+def test_cores() -> None:
+    # --cores N (run_cases.pin_to_cores): one CPU per physical core, the fastest kind first
+    hybrid = [(1, [2 * i, 2 * i + 1]) for i in range(8)] + [(0, [16 + i]) for i in range(4)]  # 8 P-cores with HT, 4 E-cores
+    p_cores = list(range(0, 16, 2))
+    assert run_cases.one_per_core(list(range(20)), hybrid) == [*p_cores, 16, 17, 18, 19]
+    e_first = [(0, [0]), (0, [1]), (1, [2, 3]), (1, [4, 5])]  # E-cores numbered first
+    assert run_cases.one_per_core(list(range(6)), e_first) == [2, 4, 0, 1]
+    apart = [(0, [i, i + 6]) for i in range(6)]  # hyperthreads numbered apart
+    assert run_cases.one_per_core(list(range(12)), apart) == [0, 1, 2, 3, 4, 5]
+    assert run_cases.one_per_core([0, 6, 1], apart) == [0, 1], "0 and 6 are one core"
+    assert run_cases.one_per_core([0, 1, 2], []) == [0, 1, 2], "unknown topology: every CPU a core"
+    if hasattr(os, "sched_getaffinity"):
+        return  # Linux reads /sys
+    saved = run_cases._windows_affinity, run_cases._windows_cores
+    run_cases._windows_affinity, run_cases._windows_cores = (lambda: list(range(20))), (lambda: hybrid)
+    try:
+        assert run_cases.pick_cpus(4) == p_cores[:4]
+        assert run_cases.pick_cpus(10) == [*p_cores, 16, 17], run_cases.pick_cpus(10)
+        assert run_cases.pick_cpus(20)[12:] == [1, 3, 5, 7, 9, 11, 13, 15], "hyperthreads last"
+    finally:
+        run_cases._windows_affinity, run_cases._windows_cores = saved
+    mine = run_cases._windows_cores()  # this machine's: every logical CPU on exactly one core
+    cpus = [c for _, listed in mine for c in listed]
+    assert mine and sorted(cpus) == list(range(len(cpus))) and len(cpus) == (os.cpu_count() or 0), mine
+
+
+# --------------------------------------------------------------------------- main() on a recording, no encoding
+
+def calls_of(edit: dict, costs: progress_costs.ProgressCosts) -> list[tuple[float, float]]:
+    """The progress calls an edit's recorded events give under these costs (as calibrate_progress.replay)."""
+    import importlib  # noqa: PLC0415
+
+    import smartcut  # noqa: PLC0415
+    sc = importlib.import_module("smartcut.smart_cut")
+    p = edit["plan"]
+    plan = sc._WorkPlan(p["family"], p["megapixels"], [np.array(b, float) for b in p["busyness"]],
+                        [np.array(f, bool) for f in p["faded"]], p["copied_frames"], p["audio_seconds"])
+    calls, now = [], [0.0]
+    work = sc._WorkProgress(smartcut._ProgressAdapter(lambda c, n: calls.append((now[0], c / n))), None, plan, costs)
+    for t, name, args in edit["events"]:
+        now[0] = t
+        getattr(work, name)(*args)
+    return calls
+
+
+# A machine unlike the built-in costs' (per codec: fixed s, s per megapixel**1.2, busy share, fade s per megapixel):
+# fitted on 360p alone (one size: the built-in shape kept) its costs differ from those fitted on 360p and 720p
+SYNTHETIC_MACHINE = {"h264": (0.004, 0.012, 0.35, 0.05), "vp9": (0.02, 0.03, 0.0, 0.0), "av1": (0.05, 0.06, 0.6, 0.0)}
+
+
+def synthetic_edit(case: dict, file: dict, rng, costs: progress_costs.ProgressCosts) -> tuple[dict, list[dict]]:  # noqa: ANN001
+    """A recorded edit as calibrate_progress's measuring processes give it (its plan, events, progress calls under
+    costs, copy / audio times) and its encoder runs, timed by SYNTHETIC_MACHINE with noise. Per segment: a re-encoded
+    piece, copied GOPs, a re-encoded piece (60 frames more each, faded, with fades)."""
+    mp = {360: 0.2304, 720: 0.9216}[file["height"]]
+    fixed, per_mp, busy_share, fade = SYNTHETIC_MACHINE[file["codec"]]
+    fades = "fadein" in case["segments"][0]
+    busyness, faded, copied, audio, events, runs = [], [], [], [], [], []
+    t, stats = 0.05, {"copy_s": 0.0, "copy_frames": 0, "audio_s": 0.0, "audio_media_s": 0.0}
+    for _ in case["segments"]:
+        for kind in ("recode", "copy", "recode"):
+            i = len(copied)
+            events.append([t, "piece_started", [i]])
+            if kind == "recode":
+                n = int(rng.integers(10, 50)) + (60 if fades else 0)
+                b = rng.uniform(0.4, 1.8, n).round(5)
+                f = np.zeros(n, bool)
+                if fades:
+                    f[:60] = True
+                spent = 0.0
+                for k in range(n):
+                    cost = ((fixed + per_mp * mp ** 1.2) * (1 - busy_share + busy_share * b[k]) + fade * mp * f[k]) * rng.uniform(0.8, 1.2)
+                    t += cost
+                    spent += cost
+                    events.append([t, "frames_encoded", [1, 1]])
+                runs.append({"codec": file["codec"], "mp": mp, "s": spent, "cpu": spent * 0.99, "n": n, "busy": float(b.sum()),
+                             "faded": int(f.sum()), "case": case["name"]})
+                busyness.append(b.tolist())
+                faded.append(f.tolist())
+                copied.append(0)
+                frames = n
+            else:
+                frames = int(rng.integers(300, 400))
+                t += frames * 3.4e-5
+                stats["copy_s"] += frames * 3.4e-5
+                stats["copy_frames"] += frames
+                busyness.append([])
+                faded.append([])
+                copied.append(frames)
+            audio.append(frames / 30)
+            t += frames / 30 * 0.028
+            stats["audio_s"] += frames / 30 * 0.028
+            stats["audio_media_s"] += frames / 30
+            events.append([t, "piece_done", [i]])
+    events.append([t, "done", []])
+    edit = {"ok": True, "end": t + 0.01, "cpu": (t + 0.01) * 0.99, "rss_mb": 120.0, "stats": stats, "events": events,
+            "plan": {"family": file["codec"], "megapixels": mp, "busyness": busyness, "faded": faded, "copied_frames": copied,
+                     "audio_seconds": audio}}
+    edit["calls"] = calls_of(edit, costs)
+    return edit, runs
+
+
+SYNTHETIC_MANIFEST = {
+    "recipe": cp.MEDIA_RECIPE, "excerpt": 90.0, "facebook": "fb.mp4",
+    "source": {"name": "clip.mp4", "sha256": "0" * 64, "height": 720},
+    "files": {"h264_360p.mp4": {"codec": "h264", "height": 360, "facebook": False},
+              "h264_720p.mp4": {"codec": "h264", "height": 720, "facebook": False},
+              "fb.mp4": {"codec": "h264", "height": 360, "facebook": True}}}
+
+
+def run_recorded(tmp: Path, args: list[str], *, real_run=None) -> tuple[str, dict, dict, list[dict]]:  # noqa: ANN001
+    """main() on a synthetic two-resolution recording (H.264 360p / 720p and the Facebook clip): check_media returns
+    SYNTHETIC_MANIFEST and run_child synthetic recordings, so nothing is encoded. real_run(spec, n): instead of the n-th
+    real run. Returns main()'s output, what decide() was given, the calibration recording and the real runs'."""
+    rng = np.random.default_rng(11)
+    real_results: list[dict] = []
+    recording: dict = {}
+
+    def run_child(mode: str, spec: dict, costs_file: Path, work: Path) -> dict:
+        costs = progress_costs.load(costs_file)[0]
+        if mode == "real" and real_run is not None:
+            return real_run(spec, len(real_results))
+        edits, runs = {}, []
+        for case in spec["cases"]:
+            edits[case["name"]], r = synthetic_edit(case, SYNTHETIC_MANIFEST["files"][case["file"]], rng, costs)
+            runs += r
+        result = {"info": {"available_cpus": 1, "cpus": [0], "expected_cores": 1}, "edits": edits}
+        if mode == "measure":
+            result.update(runs=runs, stats={k: sum(e["stats"][k] for e in edits.values()) for k in edits[next(iter(edits))]["stats"]})
+            recording.update(result)
+        else:
+            real_results.append(result)
+        return json.loads(json.dumps(result))  # as read back from the child's JSON
+
+    saved = cp.run_child, cp.check_media
+    cp.run_child, cp.check_media = run_child, lambda media, codecs, resolutions: json.loads(json.dumps(SYNTHETIC_MANIFEST))
+    try:
+        text, seen = run_main(["--media", str(tmp / "media"), "--codecs", "h264", "--resolutions", "360,720", "--cores", "1", *args],
+                              tmp / "recorded" / "progress_costs.json")
+    finally:
+        cp.run_child, cp.check_media = saved
+    return text, seen, recording, real_results
+
+
+def test_main_recorded(tmp: Path) -> None:
+    """main()'s held-out check and real-run check on a recording: decide() gets held_out = the held-out edits' mean
+    replay under the costs in use and under fit(measured, old, fit_on), real = the paired means of the real runs
+    replayed under the costs in use and fit(measured, old), and the same per edit; and the codecs not calibrated."""
+    old = progress_costs.BUILT_IN
+    text, seen, measured, reals = run_recorded(tmp, [])
+    cases, app, held = cp.plan_cases(SYNTHETIC_MANIFEST, ["h264"], [360, 720], False)
+    fit_on = [c["name"] for c in cases if c["name"] not in held]
+    assert held and fit_on and set(app) <= set(held), (held, fit_on, app)
+    held_fit, new = cp.fit(measured, old, fit_on)[0], cp.fit(measured, old)[0]
+    assert held_fit.recode["h264"] != new.recode["h264"], "the recording must tell the held-out fit from the all-edit fit"
+    held_edits = {n: (round(cp.replay(measured["edits"][n], old)[0], 2), round(cp.replay(measured["edits"][n], held_fit)[0], 2))
+                  for n in held}
+    paired = {n: ([round(cp.replay(r["edits"][n], old)[0], 2) for r in reals], [round(cp.replay(r["edits"][n], new)[0], 2) for r in reals])
+              for n in app}
+    want = {"held_out": (cp.mean([v[0] for v in held_edits.values()]), cp.mean([v[1] for v in held_edits.values()])),
+            "real": (cp.mean([v for n in app for v in paired[n][0]]), cp.mean([v for n in app for v in paired[n][1]])),
+            "held_out_edits": held_edits, "real_edits": {n: (cp.mean(a), cp.mean(b)) for n, (a, b) in paired.items()}}
+    assert len(reals) == 2, "one real run with the costs in use, one with the new ones"
+    live = [cp.mean([round(cp.evenness_of(r["edits"][n]["calls"], r["edits"][n]["end"])[0], 2) for n in app]) for r in reals]
+    assert abs(live[0] - want["real"][0]) > 0.01 or abs(live[1] - want["real"][1]) > 0.01, "the runs as they went must differ from the paired replays"
+    for key, value in want.items():
+        got = seen.get(key)
+        if isinstance(value, dict):
+            assert got is not None and got.keys() == value.keys() and all(
+                abs(got[n][0] - value[n][0]) < 1e-9 and abs(got[n][1] - value[n][1]) < 1e-9 for n in value), (key, got, value)
+        else:
+            assert got is not None and abs(got[0] - value[0]) < 1e-9 and abs(got[1] - value[1]) < 1e-9, (key, got, value)
+    assert seen["uncalibrated"] == ["vp9", "av1"] and seen["no_split"] is None and seen["facebook"] is True, seen
+    assert "not calibrated: vp9, av1 (see --codecs): it writes the candidate only" in text, text
+
+
+def test_work_removed(tmp: Path) -> None:
+    """main()'s temporary work folder is removed also when it stops early (sys.exit: a real run failed)."""
+    made: list[Path] = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def mkdtemp(*args, **kw) -> str:  # noqa: ANN002, ANN003
+        made.append(Path(real_mkdtemp(*args, **kw)))
+        return str(made[-1])
+
+    cp.tempfile.mkdtemp = mkdtemp
+    try:
+        run_recorded(tmp, [], real_run=lambda spec, n: {"info": {"expected_cores": 1}, "edits": {spec["cases"][0]["name"]: {"ok": False}}})
+        raise AssertionError("a failed real run must stop the calibration")
+    except SystemExit as e:
+        assert "real run" in str(e) and "failed" in str(e), e
+    finally:
+        cp.tempfile.mkdtemp = real_mkdtemp
+    assert len(made) == 1 and not made[0].exists(), f"work folder left: {made}"
+
+
+def test_concurrent_reader(tmp: Path) -> None:
+    """write_atomic() replacing the costs file while another thread reads it with progress_costs.load() every
+    millisecond, as smartcut processes do at their first edit: no write fails and no read falls back to the built-in
+    costs. On Windows a file open elsewhere can't be replaced, nor opened while it is being replaced
+    (PermissionError): with a reader in a tight loop 160 of 300 writes failed and 282 reads fell back. A file held
+    open for 0.3 s is replaced once it is closed; one held open for longer than the retries raises the error.
+    (A reader in a tight loop, under heavy load, could still hold the file open for all of the ~1.8 s of retries.)"""
+    import threading  # noqa: PLC0415
+    import time  # noqa: PLC0415
+    target = tmp / "concurrent" / "progress_costs.json"
+    target.parent.mkdir()
+    cp.write_atomic(target, progress_costs.to_json(progress_costs.BUILT_IN))
+    if sys.platform == "win32":  # held open for 0.3 s: the replace waits for it
+        opened = threading.Event()
+
+        def hold() -> None:
+            with open(target, encoding="utf-8"):
+                opened.set()
+                time.sleep(0.3)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        opened.wait()
+        try:
+            cp.write_atomic(target, "after the reader\n")
+        finally:
+            holder.join()
+        assert target.read_text(encoding="utf-8") == "after the reader\n"
+        cp.write_atomic(target, progress_costs.to_json(progress_costs.BUILT_IN))
+    stop, fallbacks, failures = [False], [], []
+
+    def reader() -> None:
+        while not stop[0]:
+            costs, messages = progress_costs.load(target)
+            if costs is progress_costs.BUILT_IN:
+                fallbacks.append(messages)
+            time.sleep(0.001)
+
+    thread = threading.Thread(target=reader)
+    thread.start()
+    try:
+        for i in range(100):
+            try:
+                cp.write_atomic(target, progress_costs.to_json(progress_costs.BUILT_IN, {"host": f"h{i}"}))
+            except OSError as e:
+                failures.append(repr(e))
+    finally:
+        stop[0] = True
+        thread.join()
+    assert not failures and not fallbacks, f"{len(failures)} writes failed ({failures[:1]}), {len(fallbacks)} reads fell back ({fallbacks[:1]})"
+    assert sorted(p.name for p in target.parent.iterdir()) == ["progress_costs.json"], "temporary files left"
+    if sys.platform == "win32":
+        with open(target, encoding="utf-8"):
+            t = time.perf_counter()
+            try:
+                cp.write_atomic(target, "new\n")
+                raise AssertionError("a file held open can't be replaced on Windows: the error must be raised")
+            except PermissionError:
+                assert time.perf_counter() - t > 1.0, "retried before giving up"
+        assert sorted(p.name for p in target.parent.iterdir()) == ["progress_costs.json"], "temporary file left"
+
+
+# ------------------------------------------------------------------------------------------------------ smoke test
+
+def run_main(args: list[str], target: Path) -> tuple[str, dict]:
+    """calibrate_progress.main() in this process, reading and writing target (SMARTCUT_PROGRESS_COSTS), with decide()
+    answering "adopt": its output and what decide() was given."""
+    seen: dict = {}
+
+    def decide(**kw):  # noqa: ANN003, ANN202
+        seen.update(kw)
+        return True, []
+
+    out = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")  # main() reconfigures stdout's buffering
+    saved = cp.decide, sys.argv, sys.stdout, os.environ.get(progress_costs.ENV_VAR)
+    cp.decide, sys.argv, sys.stdout = decide, [str(HARNESS), *args, "--ffmpeg", str(shutil.which("ffmpeg"))], out
+    os.environ[progress_costs.ENV_VAR] = str(target)
+    try:
+        cp.main()
+    finally:
+        cp.decide, sys.argv, sys.stdout = saved[:3]
+        if saved[3] is None:
+            os.environ.pop(progress_costs.ENV_VAR, None)
+        else:
+            os.environ[progress_costs.ENV_VAR] = saved[3]
+    out.flush()
+    return out.buffer.getvalue().decode("utf-8"), seen  # type: ignore[attr-defined]
+
+
+def harness(*args: str, env: dict | None = None) -> subprocess.CompletedProcess:
+    ffmpeg = os.environ.get("SMARTCUT_TEST_FFMPEG") or shutil.which("ffmpeg")
+    return subprocess.run([sys.executable, "-X", "utf8", str(HARNESS), *args, "--ffmpeg", str(ffmpeg)],
+                          capture_output=True, text=True, timeout=1800, check=False, env=env)
+
+
+def smoke(tmp: Path, check) -> None:  # noqa: ANN001
+    clip, media = tmp / "clip.mp4", tmp / "media"
+    generate_test_video(str(clip), duration=35)
+    r = harness("--make-media", str(media), str(clip), "--quick", "--codecs", "h264", "--resolutions", "360")
+    manifest = media / "manifest.json"
+    check("--make-media makes the clips and a manifest", r.returncode == 0 and manifest.exists()
+          and (media / "h264_360p.mp4").exists(), r.stdout + r.stderr)
+
+    # The file smartcut reads, named as on the server; --quick must leave it alone
+    target = tmp / "server" / "progress_costs.json"
+    target.parent.mkdir()
+    before = progress_costs.to_json(progress_costs.BUILT_IN, {"host": "before"})
+    target.write_text(before, encoding="utf-8")
+    r = harness("--media", str(media), "--quick", "--codecs", "h264", "--cores", "1",
+                env={**os.environ, progress_costs.ENV_VAR: str(target)})
+    candidate = target.with_name("progress_costs.candidate.json")
+    verdicts = [line for line in r.stdout.splitlines() if line.startswith(("ADOPTED:", "NOT ADOPTED:"))]
+    ok = (r.returncode == 0 and "cores: 1 expected" in r.stdout and len(verdicts) == 1
+          and verdicts[0].startswith("NOT ADOPTED: --quick is a smoke check") and "no Facebook clip: no held-out footage" in verdicts[0]
+          and target.read_text(encoding="utf-8") == before
+          and not target.with_name("progress_costs.previous.json").exists())
+    try:
+        costs = progress_costs.parse(json.loads(candidate.read_text()))
+        data = json.loads(candidate.read_text())
+        ok = ok and "h264" in costs.recode and data["measured"]["cores"] == 1 and data["adopted"] is False
+    except Exception as e:
+        ok, r.stdout = False, f"{r.stdout}\n{e!r}"
+    check("--quick never adopts: the file is unchanged, the candidate loads", ok, r.stdout + r.stderr)
+
+    r = harness("--media", str(media), "--quick", "--codecs", "h264,vp9", "--estimate")
+    check("a clip the media lacks is refused", r.returncode != 0 and "vp9_360p.mp4" in r.stdout + r.stderr, r.stdout + r.stderr)
+
+    # main() itself, with the rule's verdict forced to adopt: what decide() is given, and what an adoption writes
+    target = tmp / "server2" / "progress_costs.json"
+    target.parent.mkdir()
+    target.write_text(before, encoding="utf-8")
+    try:
+        text, seen = run_main(["--media", str(media), "--quick", "--codecs", "h264", "--cores", "1"], target)
+        verdicts = [line for line in text.splitlines() if line.startswith(("ADOPTED:", "NOT ADOPTED:"))]
+        data = json.loads(target.read_text(encoding="utf-8"))
+        ok = (len(verdicts) == 1 and verdicts[0].startswith("ADOPTED: more even by at least") and str(target) in verdicts[0]
+              and data["adopted"] is True and data["measured"]["quick"] is True
+              and target.with_name("progress_costs.previous.json").read_text(encoding="utf-8") == before
+              and seen["quick"] is True and seen["facebook"] is False and seen["pinned"] is True
+              and "one resolution" in (seen["no_split"] or "") and all(isinstance(v, float) for v in seen["real"]))
+        detail = f"{seen}\n{text}"
+    except (Exception, SystemExit) as e:  # a failure or a refusal
+        ok, detail = False, repr(e)
+    check("main(): decide() gets the run's facts; an adoption replaces the file and keeps the one before", ok, detail)
+
+    with open(media / "h264_360p.mp4", "ab") as f:
+        f.write(b"\0")
+    r = harness("--media", str(media), "--quick", "--codecs", "h264", "--estimate")
+    check("a changed clip is refused", r.returncode != 0 and "changed" in r.stdout + r.stderr, r.stdout + r.stderr)
+
+
+def test_real_start(tmp: Path) -> None:
+    import time  # noqa: PLC0415
+
+    import smartcut  # noqa: PLC0415
+    from smartcut import video_cutter  # noqa: PLC0415
+    assert hasattr(progress_timeline, "install_start_timer"), "progress_timeline can't measure from the cut's real start"
+    src = tmp / "start.mp4"
+    generate_test_video(str(src), duration=6)
+    saved = video_cutter.VideoCutter.segment
+    try:
+        started = progress_timeline.install_start_timer()
+        for k in range(2):
+            started.clear()
+            calls: list[tuple[float, float]] = []
+            t0 = time.perf_counter()
+            assert smartcut.process_segments(str(src), str(tmp / f"start{k}.mp4"), [{"start": 1, "end": 2.5}, {"start": 3.5, "end": 5}],
+                                             progress_callback=lambda c, n, t0=t0, calls=calls: calls.append((time.perf_counter() - t0, c / n)))
+            assert len(started) == 1 and calls, (started, len(calls))
+            start = started[0] - t0
+            assert 0 < start <= calls[0][0], f"edit {k}: the real start {start:.3f} s must come before the first update {calls[0][0]:.3f} s"
+    finally:
+        video_cutter.VideoCutter.segment = saved
+    # A wait before the first update: from the first update it doesn't count, from the real start it does
+    calls = [(4.0, 0.1), (8.0, 0.8), (10.0, 1.0)]
+    real, first = progress_timeline.evenness(calls, 0.0, 10.0)[0], progress_timeline.evenness(calls, calls[0][0], 10.0)[0]
+    assert abs(real - 0.3) < 1e-9 and abs(first - (0.8 - 4 / 6)) < 1e-9, (real, first)
+
+
+def main() -> int:
+    failed, total = 0, 0
+
+    def check(name: str, ok: bool, detail: str = "") -> None:
+        nonlocal failed, total
+        total += 1
+        failed += not ok
+        print(f"{'✓ PASS' if ok else '✗ FAIL'} - {name}" + ("" if ok else f": {detail[-3000:]}"))
+
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        for name, test in (("The adoption rule: margin, --quick, pinning, CPU check, held-out check", test_rule),
+                           ("The held-out edits, and when there is no held-out check", test_held_out),
+                           ("The held-out fit uses only the other edits' runs and times", test_fit_without_held_out),
+                           ("CPU checks: escaped pinning and other load, also in the real runs", test_cpu_checks),
+                           ("Files: atomic replace, previous kept, candidate when not adopted", lambda: test_files(tmp)),
+                           ("The measuring processes release memory after every edit", test_memory_released),
+                           ("--cores: one CPU per physical core, P-cores first", test_cores),
+                           ("progress_timeline: evenness from the cut's real start", lambda: test_real_start(tmp)),
+                           ("main() on a recording: the held-out check, the real runs and per edit, as decide() gets them",
+                            lambda: test_main_recorded(tmp)),
+                           ("main(): the temporary work folder removed when it stops early", lambda: test_work_removed(tmp)),
+                           ("Atomic writes with a reader at the same time: none fails, no read falls back",
+                            lambda: test_concurrent_reader(tmp))):
+            try:
+                test()
+                check(name, True)
+            except (AssertionError, OSError) as e:
+                check(name, False, repr(e))
+        if os.environ.get("SMARTCUT_TEST_FFMPEG") or shutil.which("ffmpeg"):
+            smoke(tmp, check)
+        else:
+            print("SKIPPED the smoke test: no ffmpeg command (put it on PATH or set SMARTCUT_TEST_FFMPEG)")
+    print(f"\n{total - failed}/{total} tests passed")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

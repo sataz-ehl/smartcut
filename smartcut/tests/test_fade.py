@@ -5,9 +5,10 @@ Generates synthetic test video with audio and tests various fade scenarios.
 """
 
 import os
-import sys
 import subprocess
+import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 # Make the repo root importable (tests live in smartcut/tests/; run from the repo root)
@@ -15,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 # Import synthetic video generator
 from smartcut.tests.generate_synthetic_video import generate_test_video
+
 
 def run_smartcut(input_path: str, output_path: str, keep_args: list[str]) -> None:
     """
@@ -33,11 +35,11 @@ def run_smartcut(input_path: str, output_path: str, keep_args: list[str]) -> Non
         cmd.extend(['--keep', keep_arg])
 
     print(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
 
     assert result.returncode == 0, f"Smartcut failed: {result.stderr}"
 
-    print(f"✓ Smartcut completed successfully")
+    print("✓ Smartcut completed successfully")
 
 def check_video_exists(path: str, min_size: int = 1000) -> None:
     """
@@ -53,7 +55,7 @@ def check_video_exists(path: str, min_size: int = 1000) -> None:
 
     print(f"✓ Output file exists ({size} bytes)")
 
-def test_no_fade():
+def test_no_fade() -> None:
     """Test basic cutting without fades (baseline)."""
     print("\n" + "="*60)
     print("TEST: No fade (baseline)")
@@ -71,7 +73,7 @@ def test_no_fade():
 
         print("✓ TEST PASSED: No fade")
 
-def test_fadein_only():
+def test_fadein_only() -> None:
     """Test fade-in only."""
     print("\n" + "="*60)
     print("TEST: Fade-in only (1 second)")
@@ -89,7 +91,7 @@ def test_fadein_only():
 
         print("✓ TEST PASSED: Fade-in only")
 
-def test_fadeout_only():
+def test_fadeout_only() -> None:
     """Test fade-out only."""
     print("\n" + "="*60)
     print("TEST: Fade-out only (1 second)")
@@ -107,7 +109,7 @@ def test_fadeout_only():
 
         print("✓ TEST PASSED: Fade-out only")
 
-def test_both_fades():
+def test_both_fades() -> None:
     """Test both fade-in and fade-out."""
     print("\n" + "="*60)
     print("TEST: Both fade-in and fade-out")
@@ -125,7 +127,7 @@ def test_both_fades():
 
         print("✓ TEST PASSED: Both fades")
 
-def test_custom_fade_duration():
+def test_custom_fade_duration() -> None:
     """Test custom fade durations."""
     print("\n" + "="*60)
     print("TEST: Custom fade durations (1.5s in, 2.0s out)")
@@ -143,7 +145,7 @@ def test_custom_fade_duration():
 
         print("✓ TEST PASSED: Custom fade durations")
 
-def test_multiple_segments():
+def test_multiple_segments() -> None:
     """Test multiple segments with different fade configurations."""
     print("\n" + "="*60)
     print("TEST: Multiple segments with different fades")
@@ -162,7 +164,7 @@ def test_multiple_segments():
 
         print("✓ TEST PASSED: Multiple segments")
 
-def create_demo_video():
+def create_demo_video() -> bool:
     """Create a demo video saved to tests folder for manual inspection."""
     print("\n" + "="*60)
     print("DEMO: Creating demo video for manual inspection")
@@ -188,7 +190,7 @@ def create_demo_video():
     print("  You can play these files to visually verify the fade effects")
     return True
 
-def main():
+def main() -> int:
     """Run all tests."""
     print("="*60)
     print("Fade Functionality Test Suite")
@@ -214,7 +216,6 @@ def main():
         except Exception as e:
             failed += 1
             print(f"✗ TEST FAILED: {test_name} - {e}")
-            import traceback
             traceback.print_exc()
 
     # Create demo video
@@ -223,7 +224,6 @@ def main():
         create_demo_video()
     except Exception as e:
         print(f"✗ Demo creation failed: {e}")
-        import traceback
         traceback.print_exc()
 
     # Summary

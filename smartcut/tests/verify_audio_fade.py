@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """Verify audio fade effects by analyzing volume levels."""
 
-import sys
 import os
 import subprocess
+import sys
 import tempfile
+from pathlib import Path
+
 import av
 import numpy as np
-from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (tests live in smartcut/tests/)
 from smartcut.tests.test_fade import generate_test_video
 
 
-def analyze_audio_volume(video_path, duration_seconds=None):
+def analyze_audio_volume(video_path: str, duration_seconds: float | None = None
+                         ) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
     """Extract audio RMS levels over time."""
     container = av.open(video_path)
-    audio_stream = next((s for s in container.streams if s.type == 'audio'), None)
+    audio_stream = next(iter(container.streams.audio), None)
 
     if audio_stream is None:
         print("No audio stream found")
@@ -44,7 +46,6 @@ def analyze_audio_volume(video_path, duration_seconds=None):
 
     # Convert to numpy array
     samples = np.array(all_samples)
-    times = np.arange(len(samples)) / sample_rate
 
     # Calculate RMS in windows
     window_size = int(sample_rate * 0.1)  # 100ms windows
@@ -64,7 +65,7 @@ def analyze_audio_volume(video_path, duration_seconds=None):
     return np.array(time_values), np.array(rms_values)
 
 
-def test_fade_in():
+def test_fade_in() -> bool:
     """Test fade-in: volume should increase from 0 to full."""
     print("\n" + "="*60)
     print("TEST: Fade-in (2 seconds)")
@@ -81,11 +82,11 @@ def test_fade_in():
         subprocess.run([
             sys.executable, '-m', 'smartcut', input_file, output_file,
             '--keep', '2:fadein:2,8'
-        ], capture_output=True)
+        ], capture_output=True, check=False)
 
         times, rms = analyze_audio_volume(output_file)
 
-        if times is None or len(times) == 0:
+        if times is None or rms is None or len(times) == 0:
             print("✗ Failed to analyze audio")
             return False
 
@@ -127,7 +128,7 @@ def test_fade_in():
         return False
 
 
-def test_fade_out():
+def test_fade_out() -> bool:
     """Test fade-out: volume should decrease from full to 0."""
     print("\n" + "="*60)
     print("TEST: Fade-out (2 seconds)")
@@ -144,11 +145,11 @@ def test_fade_out():
         subprocess.run([
             sys.executable, '-m', 'smartcut', input_file, output_file,
             '--keep', '2,8:fadeout:2'
-        ], capture_output=True)
+        ], capture_output=True, check=False)
 
         times, rms = analyze_audio_volume(output_file)
 
-        if times is None or len(times) == 0:
+        if times is None or rms is None or len(times) == 0:
             print("✗ Failed to analyze audio")
             return False
 
@@ -188,7 +189,7 @@ def test_fade_out():
         return False
 
 
-def test_both_fades():
+def test_both_fades() -> bool:
     """Test both fade-in and fade-out."""
     print("\n" + "="*60)
     print("TEST: Both fade-in and fade-out (1.5s each)")
@@ -205,11 +206,11 @@ def test_both_fades():
         subprocess.run([
             sys.executable, '-m', 'smartcut', input_file, output_file,
             '--keep', '2:fadein:1.5,8:fadeout:1.5'
-        ], capture_output=True)
+        ], capture_output=True, check=False)
 
         times, rms = analyze_audio_volume(output_file)
 
-        if times is None or len(times) == 0:
+        if times is None or rms is None or len(times) == 0:
             print("✗ Failed to analyze audio")
             return False
 

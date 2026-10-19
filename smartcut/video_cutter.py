@@ -1,3 +1,4 @@
+import contextlib
 import heapq
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
@@ -127,10 +128,8 @@ def create_video_output_stream(
             for attr in ('color_range', 'color_primaries', 'color_trc', 'colorspace'):
                 value = getattr(in_stream.codec_context, attr, None)
                 if value is not None:
-                    try:
+                    with contextlib.suppress(AttributeError, TypeError, ValueError):
                         setattr(out_stream.codec_context, attr, value)
-                    except (AttributeError, TypeError, ValueError):
-                        pass
             out_stream.metadata.update(in_stream.metadata)
             out_stream.disposition = cast(Disposition, in_stream.disposition.value)
             out_stream.time_base = in_stream.time_base
@@ -209,6 +208,9 @@ _PLANAR_YUV_BITS = {
 }
 _AVCOL_RANGE_JPEG = 2  # full-range ("PC") YUV
 
+# x265 options in a source's headers that describe the machine that encoded it, not the stream (see init_encoder)
+_X265_MACHINE_OPTIONS = frozenset({'frame-threads', 'numa-pools', 'pools', 'lookahead-threads'})
+
 
 def _fade_yuv_frame(frame: VideoFrame, alpha: float) -> VideoFrame | None:
     """
@@ -238,7 +240,7 @@ def _fade_yuv_frame(frame: VideoFrame, alpha: float) -> VideoFrame | None:
             src_px = np.minimum(src_px, max_value)  # guard the table lookup against out-of-range samples
         dst_px = np.zeros((dst.height, dst.line_size // dtype.itemsize), dtype)
         dst_px[:, :dst.width] = lut[src_px]
-        dst.update(dst_px)
+        dst.update(cast(bytes, dst_px))  # update() takes any buffer, e.g. an ndarray; PyAV's stub says bytes
 
     faded.pts = frame.pts
     if frame.time_base is not None:  # decoded frames often have none
@@ -333,9 +335,9 @@ class VideoCutter:
         # Track decoder continuity between GOPs: last GOP end DTS consumed
         self._last_fetch_end_dts: int | None = None
 
-        # Called after every frame fed to the encoder and after every encoder flush, with the number of frames
-        # the encoder output: progress within a re-encoded piece, and cancelling midway (fork addition)
-        self.on_frames_encoded: Callable[[int], None] | None = None
+        # Called with (frames fed, frames output) after every frame fed to the encoder, (1, n), and after every frame
+        # an encoder flush outputs, (0, 1): progress within a re-encoded piece, and cancelling midway (fork addition)
+        self.on_frames_encoded: Callable[[int, int], None] | None = None
 
     def init_encoder(self) -> None:
         self.encoder_inited = True
@@ -378,12 +380,12 @@ class VideoCutter:
         # libaom-av1 defaults are very slow: on one CPU core, AV1 smart cuts took ~16x longer than with
         # cpu-used=8, which costs ~1.7 dB PSNR on the re-encoded GOPs only (VP9 cpu-used=5: ~2x, ~0.7 dB). Full
         # re-encodes (RECODE mode) use them too, on purpose.
-        # Lookahead of 10 frames instead of the defaults (x264 40, libvpx 25, libaom 19-35): re-encoded runs are
-        # short, and each frame in the lookahead holds several MB. One core, 1080p with fades: x264 peak
-        # +429 -> +239 MB, libaom +545 -> +331 MB and 209 -> 132 s, for 0.4-0.9 dB PSNR on the re-encoded frames
-        # (at 47-52 dB, same size). It also shortens the encoder flushes, where progress pauses. Not for libaom
-        # below 720p: there it was ~35% slower (360p: 14 -> 19 s), and the memory is small anyway. Not in RECODE mode
-        # either, which re-encodes the whole video in one long run.
+        # Lookahead of 10 frames instead of the defaults (x264 40, libvpx 25, libaom 19-35, x265 20: see the hevc
+        # options below): re-encoded runs are short, and each frame in the lookahead holds several MB. One core, 1080p
+        # with fades: x264 peak +429 -> +239 MB, libaom +545 -> +331 MB and 209 -> 132 s, for 0.4-0.9 dB PSNR on the
+        # re-encoded frames (at 47-52 dB, same size). It also shortens the encoder flushes, where progress pauses. Not
+        # for libaom below 720p: there it was ~35% slower (360p: 14 -> 19 s), and the memory is small anyway. Not in
+        # RECODE mode either, which re-encodes the whole video in one long run.
         ctx = self.in_stream.codec_context
         hd = (ctx.width or 0) * (ctx.height or 0) >= 1280 * 720
         short_runs = self.video_settings.mode == VideoExportMode.SMARTCUT
@@ -434,6 +436,11 @@ class VideoCutter:
             except Exception:
                 pass
 
+            # The source's threading options are its encoding machine's, not this one's (fork fix): from a 12-thread
+            # PC, frame-threads=3 numa-pools=12 gave a 1-CPU server a 12-thread pool and 3 frame threads. x265 sizes
+            # them for the machine it runs on.
+            x265_params = [p for p in x265_params if p.split('=', 1)[0] not in _X265_MACHINE_OPTIONS]
+
             # Repeat headers. This should be the same as `global_headers = False`,
             # but for some reason setting this explicitly is necessary with x265.
             x265_params.append('repeat-headers=1')
@@ -443,8 +450,23 @@ class VideoCutter:
             # represent the original video's settings.
             x265_params.append('info=0')
 
-            if self.log_level is not None:
-                x265_params.append(f'log_level={self.log_level}')
+            # Quiet by default, as the output stream's own x265-params (fork fix): sources without x265's options in their
+            # headers (camera footage) printed x265's info log for every re-encoded run
+            x265_params.append(f'log_level={self.log_level if self.log_level is not None else "error"}')
+
+            # Lookahead of at most 10 frames in smart cuts, as for the other encoders above (fork addition). x265's
+            # default is 20; a source's own, reused above, is kept when shorter (-preset fast: 15). x265 refuses a
+            # lookahead that isn't longer than its B-frame runs, so a source with 10 or more B-frames gets bframes + 1.
+            # One core, 2 segments with fades, x265 defaults: peak 1080p +516 -> +433 MB, 720p +470 -> +428 MB, 360p
+            # +151 -> +136 MB, for 0.3-0.6 dB PSNR on the re-encoded frames (at 47-51 dB; outputs 1-2 % smaller), and no
+            # slower.
+            if short_runs:
+                values = dict(p.split('=', 1) for p in x265_params if '=' in p)
+                try:
+                    lookahead = min(int(values.get('rc-lookahead', 20)), max(10, int(values.get('bframes', 4)) + 1))
+                    x265_params = [p for p in x265_params if not p.startswith('rc-lookahead=')] + [f'rc-lookahead={lookahead}']
+                except ValueError:  # not x265's own option format: its lookahead is left alone
+                    pass
 
             if self.video_settings.quality == VideoExportQuality.LOSSLESS:
                 x265_params.append('lossless=1')
@@ -640,9 +662,10 @@ class VideoCutter:
             decoder_priming_dts = self.media_container.gop_start_times_dts[s.gop_index - 1]
 
         for frame in self.fetch_frame(s.gop_start_dts, s.gop_end_dts, s.end_time, decoder_priming_dts):
-            assert frame.pts is not None, "Frame pts should not be None after decoding"
+            pts = frame.pts  # the faded frame below keeps it
+            assert pts is not None, "Frame pts should not be None after decoding"
             in_tb = frame.time_base if frame.time_base is not None else self.in_time_base
-            frame_abs_time = frame.pts * in_tb
+            frame_abs_time = pts * in_tb
 
             if frame_abs_time < s.start_time:
                 continue
@@ -658,7 +681,7 @@ class VideoCutter:
 
             out_tb = self.out_time_base if self.codec_name != 'mpeg2video' else self.enc_codec.time_base
 
-            frame.pts = int(frame.pts - s.start_time / in_tb)
+            frame.pts = int(pts - s.start_time / in_tb)
 
             frame.pts = int(frame.pts * in_tb / out_tb)
             frame.time_base = out_tb
@@ -673,7 +696,7 @@ class VideoCutter:
             encoded = self.enc_codec.encode(frame)
             result_packets.extend(encoded)
             if self.on_frames_encoded is not None:
-                self.on_frames_encoded(len(encoded))
+                self.on_frames_encoded(1, len(encoded))
 
         if self.codec_name == 'mpeg2video':
             for p in result_packets:
@@ -747,31 +770,25 @@ class VideoCutter:
         if s.gop_index > 0:
             decoder_priming_dts = self.media_container.gop_start_times_dts[s.gop_index - 1]
 
-        # Decode leading + CRA frames, collect packets for later remux
+        # Decode leading + CRA frames, collect packets for later remux. Only this GOP's frames are kept (fork fix): the
+        # priming GOP's frames just feed the decoder, and keeping them held a whole decoded GOP (720p: 152 frames,
+        # 200 MB, to re-encode 4 leading frames)
         collected_packets: list[Packet] = []
-        all_frames: list[VideoFrame] = []
+        gop_frames: list[VideoFrame] = []
+        gop_start_time = self.media_container.gop_start_times_pts_s[s.gop_index]
 
         for frame in self.fetch_frame(s.gop_start_dts, leading_end_dts, s.end_time,
                                        decoder_priming_dts, collected_packets):
-            if frame.pts is not None:
-                all_frames.append(frame)
+            if frame.pts is not None and frame.pts * (frame.time_base if frame.time_base is not None else self.in_time_base) >= gop_start_time:
+                gop_frames.append(frame)
 
         # Get CRA PTS (collected_packets has only non-leading packets, i.e., just CRA)
         assert len(collected_packets) > 0, "No CRA packet found in GOP"
         cra_pts = collected_packets[0].pts
         assert cra_pts is not None, "CRA packet has no PTS"
 
-        # Get GOP start time to filter out priming frames from previous GOPs
-        gop_start_time = self.media_container.gop_start_times_pts_s[s.gop_index]
-
-        # Leading frames: PTS >= GOP start AND PTS < CRA PTS (will be encoded)
-        # Filter by GOP start to exclude priming frames from previous GOPs
-        leading_frames = [
-            f for f in all_frames
-            if f.pts is not None
-            and f.pts * (f.time_base if f.time_base is not None else self.in_time_base) >= gop_start_time
-            and f.pts < cra_pts
-        ]
+        # Leading frames: this GOP's frames before the CRA (will be encoded)
+        leading_frames = [f for f in gop_frames if f.pts is not None and f.pts < cra_pts]
         leading_frames.sort(key=lambda f: f.pts if f.pts is not None else 0)
 
         # Encode leading frames with same timing formula as remux_segment
@@ -789,7 +806,7 @@ class VideoCutter:
             encoded = self.enc_codec.encode(frame)
             result_packets.extend(encoded)
             if self.on_frames_encoded is not None:
-                self.on_frames_encoded(len(encoded))
+                self.on_frames_encoded(1, len(encoded))
 
         result_packets.extend(self.flush_encoder())
 
@@ -819,20 +836,23 @@ class VideoCutter:
         if self.enc_codec is None:
             return []
 
-        result_packets = self.enc_codec.encode()
-
-        if self.codec_name == 'mpeg2video':
-            for p in result_packets:
+        # Packet by packet (fork addition): the encoder encodes the frames it still holds one by one, and progress
+        # counts each as it comes out. Counted at the end, progress paused for the whole flush: 9-34 frames, up to
+        # 3.5 s (x265 at 1080p, one core).
+        result_packets = []
+        for p in self.enc_codec.encode_lazy(None):
+            if self.codec_name == 'mpeg2video':
                 if p.time_base is not None:
                     if p.pts is not None:
                         p.pts = int(p.pts * p.time_base / self.out_time_base)
                     if p.dts is not None:
                         p.dts = int(p.dts * p.time_base / self.out_time_base)
                 p.time_base = self.out_time_base
+            result_packets.append(p)
+            if self.on_frames_encoded is not None:
+                self.on_frames_encoded(0, 1)
 
         self.enc_codec = None
-        if self.on_frames_encoded is not None:
-            self.on_frames_encoded(len(result_packets))
         return result_packets
 
     def _scale_frame_if_needed(self, frame: VideoFrame) -> VideoFrame:
@@ -919,8 +939,12 @@ class VideoCutter:
             except Exception:
                 pass
 
-        # Process packets and yield frames when safe
-        current_dts = gop_start_dts
+        # Process packets and yield frames when safe. A packet without a DTS counts as at the DTS of the last one that
+        # had one, and the first ones as at start_dts (fork fix): Matroska stores no DTS, so FFmpeg gives the first
+        # packets after the file start or a seek none (as many as the codec's reorder delay). Counted at gop_start_dts,
+        # an HEVC CRA GOP primed from the first GOP (its start DTS unknown, so from the file start) collected the file's
+        # first packets as its own: they were copied after the cut and the muxer refused them (pts < dts).
+        current_dts = start_dts
 
         for packet in self.fetch_packet(start_dts, gop_end_dts):
             current_dts = packet.dts if packet.dts is not None else current_dts

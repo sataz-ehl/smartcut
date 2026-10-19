@@ -29,7 +29,7 @@ import smartcut.video_cutter as vc  # noqa: E402
 original_ensure = vc.VideoCutter._ensure_enc_codec
 
 
-def patched_ensure(self):
+def patched_ensure(self) -> None:  # noqa: ANN001 (a VideoCutter method)
     if self.enc_codec is not None:
         return
     cfg = config.get(self.codec_name)

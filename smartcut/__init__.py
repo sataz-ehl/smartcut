@@ -16,21 +16,22 @@ Low-level API (for advanced use):
 """
 
 import traceback
+from collections.abc import Callable, Sequence
 from fractions import Fraction
-from typing import Any, Callable, Optional, Union
+from typing import Any
 
 from .media_container import MediaContainer
 from .media_utils import VideoExportMode, VideoExportQuality
 from .misc_data import (
-    FadeInfo,
-    SegmentWithFade,
     AudioExportInfo,
     AudioExportSettings,
+    FadeInfo,
+    SegmentWithFade,
 )
-from .smart_cut import CancelObject, __version__, smart_cut
+from .smart_cut import CancelObject, __version__, smart_cut  # noqa: F401 (__version__: re-exported as smartcut.__version__)
 from .video_cutter import VideoSettings
 
-__all__ = [
+__all__ = [  # noqa: RUF022 (grouped: the high-level API first)
     # High-level API
     "process",
     "process_segments",
@@ -83,17 +84,17 @@ class CutSegmentConfig:
         CutSegmentConfig(start=10, end=20, video_fadein=2, audio_fadeout=3)
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0917 (public API: the arguments may be passed by position)
         self,
         start: float,
-        end: Optional[float],
-        fadein: Optional[float] = None,
-        fadeout: Optional[float] = None,
-        video_fadein: Optional[float] = None,
-        video_fadeout: Optional[float] = None,
-        audio_fadein: Optional[float] = None,
-        audio_fadeout: Optional[float] = None,
-    ):
+        end: float | None,
+        fadein: float | None = None,
+        fadeout: float | None = None,
+        video_fadein: float | None = None,
+        video_fadeout: float | None = None,
+        audio_fadein: float | None = None,
+        audio_fadeout: float | None = None,
+    ) -> None:
         self.start = start
         self.end = end
 
@@ -112,7 +113,7 @@ class CutSegmentConfig:
             self.video_fadeout = video_fadeout
             self.audio_fadeout = audio_fadeout
 
-    def to_segment_with_fade(self, duration: Optional[Fraction] = None) -> SegmentWithFade:
+    def to_segment_with_fade(self, duration: Fraction | None = None) -> SegmentWithFade:
         """Convert to internal SegmentWithFade representation.
 
         Args:
@@ -175,20 +176,20 @@ class _ProgressAdapter:
             self.callback(current, 1000)
 
 
-def process(
+def process(  # noqa: PLR0917 (public API: the arguments may be passed by position)
     input_path: str,
     output_path: str,
     start: float = 0,
-    end: Optional[float] = None,
-    fadein: Optional[float] = None,
-    fadeout: Optional[float] = None,
-    video_fadein: Optional[float] = None,
-    video_fadeout: Optional[float] = None,
-    audio_fadein: Optional[float] = None,
-    audio_fadeout: Optional[float] = None,
+    end: float | None = None,
+    fadein: float | None = None,
+    fadeout: float | None = None,
+    video_fadein: float | None = None,
+    video_fadeout: float | None = None,
+    audio_fadein: float | None = None,
+    audio_fadeout: float | None = None,
     quality: str = "normal",
-    progress_callback: Optional[Callable[[int, int], None]] = None,
-    cancel_check: Optional[Callable[[], bool]] = None,
+    progress_callback: Callable[[int, int], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> bool:
     """Process a single video segment with optional fade effects.
 
@@ -254,13 +255,13 @@ def process(
                             progress_callback=progress_callback, cancel_check=cancel_check)
 
 
-def process_segments(
+def process_segments(  # noqa: PLR0917 (public API: the arguments may be passed by position)
     input_path: str,
     output_path: str,
-    segments: list[Union[CutSegmentConfig, dict[str, Any]]],
+    segments: Sequence[CutSegmentConfig | dict[str, Any]],
     quality: str = "normal",
-    progress_callback: Optional[Callable[[int, int], None]] = None,
-    cancel_check: Optional[Callable[[], bool]] = None,
+    progress_callback: Callable[[int, int], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> bool:
     """Process multiple video segments with independent fade effects.
 
@@ -342,7 +343,7 @@ def process_segments(
             media_container=media_container,
             positive_segments=segments_with_fade,
             out_path=output_path,
-            # Every audio track, like the CLI (with audio fades each one is re-encoded as a whole)
+            # Every audio track, like the CLI (copied when exact, else each one re-encoded as a whole)
             audio_export_info=AudioExportInfo(output_tracks=[AudioExportSettings('passthru')] * len(media_container.audio_tracks)),
             video_settings=VideoSettings(
                 mode=VideoExportMode.SMARTCUT,
