@@ -208,7 +208,7 @@ def check_segment_warnings(src: Path, out: Path) -> str | None:
     log.addHandler(handler)
     media = MediaContainer(str(src))
     try:
-        error = smart_cut(media, [SegmentWithFade(Fraction("1.37"), Fraction("2.5"), None),
+        error = smart_cut(media, [SegmentWithFade(Fraction("1.37"), Fraction("2.5"), FadeInfo()),
                                   SegmentWithFade(Fraction("3.1"), Fraction("4.6"), FadeInfo(audio_fadein_duration=Fraction("0.3")))],
                           str(out), audio_export_info=AudioExportInfo([AudioExportSettings("passthru")]), segment_mode=True)
     finally:
