@@ -473,7 +473,8 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
 
     keyframes = video_settings.mode == VideoExportMode.KEYFRAMES
     setups: dict[tuple[int, str], AudioRecode | str] = {}  # recode_setup per (track, output format)
-    warned: set[int] = set()
+    # Warnings given, per (track, its warning): each once, and every distinct one (segment mode: each file's reason)
+    warned: set[tuple[int, str]] = set()
 
     def recode_tracks_of(file_index: int, format_name: str) -> set[int]:
         """The audio tracks of output file file_index that are re-encoded as a whole (see RecodeAudioCutter): every one
@@ -496,14 +497,16 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                 setup = setups[(i, format_name)] = recode_setup(media_container.audio_tracks[i], format_name)
             if isinstance(setup, AudioRecode):
                 tracks.add(i)
-            elif i not in warned:
-                warned.add(i)
-                ctx = media_container.audio_tracks[i].av_stream.codec_context
-                result = ("its audio fades are left out" if has_audio_fades else
-                          "A/V may shift by up to a frame at each join" if file_has_joins[file_index] else
-                          "it starts at the first whole frame after the cut")
-                log.warning(f"smartcut: audio track {i + 1} ({ctx.name}, {ctx.layout.name}) is copied, not re-encoded: "
-                            f"{setup}. So {result}.")
+                continue
+            ctx = media_container.audio_tracks[i].av_stream.codec_context
+            result = ("its audio fades are left out" if has_audio_fades else
+                      "A/V may shift by up to a frame at each join" if file_has_joins[file_index] else
+                      "it starts at the first whole frame after the cut")
+            message = (f"smartcut: audio track {i + 1} ({ctx.name}, {ctx.layout.name}) is copied, not re-encoded: "
+                       f"{setup}. So {result}.")
+            if (i, message) not in warned:
+                warned.add((i, message))
+                log.warning(message)
         return tracks
 
     work = None

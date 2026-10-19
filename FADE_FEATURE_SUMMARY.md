@@ -219,7 +219,8 @@ whole, if that can be done faithfully** (decided; `audio_needs_recode()` and `re
   result keeps the codec, the sample format (bit depth), the channel layout and the sample rate, and the encoder
   opens with them. Otherwise it is copied as it is, and the logger `smartcut` warns, e.g. `smartcut: audio track 1
   (dca, stereo) is copied, not re-encoded: no dca encoder in this FFmpeg. So A/V may shift by up to a frame at each
-  join.` (or "its audio fades are left out").
+  join.` (or "its audio fades are left out"). Each distinct warning is given once per cut; in segment mode every
+  file's own reason is (one file starting mid-stream, another with an audio fade).
   - Encoders: the source codec's own (AAC → FFmpeg's AAC; MP3 → LAME; Opus; Vorbis; AC-3; E-AC-3; MP2; FLAC; ALAC;
     PCM; ...).
   - Exceptions (decided): HE-AAC (v1, v2) → AAC-LC, since FFmpeg can't encode HE-AAC; and in WebM anything but Opus

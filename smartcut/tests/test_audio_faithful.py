@@ -19,6 +19,8 @@ Cases, each cut into three segments (two joins) or one mid-stream segment:
     the cut failed;
   - DTS and TrueHD: no encoder in PyAV's FFmpeg (they became AAC), and 32-bit FLAC (FFmpeg's encoder writes 24 of
     the bits). Their sources need the ffmpeg command (on PATH, or SMARTCUT_TEST_FFMPEG); skipped without it.
+- Segment mode: a warning for every file's own reason (32-bit FLAC, made by PyAV: a mid-stream start in one file, an
+  audio fade in the other). Warned once per track, the second file's went unsaid.
 - AAC "6 channels" into .webm, which needs Opus: a clear error, nothing written.
 
 Usage (from the repo root):
@@ -64,8 +66,9 @@ def noise(channels: int, n: int, sample_format: str, bits: int) -> np.ndarray:
 
 
 def make_source(path: Path, codec: str, layout: str, sample_format: str, bits: int, bit_rate: int = 0,  # noqa: PLR0917
-                tags: dict[str, str] | None = None) -> np.ndarray:
-    """H.264 video and one audio track (tags: its stream tags); returns the audio fed to the encoder, channels first."""
+                tags: dict[str, str] | None = None, options: dict[str, str] | None = None) -> np.ndarray:
+    """H.264 video and one audio track (tags: its stream tags; options: its encoder's); returns the audio fed to the
+    encoder, channels first."""
     channels = len(av.AudioLayout(layout).channels)
     x = noise(channels, SECONDS * RATE, sample_format, bits)
     fmt = av.AudioFormat(sample_format)
@@ -76,6 +79,7 @@ def make_source(path: Path, codec: str, layout: str, sample_format: str, bits: i
         audio = cast(AudioStream, out.add_stream(codec, rate=RATE))
         audio.codec_context.layout, audio.codec_context.format = layout, sample_format
         audio.metadata.update(tags or {})
+        audio.codec_context.options = options or {}
         if bit_rate:
             audio.codec_context.bit_rate = bit_rate
         n = RATE // FPS
@@ -188,6 +192,31 @@ def check_copied(src: Path, out: Path, segments: list[tuple[float, float]], why:
     return None
 
 
+def check_segment_warnings(src: Path, out: Path) -> str | None:
+    """Segment mode, a track that can't be re-encoded faithfully: one warning per file with its own reason. File 1
+    starts mid-stream (a lossless track's copy starts at the next whole frame), file 2 has an audio fade (left out).
+    Warned once per track, file 2's went unsaid."""
+    from smartcut.media_container import MediaContainer  # noqa: PLC0415
+    from smartcut.misc_data import AudioExportInfo, AudioExportSettings, FadeInfo, SegmentWithFade  # noqa: PLC0415
+    from smartcut.smart_cut import smart_cut  # noqa: PLC0415
+    handler = Warnings()
+    log = logging.getLogger("smartcut")
+    log.addHandler(handler)
+    media = MediaContainer(str(src))
+    try:
+        error = smart_cut(media, [SegmentWithFade(Fraction("1.37"), Fraction("2.5"), None),
+                                  SegmentWithFade(Fraction("3.1"), Fraction("4.6"), FadeInfo(audio_fadein_duration=Fraction("0.3")))],
+                          str(out), audio_export_info=AudioExportInfo([AudioExportSettings("passthru")]), segment_mode=True)
+    finally:
+        media.close()
+        log.removeHandler(handler)
+    if error is not None:
+        return f"smart_cut failed: {error}"
+    got = [m for m in handler.messages if "audio track 1" in m]
+    want = ["it starts at the first whole frame after the cut", "its audio fades are left out"]
+    return None if len(got) == 2 and all(any(w in m for m in got) for w in want) else f"warnings {got}, expected one each: {want}"
+
+
 def ffmpeg_source(tmp: Path, name: str, codec_args: list[str]) -> Path | None:
     """A source made with the ffmpeg command (what PyAV's FFmpeg can't encode), or None without it."""
     ffmpeg = os.environ.get("SMARTCUT_TEST_FFMPEG") or shutil.which("ffmpeg")
@@ -267,6 +296,10 @@ def main() -> int:
                 continue
             report(f"{name}, joins: copied, warned ({why})",
                    check_copied(src, tmp / f"out_{name.replace(' ', '_')}.mkv", JOINS, why))
+        flac32 = tmp / "flac32_pyav.mkv"  # 32-bit FLAC: FFmpeg's encoder writes it with strict experimental
+        make_source(flac32, "flac", "stereo", "s32", 32, options={"strict": "experimental"})
+        report("Segment mode: every file's reason warned (32-bit FLAC: a mid-stream start, an audio fade)",
+               check_segment_warnings(flac32, tmp / "seg#.mkv"))
 
         # WebM needs Opus: a clear error when the track can't be re-encoded to it
         webm = tmp / "out.webm"
