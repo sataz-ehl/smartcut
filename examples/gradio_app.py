@@ -14,23 +14,24 @@ Usage:
     python gradio_app.py
 """
 
-import gradio as gr
-import smartcut
-import os
 import tempfile
 
+import gradio as gr
 
-def process_single_segment(
-    input_video,
-    start_time,
-    end_time,
-    video_fadein,
-    video_fadeout,
-    audio_fadein,
-    audio_fadeout,
-    quality,
-    progress=gr.Progress()
-):
+import smartcut
+
+
+def process_single_segment(  # noqa: PLR0917 (Gradio passes the inputs by position)
+    input_video: str | None,
+    start_time: float,
+    end_time: float,
+    video_fadein: float,
+    video_fadeout: float,
+    audio_fadein: float,
+    audio_fadeout: float,
+    quality: str,
+    progress: gr.Progress = gr.Progress()  # noqa: B008 (how Gradio tracks progress)
+) -> tuple[str | None, str]:
     """Process a single video segment with fade effects."""
     if input_video is None:
         return None, "Please upload a video file"
@@ -40,7 +41,7 @@ def process_single_segment(
         output_path = tempfile.mktemp(suffix=".mp4")
 
         # Progress callback: current/total is the share of the estimated work done (total is 1000)
-        def on_progress(current, total):
+        def on_progress(current: int, total: int) -> None:
             progress(current / total, desc="Processing")
 
         # Process
@@ -63,15 +64,15 @@ def process_single_segment(
             return None, "✗ Processing failed - check console for errors"
 
     except Exception as e:
-        return None, f"✗ Error: {str(e)}"
+        return None, f"✗ Error: {e!s}"
 
 
 def process_multiple_segments(
-    input_video,
-    segments_text,
-    quality,
-    progress=gr.Progress()
-):
+    input_video: str | None,
+    segments_text: str,
+    quality: str,
+    progress: gr.Progress = gr.Progress()  # noqa: B008 (how Gradio tracks progress)
+) -> tuple[str | None, str]:
     """Process multiple video segments from text configuration.
 
     Segments format (one per line):
@@ -115,7 +116,7 @@ def process_multiple_segments(
         output_path = tempfile.mktemp(suffix=".mp4")
 
         # Progress callback: current/total is the share of the estimated work done (total is 1000)
-        def on_progress(current, total):
+        def on_progress(current: int, total: int) -> None:
             progress(current / total, desc="Processing")
 
         # Process
@@ -133,7 +134,7 @@ def process_multiple_segments(
             return None, "✗ Processing failed - check console for errors"
 
     except Exception as e:
-        return None, f"✗ Error: {str(e)}"
+        return None, f"✗ Error: {e!s}"
 
 
 # Create Gradio interface
