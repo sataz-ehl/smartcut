@@ -63,7 +63,19 @@ The `W*` cases write `.webm` (AAC / HE-AAC audio re-encoded to Opus, Opus audio 
 into Matroska (`J3`: one segment, copied from the first frame after the cut; `J4`: a join, re-encoded) and MP4 (`J5`:
 a copy with pre-roll). The `E*` cases are HEVC: `synth_hevc.mp4` has x265's open
 GOPs (CRA keyframes with RASL leading pictures, which smartcut re-encodes after a jump), `synth_hevc_closed.mp4`
-closed ones, and `real_hevc*.mp4` carry no x265 options, like camera footage.
+closed ones, and `real_hevc*.mp4` carry no x265 options, like camera footage. The `K*` cases cut Matroska / WebM
+sources (`synth_h264.mkv`, `synth_hevc.mkv`, `synth_av1_opus.webm`, `synth_vp9_opus.webm`) with a re-encoded first
+piece into MKV / WebM and MP4, and an MP4 source into MKV. Matroska stores no DTS, and it keeps the audio encoder's
+delay in the timeline, so the video starts 21 ms after the container start (or the audio 6.5 ms before it). `K3` /
+`K4` cut HEVC from inside the first GOP into the next one, which failed before (see `FORMAT_SUPPORT.md`).
+
+Segment times count from the source's container start, as in smartcut. The output's time 0 is the cut, so its first
+frame comes as long after 0 as that frame came after the segment start in the source (e.g. 18 ms for a cut at 1.37 s
+with frames at 1.367 and 1.4 s). The harness took the first frame as the cut until the `K*` cases: that put their
+joins and fades 18 ms early (dips at the join on a tone), and failed 5 of them on correct outputs. On the same outputs,
+cases cut on a frame measure the same; those cut between frames (`W5`, `W6`, `X_fb_sd_h264`, `J1`-`J5`) keep their
+verdicts and measure closer, e.g. `J5`'s `aFlat` 0.13/8.14 → 1.00/1.00, `J3`'s 0.47/2.33 → 0.92/1.15. The MP4 stream
+duration is still compared with the span from the first frame.
 
 Results are also written to `<out>/results.json`, and per-case time series to `<out>/<case>.npz`
 (`vt, v_alpha, v_ideal, at, a_gain, a_ideal`). Expected failures report XFAIL, or XPASS if they start working:
@@ -96,6 +108,10 @@ These need no test media and run like the other test scripts (`python smartcut/t
   file closed.
 - `smartcut/tests/test_last_frame.py`: cuts keep their last frame (H.264 with and without B-frames, VP9, AV1,
   fades, MP4 and MKV), counted as FFmpeg decodes them; inputs without audio.
+- `smartcut/tests/test_matroska_source.py`: Matroska / WebM sources (H.264, HEVC with open GOPs, VP9; AAC and Opus at
+  negative timestamps) into MKV / WebM and MP4: exactly the frames from the container start's timeline, each in its
+  place, with re-encoded first pieces, fades, on a keyframe and from the file start; HEVC cut from inside the first
+  GOP into the next (it failed: the file's first packets, without DTS, were copied after the cut).
 - `smartcut/tests/test_multitrack.py`: every audio track is kept (AAC + AC-3), copied or re-encoded with fades.
 - `smartcut/tests/test_webm.py`: `.webm` outputs (AAC re-encoded to Opus, Opus copied).
 - `smartcut/tests/test_audio_bitrate.py`: the bitrate of re-encoded audio (source's, floors, encoder limits).

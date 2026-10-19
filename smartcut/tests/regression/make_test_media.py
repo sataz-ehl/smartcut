@@ -21,6 +21,9 @@ keyframe interval) are always generated:
     synth_2audio.mp4          synth_h264.mp4 + a second audio track: AC-3 880 Hz mono, 44.1 kHz
     synth_2audio_mp3.mp4      the same with an MP3 second track
     synth_vp9_opus.webm       synth_vp9.mp4's video with the tone as Opus (for .webm outputs)
+    synth_h264.mkv            synth_h264.mp4 remuxed into Matroska (Matroska sources: no DTS stored, and the AAC encoder
+    synth_hevc.mkv            delay in the timeline, so the first video frame comes 21 ms after the container start)
+    synth_av1_opus.webm       synth_av1.mp4's video with the tone as Opus (audio from -6.5 ms, the Opus pre-skip)
 
 --real CLIP.mp4 (any H.264 + AAC clip, e.g. a downloaded music video) additionally derives:
 
@@ -121,6 +124,11 @@ def main():
     ok["synth_2audio.mp4"] = add_audio_track(ff, out, "synth_h264.mp4", "synth_2audio.mp4", ["-c:a:1", "ac3", "-b:a:1", "192k"])
     ok["synth_2audio_mp3.mp4"] = add_audio_track(ff, out, "synth_h264.mp4", "synth_2audio_mp3.mp4",
                                                  ["-c:a:1", "libmp3lame", "-b:a:1", "128k"])
+    # Matroska / WebM sources (the K cases)
+    for name in ("synth_h264", "synth_hevc"):
+        ok[f"{name}.mkv"] = run(ff, ["-i", f"{name}.mp4", "-c", "copy", f"{name}.mkv"], out)
+    ok["synth_av1_opus.webm"] = run(ff, ["-i", "synth_av1.mp4", "-c:v", "copy", "-c:a", "libopus", "-b:a", "96k",
+                                         "synth_av1_opus.webm"], out)
 
     if args.real:
         real = Path(args.real).resolve()
