@@ -11,13 +11,14 @@ Unit tests (no encoding):
 5. The files: adopted, the file is replaced through a temporary file in its folder and the one before kept as
    progress_costs.previous.json; not adopted, only progress_costs.candidate.json is written
 6. The measuring processes release memory after every edit
+7. --cores N takes one CPU per physical core (the fastest kind first on hybrid CPUs), from the real topology
 
 Smoke test of the harness on a short synthetic clip (H.264 only, --quick; needs the ffmpeg command on PATH or in
 SMARTCUT_TEST_FFMPEG, skipped without it; ~1 min):
-7. --make-media makes the clips and a manifest
-8. A --quick run checks the cores, fits, compares and says NOT ADOPTED: the file SMARTCUT_PROGRESS_COSTS names is
+8. --make-media makes the clips and a manifest
+9. A --quick run checks the cores, fits, compares and says NOT ADOPTED: the file SMARTCUT_PROGRESS_COSTS names is
    left as it was, and the candidate it writes loads with progress_costs.parse()
-9. A changed clip, or one the calibration needs but the media lacks, is refused
+10. A changed clip, or one the calibration needs but the media lacks, is refused
 
 Synthetic clips re-encode differently from real ones: the smoke test checks the harness works, not the costs.
 
@@ -39,6 +40,7 @@ sys.path.insert(1, str(REGRESSION))
 
 import calibrate_progress as cp  # noqa: E402  # pyright: ignore[reportMissingImports]
 import progress_timeline  # noqa: E402  # pyright: ignore[reportMissingImports]
+import run_cases  # noqa: E402  # pyright: ignore[reportMissingImports]
 
 from smartcut import progress_costs  # noqa: E402
 from smartcut.tests.generate_synthetic_video import generate_test_video  # noqa: E402
@@ -190,6 +192,32 @@ def test_memory_released() -> None:
     assert rss is None or 1 < rss < 100_000, rss
 
 
+def test_cores() -> None:
+    # --cores N (run_cases.pin_to_cores): one CPU per physical core, the fastest kind first
+    hybrid = [(1, [2 * i, 2 * i + 1]) for i in range(8)] + [(0, [16 + i]) for i in range(4)]  # 8 P-cores with HT, 4 E-cores
+    p_cores = list(range(0, 16, 2))
+    assert run_cases.one_per_core(list(range(20)), hybrid) == [*p_cores, 16, 17, 18, 19]
+    e_first = [(0, [0]), (0, [1]), (1, [2, 3]), (1, [4, 5])]  # E-cores numbered first
+    assert run_cases.one_per_core(list(range(6)), e_first) == [2, 4, 0, 1]
+    apart = [(0, [i, i + 6]) for i in range(6)]  # hyperthreads numbered apart
+    assert run_cases.one_per_core(list(range(12)), apart) == [0, 1, 2, 3, 4, 5]
+    assert run_cases.one_per_core([0, 6, 1], apart) == [0, 1], "0 and 6 are one core"
+    assert run_cases.one_per_core([0, 1, 2], []) == [0, 1, 2], "unknown topology: every CPU a core"
+    if hasattr(os, "sched_getaffinity"):
+        return  # Linux reads /sys
+    saved = run_cases._windows_affinity, run_cases._windows_cores
+    run_cases._windows_affinity, run_cases._windows_cores = (lambda: list(range(20))), (lambda: hybrid)
+    try:
+        assert run_cases.pick_cpus(4) == p_cores[:4]
+        assert run_cases.pick_cpus(10) == [*p_cores, 16, 17], run_cases.pick_cpus(10)
+        assert run_cases.pick_cpus(20)[12:] == [1, 3, 5, 7, 9, 11, 13, 15], "hyperthreads last"
+    finally:
+        run_cases._windows_affinity, run_cases._windows_cores = saved
+    mine = run_cases._windows_cores()  # this machine's: every logical CPU on exactly one core
+    cpus = [c for _, listed in mine for c in listed]
+    assert mine and sorted(cpus) == list(range(len(cpus))) and len(cpus) == (os.cpu_count() or 0), mine
+
+
 # ------------------------------------------------------------------------------------------------------ smoke test
 
 def harness(*args: str, env: dict | None = None) -> subprocess.CompletedProcess:
@@ -252,7 +280,8 @@ def main() -> int:
                            ("The held-out fit uses only the other edits' runs and times", test_fit_without_held_out),
                            ("CPU checks: escaped pinning and other load, also in the real runs", test_cpu_checks),
                            ("Files: atomic replace, previous kept, candidate when not adopted", lambda: test_files(tmp)),
-                           ("The measuring processes release memory after every edit", test_memory_released)):
+                           ("The measuring processes release memory after every edit", test_memory_released),
+                           ("--cores: one CPU per physical core, P-cores first", test_cores)):
             try:
                 test()
                 check(name, True)
