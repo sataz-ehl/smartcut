@@ -15,16 +15,21 @@ Unit tests (no encoding):
 7. --cores N takes one CPU per physical core (the fastest kind first on hybrid CPUs), from the real topology
 8. progress_timeline's evenness from the cut's real start: the start is when the video cutter starts the first piece,
    before the first update, recorded afresh for every edit; measured from it, a wait before the first update counts
+9. main() on a synthetic two-resolution recording (the measuring processes and the media check replaced): decide()
+   gets the held-out check (the held-out edits replayed under the costs in use and those fitted without them), the
+   real runs' paired means (both runs, replayed under the costs in use and the all-edit fit), the same per edit, and
+   the app's codecs not calibrated (--codecs h264: vp9, av1), which the plan names
+10. main()'s temporary work folder is removed also when it stops early (a real run failed)
 
 Smoke test of the harness on a short synthetic clip (H.264 only, --quick; needs the ffmpeg command on PATH or in
 SMARTCUT_TEST_FFMPEG, skipped without it; ~2 min):
-9. --make-media makes the clips and a manifest
-10. A --quick run checks the cores, fits, compares and says NOT ADOPTED: the file SMARTCUT_PROGRESS_COSTS names is
+11. --make-media makes the clips and a manifest
+12. A --quick run checks the cores, fits, compares and says NOT ADOPTED: the file SMARTCUT_PROGRESS_COSTS names is
     left as it was, and the candidate it writes loads with progress_costs.parse()
-11. main() in this process, the rule's verdict forced: decide() gets the run's facts (--quick, no Facebook clip, one
+13. main() in this process, the rule's verdict forced: decide() gets the run's facts (--quick, no Facebook clip, one
     resolution, the pinning held), and an adoption replaces the file and keeps the one before as
     progress_costs.previous.json
-12. A changed clip, or one the calibration needs but the media lacks, is refused
+14. A changed clip, or one the calibration needs but the media lacks, is refused
 
 Synthetic clips re-encode differently from real ones: the smoke test checks the harness works, not the costs.
 
@@ -46,6 +51,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(1, str(REGRESSION))
 
 import calibrate_progress as cp  # noqa: E402  # pyright: ignore[reportMissingImports]
+import numpy as np  # noqa: E402
 import progress_timeline  # noqa: E402  # pyright: ignore[reportMissingImports]
 import run_cases  # noqa: E402  # pyright: ignore[reportMissingImports]
 
@@ -238,6 +244,176 @@ def test_cores() -> None:
     assert mine and sorted(cpus) == list(range(len(cpus))) and len(cpus) == (os.cpu_count() or 0), mine
 
 
+# --------------------------------------------------------------------------- main() on a recording, no encoding
+
+def calls_of(edit: dict, costs: progress_costs.ProgressCosts) -> list[tuple[float, float]]:
+    """The progress calls an edit's recorded events give under these costs (as calibrate_progress.replay)."""
+    import importlib  # noqa: PLC0415
+
+    import smartcut  # noqa: PLC0415
+    sc = importlib.import_module("smartcut.smart_cut")
+    p = edit["plan"]
+    plan = sc._WorkPlan(p["family"], p["megapixels"], [np.array(b, float) for b in p["busyness"]],
+                        [np.array(f, bool) for f in p["faded"]], p["copied_frames"], p["audio_seconds"])
+    calls, now = [], [0.0]
+    work = sc._WorkProgress(smartcut._ProgressAdapter(lambda c, n: calls.append((now[0], c / n))), None, plan, costs)
+    for t, name, args in edit["events"]:
+        now[0] = t
+        getattr(work, name)(*args)
+    return calls
+
+
+# A machine unlike the built-in costs' (per codec: fixed s, s per megapixel**1.2, busy share, fade s per megapixel):
+# fitted on 360p alone (one size: the built-in shape kept) its costs differ from those fitted on 360p and 720p
+SYNTHETIC_MACHINE = {"h264": (0.004, 0.012, 0.35, 0.05), "vp9": (0.02, 0.03, 0.0, 0.0), "av1": (0.05, 0.06, 0.6, 0.0)}
+
+
+def synthetic_edit(case: dict, file: dict, rng, costs: progress_costs.ProgressCosts) -> tuple[dict, list[dict]]:  # noqa: ANN001
+    """A recorded edit as calibrate_progress's measuring processes give it (its plan, events, progress calls under
+    costs, copy / audio times) and its encoder runs, timed by SYNTHETIC_MACHINE with noise. Per segment: a re-encoded
+    piece, copied GOPs, a re-encoded piece (60 frames more each, faded, with fades)."""
+    mp = {360: 0.2304, 720: 0.9216}[file["height"]]
+    fixed, per_mp, busy_share, fade = SYNTHETIC_MACHINE[file["codec"]]
+    fades = "fadein" in case["segments"][0]
+    busyness, faded, copied, audio, events, runs = [], [], [], [], [], []
+    t, stats = 0.05, {"copy_s": 0.0, "copy_frames": 0, "audio_s": 0.0, "audio_media_s": 0.0}
+    for _ in case["segments"]:
+        for kind in ("recode", "copy", "recode"):
+            i = len(copied)
+            events.append([t, "piece_started", [i]])
+            if kind == "recode":
+                n = int(rng.integers(10, 50)) + (60 if fades else 0)
+                b = rng.uniform(0.4, 1.8, n).round(5)
+                f = np.zeros(n, bool)
+                if fades:
+                    f[:60] = True
+                spent = 0.0
+                for k in range(n):
+                    cost = ((fixed + per_mp * mp ** 1.2) * (1 - busy_share + busy_share * b[k]) + fade * mp * f[k]) * rng.uniform(0.8, 1.2)
+                    t += cost
+                    spent += cost
+                    events.append([t, "frames_encoded", [1, 1]])
+                runs.append({"codec": file["codec"], "mp": mp, "s": spent, "cpu": spent * 0.99, "n": n, "busy": float(b.sum()),
+                             "faded": int(f.sum()), "case": case["name"]})
+                busyness.append(b.tolist())
+                faded.append(f.tolist())
+                copied.append(0)
+                frames = n
+            else:
+                frames = int(rng.integers(300, 400))
+                t += frames * 3.4e-5
+                stats["copy_s"] += frames * 3.4e-5
+                stats["copy_frames"] += frames
+                busyness.append([])
+                faded.append([])
+                copied.append(frames)
+            audio.append(frames / 30)
+            t += frames / 30 * 0.028
+            stats["audio_s"] += frames / 30 * 0.028
+            stats["audio_media_s"] += frames / 30
+            events.append([t, "piece_done", [i]])
+    events.append([t, "done", []])
+    edit = {"ok": True, "end": t + 0.01, "cpu": (t + 0.01) * 0.99, "rss_mb": 120.0, "stats": stats, "events": events,
+            "plan": {"family": file["codec"], "megapixels": mp, "busyness": busyness, "faded": faded, "copied_frames": copied,
+                     "audio_seconds": audio}}
+    edit["calls"] = calls_of(edit, costs)
+    return edit, runs
+
+
+SYNTHETIC_MANIFEST = {
+    "recipe": cp.MEDIA_RECIPE, "excerpt": 90.0, "facebook": "fb.mp4",
+    "source": {"name": "clip.mp4", "sha256": "0" * 64, "height": 720},
+    "files": {"h264_360p.mp4": {"codec": "h264", "height": 360, "facebook": False},
+              "h264_720p.mp4": {"codec": "h264", "height": 720, "facebook": False},
+              "fb.mp4": {"codec": "h264", "height": 360, "facebook": True}}}
+
+
+def run_recorded(tmp: Path, args: list[str], *, real_run=None) -> tuple[str, dict, dict, list[dict]]:  # noqa: ANN001
+    """main() on a synthetic two-resolution recording (H.264 360p / 720p and the Facebook clip): check_media returns
+    SYNTHETIC_MANIFEST and run_child synthetic recordings, so nothing is encoded. real_run(spec, n): instead of the n-th
+    real run. Returns main()'s output, what decide() was given, the calibration recording and the real runs'."""
+    rng = np.random.default_rng(11)
+    real_results: list[dict] = []
+    recording: dict = {}
+
+    def run_child(mode: str, spec: dict, costs_file: Path, work: Path) -> dict:
+        costs = progress_costs.load(costs_file)[0]
+        if mode == "real" and real_run is not None:
+            return real_run(spec, len(real_results))
+        edits, runs = {}, []
+        for case in spec["cases"]:
+            edits[case["name"]], r = synthetic_edit(case, SYNTHETIC_MANIFEST["files"][case["file"]], rng, costs)
+            runs += r
+        result = {"info": {"available_cpus": 1, "cpus": [0], "expected_cores": 1}, "edits": edits}
+        if mode == "measure":
+            result.update(runs=runs, stats={k: sum(e["stats"][k] for e in edits.values()) for k in edits[next(iter(edits))]["stats"]})
+            recording.update(result)
+        else:
+            real_results.append(result)
+        return json.loads(json.dumps(result))  # as read back from the child's JSON
+
+    saved = cp.run_child, cp.check_media
+    cp.run_child, cp.check_media = run_child, lambda media, codecs, resolutions: json.loads(json.dumps(SYNTHETIC_MANIFEST))
+    try:
+        text, seen = run_main(["--media", str(tmp / "media"), "--codecs", "h264", "--resolutions", "360,720", "--cores", "1", *args],
+                              tmp / "recorded" / "progress_costs.json")
+    finally:
+        cp.run_child, cp.check_media = saved
+    return text, seen, recording, real_results
+
+
+def test_main_recorded(tmp: Path) -> None:
+    """main()'s held-out check and real-run check on a recording: decide() gets held_out = the held-out edits' mean
+    replay under the costs in use and under fit(measured, old, fit_on), real = the paired means of the real runs
+    replayed under the costs in use and fit(measured, old), and the same per edit; and the codecs not calibrated."""
+    old = progress_costs.BUILT_IN
+    text, seen, measured, reals = run_recorded(tmp, [])
+    cases, app, held = cp.plan_cases(SYNTHETIC_MANIFEST, ["h264"], [360, 720], False)
+    fit_on = [c["name"] for c in cases if c["name"] not in held]
+    assert held and fit_on and set(app) <= set(held), (held, fit_on, app)
+    held_fit, new = cp.fit(measured, old, fit_on)[0], cp.fit(measured, old)[0]
+    assert held_fit.recode["h264"] != new.recode["h264"], "the recording must tell the held-out fit from the all-edit fit"
+    held_edits = {n: (round(cp.replay(measured["edits"][n], old)[0], 2), round(cp.replay(measured["edits"][n], held_fit)[0], 2))
+                  for n in held}
+    paired = {n: ([round(cp.replay(r["edits"][n], old)[0], 2) for r in reals], [round(cp.replay(r["edits"][n], new)[0], 2) for r in reals])
+              for n in app}
+    want = {"held_out": (cp.mean([v[0] for v in held_edits.values()]), cp.mean([v[1] for v in held_edits.values()])),
+            "real": (cp.mean([v for n in app for v in paired[n][0]]), cp.mean([v for n in app for v in paired[n][1]])),
+            "held_out_edits": held_edits, "real_edits": {n: (cp.mean(a), cp.mean(b)) for n, (a, b) in paired.items()}}
+    assert len(reals) == 2, "one real run with the costs in use, one with the new ones"
+    live = [cp.mean([round(cp.evenness_of(r["edits"][n]["calls"], r["edits"][n]["end"])[0], 2) for n in app]) for r in reals]
+    assert abs(live[0] - want["real"][0]) > 0.01 or abs(live[1] - want["real"][1]) > 0.01, "the runs as they went must differ from the paired replays"
+    for key, value in want.items():
+        got = seen.get(key)
+        if isinstance(value, dict):
+            assert got is not None and got.keys() == value.keys() and all(
+                abs(got[n][0] - value[n][0]) < 1e-9 and abs(got[n][1] - value[n][1]) < 1e-9 for n in value), (key, got, value)
+        else:
+            assert got is not None and abs(got[0] - value[0]) < 1e-9 and abs(got[1] - value[1]) < 1e-9, (key, got, value)
+    assert seen["uncalibrated"] == ["vp9", "av1"] and seen["no_split"] is None and seen["facebook"] is True, seen
+    assert "not calibrated: vp9, av1 (see --codecs): it writes the candidate only" in text, text
+
+
+def test_work_removed(tmp: Path) -> None:
+    """main()'s temporary work folder is removed also when it stops early (sys.exit: a real run failed)."""
+    made: list[Path] = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def mkdtemp(*args, **kw) -> str:  # noqa: ANN002, ANN003
+        made.append(Path(real_mkdtemp(*args, **kw)))
+        return str(made[-1])
+
+    cp.tempfile.mkdtemp = mkdtemp
+    try:
+        run_recorded(tmp, [], real_run=lambda spec, n: {"info": {"expected_cores": 1}, "edits": {spec["cases"][0]["name"]: {"ok": False}}})
+        raise AssertionError("a failed real run must stop the calibration")
+    except SystemExit as e:
+        assert "real run" in str(e) and "failed" in str(e), e
+    finally:
+        cp.tempfile.mkdtemp = real_mkdtemp
+    assert len(made) == 1 and not made[0].exists(), f"work folder left: {made}"
+
+
 # ------------------------------------------------------------------------------------------------------ smoke test
 
 def run_main(args: list[str], target: Path) -> tuple[str, dict]:
@@ -373,7 +549,10 @@ def main() -> int:
                            ("Files: atomic replace, previous kept, candidate when not adopted", lambda: test_files(tmp)),
                            ("The measuring processes release memory after every edit", test_memory_released),
                            ("--cores: one CPU per physical core, P-cores first", test_cores),
-                           ("progress_timeline: evenness from the cut's real start", lambda: test_real_start(tmp))):
+                           ("progress_timeline: evenness from the cut's real start", lambda: test_real_start(tmp)),
+                           ("main() on a recording: the held-out check, the real runs and per edit, as decide() gets them",
+                            lambda: test_main_recorded(tmp)),
+                           ("main(): the temporary work folder removed when it stops early", lambda: test_work_removed(tmp))):
             try:
                 test()
                 check(name, True)

@@ -52,7 +52,8 @@ What it does:
    --out), keeping the previous file as progress_costs.previous.json. Otherwise it writes
    progress_costs.candidate.json next to it and leaves the file alone. Either way it prints the comparison and
    "ADOPTED: ..." or "NOT ADOPTED: <every reason>. ...". Files are written to a temporary file next to them and
-   renamed over them (os.replace).
+   renamed over them (os.replace). The temporary work folder is removed however the calibration ends, unless --work
+   named it.
 
 Time, on one desktop core (the built-in costs' machine; a server core may be slower):
 - --make-media: H.264, VP9, AV1 at 360/720/1080p, ~20 min (VP9 ~10, AV1 ~7, HEVC another ~12); 6 min on a
@@ -111,7 +112,7 @@ LAYOUTS = {
 FADES = {"fadein": 2, "fadeout": 2}
 # The adoption rule (the regression README, "The adoption rule"): the new costs must be more even than the costs in
 # use by at least ADOPT_MARGIN points on average, in both checks. Between two timing samples of the same edits, the
-# mean paired difference over the held-out edits varied by 0.08-0.18 points (sigma); a smaller gain isn't visible.
+# mean paired difference over a check's 7-10 edits varied by 0.08-0.18 points (sigma); a smaller gain isn't visible.
 ADOPT_MARGIN = 0.5
 # ...and no single edit may get worse by more than EDIT_GUARD points in either check (decided). One edit's paired
 # difference varied between two runs by sigma 0.26-0.48 points, at most 1.55
@@ -760,145 +761,147 @@ def main() -> None:
         return
 
     work = args.work or Path(tempfile.mkdtemp(prefix="smartcut_calibration_"))
-    work.mkdir(parents=True, exist_ok=True)
-    old_file = work / "costs_in_use.json"
-    old_file.write_text(progress_costs.to_json(old))
-    spec = {"media": str(media), "out_dir": str(work), "cores": args.cores, "cases": cases}
-    print("\ncalibration edits:")
-    t = time.perf_counter()
-    measured = run_child("measure", spec, old_file, work)
-    print(f"  took {(time.perf_counter() - t) / 60:.1f} min")
-    failed = [n for n, e in measured["edits"].items() if not e["ok"]]
-    if failed:
-        sys.exit(f"edits failed: {', '.join(failed)}")
-    memory = [e["rss_mb"] for e in measured["edits"].values() if e.get("rss_mb") is not None]
-    if memory:
-        print(f"  memory after each edit, released: {min(memory):.0f}-{max(memory):.0f} MB")
+    try:  # the work folder goes, however this ends (the sys.exit()s below too), unless --work named it
+        work.mkdir(parents=True, exist_ok=True)
+        old_file = work / "costs_in_use.json"
+        old_file.write_text(progress_costs.to_json(old))
+        spec = {"media": str(media), "out_dir": str(work), "cores": args.cores, "cases": cases}
+        print("\ncalibration edits:")
+        t = time.perf_counter()
+        measured = run_child("measure", spec, old_file, work)
+        print(f"  took {(time.perf_counter() - t) / 60:.1f} min")
+        failed = [n for n, e in measured["edits"].items() if not e["ok"]]
+        if failed:
+            sys.exit(f"edits failed: {', '.join(failed)}")
+        memory = [e["rss_mb"] for e in measured["edits"].values() if e.get("rss_mb") is not None]
+        if memory:
+            print(f"  memory after each edit, released: {min(memory):.0f}-{max(memory):.0f} MB")
 
-    escaped, loaded, ratios = core_check(measured)
-    print(f"\ncores: {measured['info']['expected_cores']} expected (this process may use {measured['info']['available_cpus']}"
-          f"{', pinned to CPUs ' + str(measured['info']['cpus']) if 'cpus' in measured['info'] else ''}); "
-          f"CPU / wall per encoder run, median: {ratios}")
-    if escaped or loaded:
-        banner(escaped + loaded)
+        escaped, loaded, ratios = core_check(measured)
+        print(f"\ncores: {measured['info']['expected_cores']} expected (this process may use {measured['info']['available_cpus']}"
+              f"{', pinned to CPUs ' + str(measured['info']['cpus']) if 'cpus' in measured['info'] else ''}); "
+              f"CPU / wall per encoder run, median: {ratios}")
+        if escaped or loaded:
+            banner(escaped + loaded)
 
-    new, notes = fit(measured, old)
-    held_fit = fit(measured, old, fit_on)[0] if not no_split else None
-    print("\nfitted on all the edits (fixed s, per_mp s, busy, fade s/MP):")
-    for codec, values in sorted(new.recode.items()):
-        n = notes["codecs"].get(codec)
-        what = (f"{n['runs']} runs, median error {n['median run error %']} %, a 720p frame {n['was']} -> {n['ms per 720p frame']} ms"
-                + (" (one resolution: shape in use kept)" if n["shape kept"] else "")) if n else \
-            f"not calibrated: costs in use x {notes['scaled']['factor']}"
-        print(f"  {codec:<5} {values}  {what}")
-    print(f"  copy  {notes['copy us per frame']} us per frame (in use {old.copy_per_frame * 1e6:.1f}); "
-          f"audio {notes['audio s per second']} s per second (in use {old.audio_per_second})")
-    if held_fit is not None:
-        print("  without the held-out edits: " + ", ".join(f"{c} {held_fit.recode[c]}" for c in sorted(notes["codecs"])))
+        new, notes = fit(measured, old)
+        held_fit = fit(measured, old, fit_on)[0] if not no_split else None
+        print("\nfitted on all the edits (fixed s, per_mp s, busy, fade s/MP):")
+        for codec, values in sorted(new.recode.items()):
+            n = notes["codecs"].get(codec)
+            what = (f"{n['runs']} runs, median error {n['median run error %']} %, a 720p frame {n['was']} -> {n['ms per 720p frame']} ms"
+                    + (" (one resolution: shape in use kept)" if n["shape kept"] else "")) if n else \
+                f"not calibrated: costs in use x {notes['scaled']['factor']}"
+            print(f"  {codec:<5} {values}  {what}")
+        print(f"  copy  {notes['copy us per frame']} us per frame (in use {old.copy_per_frame * 1e6:.1f}); "
+              f"audio {notes['audio s per second']} s per second (in use {old.audio_per_second})")
+        if held_fit is not None:
+            print("  without the held-out edits: " + ", ".join(f"{c} {held_fit.recode[c]}" for c in sorted(notes["codecs"])))
 
-    print("\nevenness, largest distance from an even pace at the updates (%), in use -> new:")
-    replayed = {}
-    for name, edit in measured["edits"].items():
-        recorded = evenness_of(edit["calls"], edit["end"])
-        r_old = replay(edit, old)
-        replayed[name] = {"recorded": round(recorded[0], 2), "in use": round(r_old[0], 2), "new": round(replay(edit, new)[0], 2)}
-        if held_fit is not None and name in held:
-            replayed[name]["held-out fit"] = round(replay(edit, held_fit)[0], 2)
-        if abs(r_old[0] - recorded[0]) > 0.5:
-            print(f"  NOTE {name}: the replay ({r_old[0]:.1f} %) doesn't match the run ({recorded[0]:.1f} %)")
-    real = {name: {"in use": [], "new": []} for name in app}  # each fresh run as it went, with its set of costs
-    paired = {name: {"in use": [], "new": []} for name in app}  # every fresh run replayed under both sets
-    new_file = work / "costs_new.json"
-    new_file.write_text(progress_costs.to_json(new))
-    real_spec = {**spec, "cases": real_cases}
-    for k in range(args.repeat):
-        for label, costs_file in (("in use", old_file), ("new", new_file)):
-            print(f"  real runs, {label} costs ({k + 1}/{args.repeat})", flush=True)
-            result = run_child("real", real_spec, costs_file, work)
-            for name, edit in result["edits"].items():
-                if not edit["ok"]:
-                    sys.exit(f"real run {name} failed")
-                real[name][label].append(round(evenness_of(edit["calls"], edit["end"])[0], 2))
-                paired[name]["in use"].append(round(replay(edit, old)[0], 2))
-                paired[name]["new"].append(round(replay(edit, new)[0], 2))
-            run_escaped, run_loaded = real_core_check(result)
-            if run_escaped or run_loaded:
-                banner(run_escaped + run_loaded)
-            escaped += run_escaped
-            loaded += run_loaded
-    print(f"\n  {'edit':<18} {'held-out check':>15} {'real runs, paired':>19}   real runs as they went")
-    for name in held if held_fit is not None else app:
-        r = replayed[name]
-        check = f"{r['in use']:7.1f} -> {r['held-out fit']:5.1f}" if "held-out fit" in r else f"{'':>16}"
-        live = ""
-        if name in app:
-            pr, q = paired[name], real[name]
-            live = f"  {mean(pr['in use']):7.1f} -> {mean(pr['new']):5.1f}     {'/'.join(map(str, q['in use']))} -> {'/'.join(map(str, q['new']))}"
-        print(f"  {name:<18} {check}{live}")
-    held_old = mean([replayed[n]["in use"] for n in held if "held-out fit" in replayed[n]])
-    held_new = mean([replayed[n]["held-out fit"] for n in held if "held-out fit" in replayed[n]])
-    real_old, real_new = mean([v for n in app for v in paired[n]["in use"]]), mean([v for n in app for v in paired[n]["new"]])
-    live_old, live_new = mean([v for n in app for v in real[n]["in use"]]), mean([v for n in app for v in real[n]["new"]])
-    held_text = f"{held_old:7.1f} -> {held_new:5.1f}" if held_fit is not None else f"{'(none)':>16}"
-    print(f"  {'mean':<18} {held_text}  {real_old:7.1f} -> {real_new:5.1f}     {live_old:.1f} -> {live_new:.1f}")
-    all_old = mean([v["in use"] for v in replayed.values()])
-    all_new = mean([v["new"] for v in replayed.values()])
-    print(f"  all {len(replayed)} calibration edits, replayed under the new costs (fitted on them): {all_old:.1f} -> {all_new:.1f}")
-    print(f"  Held-out check: the held-out edits' calibration runs, replayed under the costs in use and costs fitted\n"
-          f"  without them. Real runs, paired: fresh runs of the app edits, each replayed under the costs in use and the\n"
-          f"  new ones (fitted on all the edits), the same timings for both. Adopted if both are more even by at least\n"
-          f"  {ADOPT_MARGIN} points, and no edit is worse by more than {EDIT_GUARD} points in either. As they went: each run with\n"
-          f"  its own costs; noisy (the same short edit varies a few % from run to run).")
+        print("\nevenness, largest distance from an even pace at the updates (%), in use -> new:")
+        replayed = {}
+        for name, edit in measured["edits"].items():
+            recorded = evenness_of(edit["calls"], edit["end"])
+            r_old = replay(edit, old)
+            replayed[name] = {"recorded": round(recorded[0], 2), "in use": round(r_old[0], 2), "new": round(replay(edit, new)[0], 2)}
+            if held_fit is not None and name in held:
+                replayed[name]["held-out fit"] = round(replay(edit, held_fit)[0], 2)
+            if abs(r_old[0] - recorded[0]) > 0.5:
+                print(f"  NOTE {name}: the replay ({r_old[0]:.1f} %) doesn't match the run ({recorded[0]:.1f} %)")
+        real = {name: {"in use": [], "new": []} for name in app}  # each fresh run as it went, with its set of costs
+        paired = {name: {"in use": [], "new": []} for name in app}  # every fresh run replayed under both sets
+        new_file = work / "costs_new.json"
+        new_file.write_text(progress_costs.to_json(new))
+        real_spec = {**spec, "cases": real_cases}
+        for k in range(args.repeat):
+            for label, costs_file in (("in use", old_file), ("new", new_file)):
+                print(f"  real runs, {label} costs ({k + 1}/{args.repeat})", flush=True)
+                result = run_child("real", real_spec, costs_file, work)
+                for name, edit in result["edits"].items():
+                    if not edit["ok"]:
+                        sys.exit(f"real run {name} failed")
+                    real[name][label].append(round(evenness_of(edit["calls"], edit["end"])[0], 2))
+                    paired[name]["in use"].append(round(replay(edit, old)[0], 2))
+                    paired[name]["new"].append(round(replay(edit, new)[0], 2))
+                run_escaped, run_loaded = real_core_check(result)
+                if run_escaped or run_loaded:
+                    banner(run_escaped + run_loaded)
+                escaped += run_escaped
+                loaded += run_loaded
+        print(f"\n  {'edit':<18} {'held-out check':>15} {'real runs, paired':>19}   real runs as they went")
+        for name in held if held_fit is not None else app:
+            r = replayed[name]
+            check = f"{r['in use']:7.1f} -> {r['held-out fit']:5.1f}" if "held-out fit" in r else f"{'':>16}"
+            live = ""
+            if name in app:
+                pr, q = paired[name], real[name]
+                live = f"  {mean(pr['in use']):7.1f} -> {mean(pr['new']):5.1f}     {'/'.join(map(str, q['in use']))} -> {'/'.join(map(str, q['new']))}"
+            print(f"  {name:<18} {check}{live}")
+        held_old = mean([replayed[n]["in use"] for n in held if "held-out fit" in replayed[n]])
+        held_new = mean([replayed[n]["held-out fit"] for n in held if "held-out fit" in replayed[n]])
+        real_old, real_new = mean([v for n in app for v in paired[n]["in use"]]), mean([v for n in app for v in paired[n]["new"]])
+        live_old, live_new = mean([v for n in app for v in real[n]["in use"]]), mean([v for n in app for v in real[n]["new"]])
+        held_text = f"{held_old:7.1f} -> {held_new:5.1f}" if held_fit is not None else f"{'(none)':>16}"
+        print(f"  {'mean':<18} {held_text}  {real_old:7.1f} -> {real_new:5.1f}     {live_old:.1f} -> {live_new:.1f}")
+        all_old = mean([v["in use"] for v in replayed.values()])
+        all_new = mean([v["new"] for v in replayed.values()])
+        print(f"  all {len(replayed)} calibration edits, replayed under the new costs (fitted on them): {all_old:.1f} -> {all_new:.1f}")
+        print(f"  Held-out check: the held-out edits' calibration runs, replayed under the costs in use and costs fitted\n"
+              f"  without them. Real runs, paired: fresh runs of the app edits, each replayed under the costs in use and the\n"
+              f"  new ones (fitted on all the edits), the same timings for both. Adopted if both are more even by at least\n"
+              f"  {ADOPT_MARGIN} points, and no edit is worse by more than {EDIT_GUARD} points in either. As they went: each run with\n"
+              f"  its own costs; noisy (the same short edit varies a few % from run to run).")
 
-    held_edits = {n: (replayed[n]["in use"], replayed[n]["held-out fit"]) for n in held if "held-out fit" in replayed[n]}
-    real_edits = {n: (mean(paired[n]["in use"]), mean(paired[n]["new"])) for n in app}
-    adopt, reasons = decide(quick=args.quick, pinned=not escaped, quiet=not loaded, facebook=facebook, uncalibrated=uncalibrated,
-                            no_split=no_split, held_out=(held_old, held_new), real=(real_old, real_new),
-                            held_out_edits=held_edits, real_edits=real_edits)
-    import importlib  # noqa: PLC0415
+        held_edits = {n: (replayed[n]["in use"], replayed[n]["held-out fit"]) for n in held if "held-out fit" in replayed[n]}
+        real_edits = {n: (mean(paired[n]["in use"]), mean(paired[n]["new"])) for n in app}
+        adopt, reasons = decide(quick=args.quick, pinned=not escaped, quiet=not loaded, facebook=facebook, uncalibrated=uncalibrated,
+                                no_split=no_split, held_out=(held_old, held_new), real=(real_old, real_new),
+                                held_out_edits=held_edits, real_edits=real_edits)
+        import importlib  # noqa: PLC0415
 
-    import av  # noqa: PLC0415
-    smart_cut = importlib.import_module("smartcut.smart_cut")
-    measured_info = {
-        "date": datetime.now(UTC).isoformat(timespec="seconds"), "host": socket.gethostname(),
-        "platform": platform.platform(), "cpu": cpu_name(),
-        "cores": measured["info"]["expected_cores"], "cores_simulated": bool(args.cores),
-        "available_cpus": measured["info"]["available_cpus"], "cpu_per_wall": ratios,
-        "python": platform.python_version(), "av": av.__version__,
-        "smartcut": f"{smart_cut.__version__} {git_rev() or ''}".strip(),
-        "media": {"source": manifest["source"]["name"], "sha256": manifest["source"]["sha256"][:16], "recipe": MEDIA_RECIPE,
-                  "excerpt": manifest["excerpt"], "facebook": manifest.get("facebook")},
-        "fit": notes, "quick": args.quick,
-    }
-    comparison = {
-        "evenness": {"calibration runs, replayed": replayed, "real runs, paired": paired, "real runs, as they went": real,
-                     "means": {"held-out check": [round(held_old, 2), round(held_new, 2)] if held_fit is not None else None,
-                               "real runs, paired": [round(real_old, 2), round(real_new, 2)],
-                               "real runs, as they went": [round(live_old, 2), round(live_new, 2)],
-                               "calibration runs, all": [round(all_old, 2), round(all_new, 2)]}},
-        "held_out": held, "fitted_without_them_on": fit_on, "held_out_fit": json.loads(progress_costs.to_json(held_fit))["recode_cost"]
-        if held_fit is not None else None,
-        "margin": ADOPT_MARGIN, "edit_guard": EDIT_GUARD, "not_adopted_because": reasons,
-        "costs_before": json.loads(progress_costs.to_json(old))}
-    text = progress_costs.to_json(new, measured_info, {**comparison, "adopted": adopt})
-    try:
-        progress_costs.parse(json.loads(text))  # what smartcut will read must load
-    except progress_costs.CostsFileError as e:
-        sys.exit(f"\nthe new costs are outside what smartcut accepts ({e}); nothing written. Codecs not calibrated get "
-                 "the costs in use scaled by the calibrated ones' speed: if the costs in use are far off, move their file "
-                 "away and rerun (smartcut uses its built-in costs meanwhile)")
-    written = save_costs(target, text, adopt)
-    if adopt:
-        print(f"\nADOPTED: more even by at least {ADOPT_MARGIN} points (held-out edits {held_old:.1f} -> {held_new:.1f} %, "
-              f"real runs {real_old:.1f} -> {real_new:.1f} %), no edit worse by more than {EDIT_GUARD} points. Wrote {written}")
-        print("smartcut reads it at the first edit of a process: restart the app (e.g. sudo systemctl restart gradio-apps).")
-    else:
-        print(f"\nNOT ADOPTED: {'; '.join(reasons)}. {target} unchanged; the candidate is in {written}")
-    print(f"smartcut reads {progress_costs.progress_costs_path()} "
-          f"({'SMARTCUT_PROGRESS_COSTS' if os.environ.get(progress_costs.ENV_VAR) else 'the default for this user'})"
-          + ("; --out wrote elsewhere: point SMARTCUT_PROGRESS_COSTS at it" if args.out and args.out != progress_costs.progress_costs_path() else ""))
-    if not args.work:
-        shutil.rmtree(work, ignore_errors=True)
+        import av  # noqa: PLC0415
+        smart_cut = importlib.import_module("smartcut.smart_cut")
+        measured_info = {
+            "date": datetime.now(UTC).isoformat(timespec="seconds"), "host": socket.gethostname(),
+            "platform": platform.platform(), "cpu": cpu_name(),
+            "cores": measured["info"]["expected_cores"], "cores_simulated": bool(args.cores),
+            "available_cpus": measured["info"]["available_cpus"], "cpu_per_wall": ratios,
+            "python": platform.python_version(), "av": av.__version__,
+            "smartcut": f"{smart_cut.__version__} {git_rev() or ''}".strip(),
+            "media": {"source": manifest["source"]["name"], "sha256": manifest["source"]["sha256"][:16], "recipe": MEDIA_RECIPE,
+                      "excerpt": manifest["excerpt"], "facebook": manifest.get("facebook")},
+            "fit": notes, "quick": args.quick,
+        }
+        comparison = {
+            "evenness": {"calibration runs, replayed": replayed, "real runs, paired": paired, "real runs, as they went": real,
+                         "means": {"held-out check": [round(held_old, 2), round(held_new, 2)] if held_fit is not None else None,
+                                   "real runs, paired": [round(real_old, 2), round(real_new, 2)],
+                                   "real runs, as they went": [round(live_old, 2), round(live_new, 2)],
+                                   "calibration runs, all": [round(all_old, 2), round(all_new, 2)]}},
+            "held_out": held, "fitted_without_them_on": fit_on, "held_out_fit": json.loads(progress_costs.to_json(held_fit))["recode_cost"]
+            if held_fit is not None else None,
+            "margin": ADOPT_MARGIN, "edit_guard": EDIT_GUARD, "not_adopted_because": reasons,
+            "costs_before": json.loads(progress_costs.to_json(old))}
+        text = progress_costs.to_json(new, measured_info, {**comparison, "adopted": adopt})
+        try:
+            progress_costs.parse(json.loads(text))  # what smartcut will read must load
+        except progress_costs.CostsFileError as e:
+            sys.exit(f"\nthe new costs are outside what smartcut accepts ({e}); nothing written. Codecs not calibrated get "
+                     "the costs in use scaled by the calibrated ones' speed: if the costs in use are far off, move their file "
+                     "away and rerun (smartcut uses its built-in costs meanwhile)")
+        written = save_costs(target, text, adopt)
+        if adopt:
+            print(f"\nADOPTED: more even by at least {ADOPT_MARGIN} points (held-out edits {held_old:.1f} -> {held_new:.1f} %, "
+                  f"real runs {real_old:.1f} -> {real_new:.1f} %), no edit worse by more than {EDIT_GUARD} points. Wrote {written}")
+            print("smartcut reads it at the first edit of a process: restart the app (e.g. sudo systemctl restart gradio-apps).")
+        else:
+            print(f"\nNOT ADOPTED: {'; '.join(reasons)}. {target} unchanged; the candidate is in {written}")
+        print(f"smartcut reads {progress_costs.progress_costs_path()} "
+              f"({'SMARTCUT_PROGRESS_COSTS' if os.environ.get(progress_costs.ENV_VAR) else 'the default for this user'})"
+              + ("; --out wrote elsewhere: point SMARTCUT_PROGRESS_COSTS at it" if args.out and args.out != progress_costs.progress_costs_path() else ""))
+    finally:
+        if not args.work:
+            shutil.rmtree(work, ignore_errors=True)
 
 if __name__ == "__main__":
     main()
