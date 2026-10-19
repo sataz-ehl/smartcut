@@ -123,14 +123,16 @@ def _copy_preroll(track: AudioTrack, format_name: str) -> Fraction | None:
 
 
 def _preroll_start(track: AudioTrack, start: int, preroll: Fraction) -> tuple[int, Fraction]:
-    """First packet and length of the packets just before packet `start` that cover `preroll` (fork addition). Fewer
-    near the start of the stream: from its first packet the decoder starts as it does for the source."""
+    """First packet and length of the packets just before packet `start` that cover `preroll`, by their timestamps
+    (fork addition; packet durations can be missing, and walking back by them pulled in the whole stream). Fewer near
+    the start of the stream: from its first packet the decoder starts as it does for the source."""
+    pts = track.frame_times_pts
+    if start <= 0 or start >= len(pts):
+        return start, Fraction(0)
     in_tb = cast(Fraction, track.av_stream.time_base)
-    first, length = start, Fraction(0)
-    while first > 0 and length < preroll:
-        first -= 1
-        length += (track.packets[first].duration or 0) * in_tb
-    return first, length
+    at = int(pts[start])
+    first = max(int(np.searchsorted(pts, float(at - preroll / in_tb), side='right')) - 1, 0)  # last one at or before
+    return first, (at - int(pts[first])) * in_tb
 
 
 class PrerollPassthruAudioCutter(PassthruAudioCutter):
@@ -526,8 +528,12 @@ class RecodeAudioCutter:
                                    cut segment to stderr
     """
 
-    # After a jump, decode a few earlier packets so the kept samples decode cleanly: 4 cover the 80 ms Opus decoders
-    # need, and the earlier MP3 frames a frame takes bits from (with 2, a cut MP3 started with 13-25 ms of silence)
+    # After a jump, decode from at least PREROLL and PREROLL_PACKETS before the packet holding the first kept sample,
+    # so the kept samples decode as in a continuous decode. Opus decoders settle by time, whatever their packet size:
+    # the first 20 ms kept after a restart differed from a continuous decode by 12 % with 40 ms (four 10 ms packets,
+    # the old count), 2.5-3.8 % with 80 ms (RFC 7845's minimum), 0.07-0.23 % with 160 ms. MP3 frames take bits from
+    # earlier frames (the bit reservoir): with 2 packets a cut MP3 started with 13-25 ms of silence.
+    PREROLL = Fraction(160, 1000)
     PREROLL_PACKETS = 4
     # On a steady tone the largest sample step at a hard-cut join was 5-11x the tone's own largest step; with 3 ms
     # ramps on both sides, 1.0x (as at a copied join: 1.3-1.4x)
@@ -556,6 +562,9 @@ class RecodeAudioCutter:
         self.buf_start = 0
         self.next_packet: int | None = None  # None: the decoder must be (re)started before decoding
         self.drained = False  # the decoder was flushed after the last packet
+        # Where the next decoded frame should start (source timeline, in output-rate samples), from the frames so far:
+        # None until the first frame after a restart
+        self.in_end: Fraction | None = None
         self.resampler: av.AudioResampler | None = None
 
     def segment(self, cut_segment: CutSegment) -> list[Packet]:
@@ -647,41 +656,64 @@ class RecodeAudioCutter:
         return out
 
     def _restart_decoder(self, start: int) -> None:
-        """Jump: restart decoding a few packets before the packet that contains `start`."""
-        start_pts = start / self.rate / self.in_time_base
-        first = int(np.searchsorted(self.track.frame_times_pts, start_pts, side='right')) - 1
-        self.next_packet = max(first - self.PREROLL_PACKETS, 0)
+        """Jump: restart decoding PREROLL (and at least PREROLL_PACKETS) before the packet that contains `start`."""
+        pts = self.track.frame_times_pts
+        first = int(np.searchsorted(pts, start / self.rate / self.in_time_base, side='right')) - 1
+        by_time = int(np.searchsorted(pts, float(pts[first] - self.PREROLL / self.in_time_base), side='right')) - 1 if first >= 0 else 0
+        self.next_packet = max(min(first - self.PREROLL_PACKETS, by_time), 0)
         self.decoder.flush_buffers()
         self.drained = False
+        self.in_end = None
         self.resampler = None if self.exact else av.AudioResampler(format='fltp', layout=self.layout_name, rate=self.rate)
         self.buf = np.zeros((self.channels, 0), self.dtype)
         self.buf_start = start
 
     def _decode_packet(self, packet: Packet | None, pending: list[np.ndarray], buf_end: int) -> int:
         """Decode one packet (None: drain the decoder), append its samples to `pending` and return the new buffer
-        end."""
+        end.
+
+        A frame is taken as following the previous one when its timestamp is less than a tick of the time base away
+        from where that one ended: Matroska rounds timestamps to 1 ms, and AAC frames of 21.33 ms came at 0, 21, 43
+        ms, ..., whose 16-32 sample "gaps" and "overlaps" clicked (fork fix). Strictly less: where a tick is a whole
+        frame (AVI audio), one tick off is a missing frame. Further off, a gap is filled with silence and an overlap
+        dropped. This is judged on the decoded frames, before resampling: a new resampler's first output is short
+        by its delay, and judged after it, the next frame looked like a gap (silence inserted after every restart,
+        e.g. 44.1 kHz AAC into a WebM's 48 kHz Opus: a step x5.6 a tone's own at 23 ms, fork fix)."""
         for frame in self.decoder.decode(packet):
             if frame.pts is None:
                 continue
             time_base = frame.time_base if frame.time_base is not None else self.in_time_base
-            frame_start = round(frame.pts * time_base * self.rate)
+            frame_start = frame.pts * time_base * self.rate  # in output-rate samples
+            length = Fraction(frame.samples * self.rate, frame.sample_rate)
+            if self.in_end is None:  # the first frame after a restart (may precede the requested start)
+                self.buf_start = buf_end = round(frame_start)
+                self.in_end = Fraction(buf_end)
+            off = frame_start - self.in_end
+            if abs(off) < self.rate * time_base:  # contiguous
+                off = Fraction(0)
+            elif self.resampler is not None:  # a jump: what the resampler holds back comes before it
+                buf_end = self._flush_resampler(pending, buf_end)
+            if off > 0:  # a gap in the source audio: keep timing with silence
+                gap = round(off)
+                pending.append(np.zeros((self.channels, gap), self.dtype))
+                buf_end += gap
+            self.in_end += off + length
             samples = self._samples(frame)
-            if samples is None:
-                continue
-
-            if self.buf.shape[1] == 0 and not pending:
-                self.buf_start = buf_end = frame_start  # first frame after a restart (may precede the requested start)
-            elif abs(frame_start - buf_end) <= self.rate * time_base:
-                # Contiguous: timestamps rounded to the time base (1 ms in Matroska: AAC frames of 21.33 ms came at
-                # 0, 21, 43 ms, ..., and the 16-32 sample "gaps" and "overlaps" clicked, fork fix)
-                pass
-            elif frame_start > buf_end:  # gap in the source audio: keep timing with silence
-                samples = np.concatenate([np.zeros((self.channels, frame_start - buf_end), self.dtype), samples], axis=1)
-            elif frame_start < buf_end:  # overlap (timestamp rounding): skip what we already have
-                samples = samples[:, buf_end - frame_start:]
-            if samples.shape[1]:
+            if samples is not None and off < 0:  # an overlap: skip what we already have
+                samples = samples[:, round(-off):]
+            if samples is not None and samples.shape[1]:
                 pending.append(samples)
                 buf_end += samples.shape[1]
+        return buf_end
+
+    def _flush_resampler(self, pending: list[np.ndarray], buf_end: int) -> int:
+        """Append what the resampler still holds and start a new one (before a gap or an overlap)."""
+        assert self.resampler is not None
+        arrays = [f.to_ndarray() for f in self.resampler.resample(None)]
+        self.resampler = av.AudioResampler(format='fltp', layout=self.layout_name, rate=self.rate)
+        if arrays:
+            pending.append(np.concatenate(arrays, axis=1).astype(np.float32, copy=False))
+            buf_end += pending[-1].shape[1]
         return buf_end
 
     def _samples(self, frame: av.AudioFrame) -> np.ndarray | None:

@@ -253,11 +253,26 @@ whole, if that can be done faithfully** (decided; `audio_needs_recode()` and `re
   video (e.g. H.264) fails before anything is written, with "WebM output needs VP8, VP9 or AV1 video; this video is
   H.264: use .mp4 or .mkv" (`OutputFormatError`; `process_segments` returns False, the CLI exits with 1).
 - **Timing.** Audio is kept locked to the video timeline: silence is inserted where the source has no audio.
-  - After a jump the decoder restarts four packets early, so the first kept samples decode cleanly (Opus needs
-    80 ms, MP3 the frames a frame takes bits from).
-  - Decoded frames count as contiguous when their timestamps differ by up to one tick of the time base. In Matroska
-    (1 ms ticks) AAC frames of 21.33 ms arrive at 0, 21, 43 ms, and each "gap" or "overlap" of 16-32 samples
-    became inserted or dropped samples: clicks of 6.6-11.5x a tone's largest step, also with fades.
+  - After a jump the decoder restarts 160 ms, and at least four packets, before the first kept sample
+    (`RecodeAudioCutter.PREROLL`), so the kept samples decode as in a continuous decode. Opus decoders settle by
+    time, whatever their packet size: the first 20 ms kept differed from a continuous decode by 12 % with 40 ms (four
+    10 ms packets, the old rule), 2.5-3.8 % with 80 ms (RFC 7845's minimum), 0.07-0.23 % with 160 ms. MP3 needs the
+    frames a frame takes bits from (with 2 packets a cut MP3 started with 13-25 ms of silence).
+  - A copy's pre-roll packets are chosen by their timestamps, not their durations, which can be missing (walking
+    back by durations of 0 took the whole stream).
+  - Decoded frames count as contiguous when their timestamps are less than one tick of the time base from where the
+    previous frame ended. In Matroska (1 ms ticks) AAC frames of 21.33 ms arrive at 0, 21, 43 ms, and each "gap" or
+    "overlap" of 16-32 samples became inserted or dropped samples: clicks of 6.6-11.5x a tone's largest step, also
+    with fades. Strictly less: a gap of exactly one tick, where a tick is a whole packet, is a missing packet (PCM in
+    1 ms packets: the audio after it came 1 ms early).
+  - This is judged on the decoded frames, before resampling (44.1 kHz into a WebM's Opus). A new resampler's first
+    output is short by its delay, and judged after it, the next frame looked like a gap: 16-17 samples of silence
+    after every restart (a step x5.6 a tone's own, and every segment 0.35 ms late). Now in sync with the source
+    resampled continuously (0.000 ms).
+  - The decoder is drained after the source's last packet: frame-threaded decoders (FLAC, ALAC, ...) hold frames
+    back, ~1 s of FLAC on 12 threads, which a cut ending near the source's end lost.
+  - Matroska stores timestamps in ms: after a jump a re-encoded segment is placed from the first decoded packet's
+    rounded timestamp, up to 0.5 ms off (PCM in 33.3 ms packets: 16 samples; in MOV: 0).
 - **Gain.** A per-sample linear ramp (vectorised with numpy).
 - **Cost.** The whole-track re-encode with FFmpeg's default AAC coder (decoding included) took 0.029-0.030 s per
   second of kept audio on one desktop core. The `fast` AAC coder was evaluated (about 1.8x faster) and rejected: it
@@ -341,6 +356,7 @@ Run from the repo root (tests live in `smartcut/tests/`):
 | `test_webm.py` | `.webm` outputs: AAC re-encoded to Opus (with and without fades), Opus copied from the start, re-encoded from mid-stream |
 | `test_audio_bitrate.py` | Bitrate of re-encoded audio: from the packets when the source reports none, floors per channel, MP3, lossless sources, encoder limits; cuts at about the source's rate |
 | `test_audio_joins.py` | Copied or re-encoded as the rule says; A/V sync within 1.5 ms at the start and every join; level and clicks at the joins (AAC, AC-3, MP3, Opus; MP4, MKV, WebM; HE-AAC with a media dir) |
+| `test_audio_decode.py` | Decoding for re-encodes: Opus (10 and 20 ms packets) after a jump as in a continuous decode; a copy's pre-roll without packet durations; a one-tick gap; resampled re-encodes in sync |
 | `test_audio_faithful.py` | Re-encodes keep the codec, sample format, bit depth and layout: lossless ones bit-identical outside the join fades (FLAC, ALAC, PCM); otherwise copied with a warning (AAC "6 channels"; DTS, TrueHD and 32-bit FLAC with the ffmpeg command); WebM's clear error |
 | `test_progress_costs.py` | A machine's `progress_costs.json`: used when valid; missing, malformed, other versions, out of range fall back to the built-in costs; paths; logged once; edits with a broken file |
 | `test_calibrate_progress.py` | `calibrate_progress.py --quick` on a synthetic clip, and its refusal of changed or missing clips (needs ffmpeg) |
