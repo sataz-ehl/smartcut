@@ -33,9 +33,11 @@ import sys
 import tempfile
 from fractions import Fraction
 from pathlib import Path
+from typing import cast
 
 import av
 import numpy as np
+from av import AudioStream, VideoStream
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (tests live in smartcut/tests/)
 
@@ -69,7 +71,7 @@ def make_source(path: Path, codec: str, layout: str, sample_format: str, bits: i
         video = out.add_stream("libx264", rate=FPS)
         video.width, video.height, video.pix_fmt = 96, 64, "yuv420p"
         video.codec_context.options = {"g": "30", "keyint_min": "30", "sc_threshold": "0"}
-        audio = out.add_stream(codec, rate=RATE)
+        audio = cast(AudioStream, out.add_stream(codec, rate=RATE))
         audio.codec_context.layout, audio.codec_context.format = layout, sample_format
         if bit_rate:
             audio.codec_context.bit_rate = bit_rate
@@ -101,13 +103,13 @@ def header_bits(ctx: av.AudioCodecContext) -> int | None:
 
 def decoded(path: Path) -> tuple[str, str, str, int | None, np.ndarray, set[bytes]]:
     """First audio track: codec, sample format, layout, bits (FLAC / ALAC), samples channels first, packets."""
-    with av.open(str(path)) as c:
+    with contextlib.closing(av.open(str(path))) as c:  # closing(): PyAV types __exit__ as maybe swallowing errors
         s = c.streams.audio[0]
         name, fmt, layout = s.codec_context.name, s.codec_context.format.name, s.codec_context.layout.name
         bits = header_bits(s.codec_context)
         frames = [f.to_ndarray() if f.format.is_planar else f.to_ndarray().reshape(-1, len(f.layout.channels)).T
                   for f in c.decode(s)]
-    with av.open(str(path)) as c:
+    with contextlib.closing(av.open(str(path))) as c:
         packets = {bytes(p) for p in c.demux(audio=0) if p.size}
     return name, fmt, layout, bits, np.concatenate(frames, axis=1), packets
 
@@ -224,7 +226,7 @@ def main() -> int:
         mp2 = tmp / "mp2.mkv"
         make_source(mp2, "mp2", "stereo", "s16", 16, 192_000)
         ok, warnings = cut(mp2, tmp / "out_mp2.mkv", JOINS)
-        name, *_, packets = decoded(tmp / "out_mp2.mkv") if ok else ("",)
+        name, *_, packets = decoded(tmp / "out_mp2.mkv") if ok else ("", "", "", None, np.zeros((0, 0)), set())
         report("MP2, joins: re-encoded as MP2", None if ok and name == "mp2" and not warnings and len(packets & decoded(mp2)[5]) <= 2
                else f"ok={ok} {name}, warnings {warnings}")
         src, out = tmp / "aac51.mp4", tmp / "out_aac51.mp4"
@@ -255,7 +257,7 @@ def main() -> int:
         webm = tmp / "out.webm"
         vp9 = tmp / "vp9_6ch.mkv"
         with av.open(str(unordered)) as c_in, av.open(str(vp9), "w") as c_out:  # VP9 video (WebM can't hold H.264)
-            v = c_out.add_stream("libvpx-vp9", rate=FPS)
+            v = cast(VideoStream, c_out.add_stream("libvpx-vp9", rate=FPS))
             v.width, v.height, v.pix_fmt = 96, 64, "yuv420p"
             v.codec_context.options = {"g": "30", "cpu-used": "8", "deadline": "realtime"}
             a = c_out.add_stream_from_template(c_in.streams.audio[0])

@@ -32,7 +32,7 @@ import numpy as np
 from av import AudioStream, VideoStream
 
 
-def generate_test_video(output_path: str, duration: int = 20, fps: int = 30, sample_rate: int = 48000):
+def generate_test_video(output_path: str, duration: int = 20, fps: int = 30, sample_rate: int = 48000) -> bool:
     """
     Generate a synthetic test video with audio using PyAV.
 
@@ -132,7 +132,7 @@ def generate_test_video(output_path: str, duration: int = 20, fps: int = 30, sam
         return False
 
 
-def main():
+def main() -> None:
     """Command-line interface for generating test videos."""
     if len(sys.argv) < 2:
         print(__doc__)

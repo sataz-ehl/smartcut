@@ -22,11 +22,14 @@ Usage (from the repo root):
 import io
 import sys
 import tempfile
+from contextlib import closing  # with closing(av.open()): PyAV types a container's __exit__ as maybe swallowing errors
 from fractions import Fraction
 from pathlib import Path
+from typing import cast
 
 import av
 import numpy as np
+from av import AudioStream, VideoStream
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (tests live in smartcut/tests/)
 
@@ -44,10 +47,10 @@ def make_source(path: Path, video: str, audio: str, rate: int, fps: int, options
     x = np.convolve(rng.standard_normal(SECONDS * rate), np.hanning(17), "same")
     x = (0.3 * x / np.sqrt((x ** 2).mean())).astype(np.float32)
     with av.open(str(path), "w") as out:
-        v = out.add_stream(video, rate=fps)
+        v = cast(VideoStream, out.add_stream(video, rate=fps))
         v.width, v.height, v.pix_fmt = 96, 64, "yuv420p"
         v.codec_context.options = {"g": str(fps)} if video == "libx264" else {"g": str(fps), "cpu-used": "8", "deadline": "realtime"}
-        a = out.add_stream(audio, rate=rate)
+        a = cast(AudioStream, out.add_stream(audio, rate=rate))
         a.codec_context.layout = "mono"
         a.codec_context.options = options or {}
         n = rate // fps
@@ -70,16 +73,17 @@ def make_source(path: Path, video: str, audio: str, rate: int, fps: int, options
 def by_pts(path: Path, rate: int | None = None) -> tuple[np.ndarray, int]:
     """The first audio track on the source's timeline: each decoded frame at its timestamp (silence where there's
     none). With rate: the whole track resampled continuously, from its first timestamp."""
-    with av.open(str(path)) as c:
+    with closing(av.open(str(path))) as c:
         s = c.streams.audio[0]
         frames = list(c.decode(s))
     if rate:
         resampler = av.AudioResampler(format="fltp", layout="mono", rate=rate)
         x = np.concatenate([g.to_ndarray()[0].astype(np.float64) for f in [*frames, None] for g in resampler.resample(f)])
-        chunks = [(float(frames[0].pts * frames[0].time_base), x)]
+        chunks = [(float(cast(int, frames[0].pts) * cast(Fraction, frames[0].time_base)), x)]
     else:
         rate = s.sample_rate
-        chunks = [(float(f.pts * f.time_base), f.to_ndarray().astype(np.float64).mean(axis=0)) for f in frames]
+        chunks = [(float(cast(int, f.pts) * cast(Fraction, f.time_base)), f.to_ndarray().astype(np.float64).mean(axis=0))
+                  for f in frames]
     out = np.zeros(round(max(t for t, _ in chunks) * rate) + sum(len(ch) for _, ch in chunks[-1:]) + rate)
     for t, ch in chunks:
         i = round(t * rate)
@@ -99,11 +103,11 @@ def lag(ref: np.ndarray, out: np.ndarray, rate: int, out_t: float, ref_t: float,
 
 def by_count(path: Path) -> tuple[np.ndarray, int]:
     """The first audio track from the output's time 0, decoded frames one after another (as players play)."""
-    with av.open(str(path)) as c:
+    with closing(av.open(str(path))) as c:
         s = c.streams.audio[0]
         frames = list(c.decode(s))
     x = np.concatenate([f.to_ndarray().astype(np.float64).mean(axis=0) for f in frames])
-    lead = round(float(frames[0].pts * frames[0].time_base) * s.sample_rate)
+    lead = round(float(cast(int, frames[0].pts) * cast(Fraction, frames[0].time_base)) * s.sample_rate)
     return (x[-lead:] if lead < 0 else np.concatenate([np.zeros(lead), x])), s.sample_rate
 
 
@@ -112,7 +116,7 @@ def check_restart(src: Path) -> str | None:
     reference, rate = by_pts(src)
     media = MediaContainer(str(src))
     try:
-        with av.open(io.BytesIO(), "w", format="webm") as out:
+        with closing(av.open(io.BytesIO(), "w", format="webm")) as out:
             cutter = RecodeAudioCutter(media, create_recode_audio_output_stream(media, out, 0), 0)
             worst = 0.0
             for t in (2.0, 3.517, 5.25):

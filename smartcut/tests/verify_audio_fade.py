@@ -14,10 +14,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (tests
 from smartcut.tests.test_fade import generate_test_video
 
 
-def analyze_audio_volume(video_path, duration_seconds=None):
+def analyze_audio_volume(video_path: str, duration_seconds: float | None = None
+                         ) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
     """Extract audio RMS levels over time."""
     container = av.open(video_path)
-    audio_stream = next((s for s in container.streams if s.type == 'audio'), None)
+    audio_stream = next(iter(container.streams.audio), None)
 
     if audio_stream is None:
         print("No audio stream found")
@@ -64,7 +65,7 @@ def analyze_audio_volume(video_path, duration_seconds=None):
     return np.array(time_values), np.array(rms_values)
 
 
-def test_fade_in():
+def test_fade_in() -> bool:
     """Test fade-in: volume should increase from 0 to full."""
     print("\n" + "="*60)
     print("TEST: Fade-in (2 seconds)")
@@ -85,7 +86,7 @@ def test_fade_in():
 
         times, rms = analyze_audio_volume(output_file)
 
-        if times is None or len(times) == 0:
+        if times is None or rms is None or len(times) == 0:
             print("✗ Failed to analyze audio")
             return False
 
@@ -127,7 +128,7 @@ def test_fade_in():
         return False
 
 
-def test_fade_out():
+def test_fade_out() -> bool:
     """Test fade-out: volume should decrease from full to 0."""
     print("\n" + "="*60)
     print("TEST: Fade-out (2 seconds)")
@@ -148,7 +149,7 @@ def test_fade_out():
 
         times, rms = analyze_audio_volume(output_file)
 
-        if times is None or len(times) == 0:
+        if times is None or rms is None or len(times) == 0:
             print("✗ Failed to analyze audio")
             return False
 
@@ -188,7 +189,7 @@ def test_fade_out():
         return False
 
 
-def test_both_fades():
+def test_both_fades() -> bool:
     """Test both fade-in and fade-out."""
     print("\n" + "="*60)
     print("TEST: Both fade-in and fade-out (1.5s each)")
@@ -209,7 +210,7 @@ def test_both_fades():
 
         times, rms = analyze_audio_volume(output_file)
 
-        if times is None or len(times) == 0:
+        if times is None or rms is None or len(times) == 0:
             print("✗ Failed to analyze audio")
             return False
 

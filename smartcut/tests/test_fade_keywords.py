@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from smartcut.tests.test_fade import generate_test_video
 
 
-def run_test(name, input_file, output_file, keep_args):
+def run_test(name: str, input_file: str, output_file: str, keep_args: list[str]) -> bool:
     """Run a single test case."""
     print(f"\n{'='*60}")
     print(f"TEST: {name}")
@@ -41,7 +41,7 @@ def run_test(name, input_file, output_file, keep_args):
     return True
 
 
-def main():
+def main() -> int:
     print("\n" + "="*60)
     print("Fade Feature - Keyword Time Specification Tests")
     print("="*60)

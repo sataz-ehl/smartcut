@@ -21,11 +21,13 @@ import sys
 import tempfile
 from fractions import Fraction
 from pathlib import Path
+from typing import NoReturn
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (tests live in smartcut/tests/)
 
 import smartcut
 from smartcut.media_container import MediaContainer
+from smartcut.misc_data import CutSegment
 from smartcut.smart_cut import make_adjusted_segment_times, make_cut_segments
 from smartcut.tests.generate_synthetic_video import generate_test_video
 from smartcut.video_cutter import VideoCutter
@@ -34,11 +36,11 @@ SEGMENTS = [{"start": 2, "end": 8, "fadein": 1, "fadeout": 1}, {"start": 12, "en
 LAST_FLUSH_SEGMENTS = [{"start": 2, "end": 8}, {"start": 12, "end": 17.5}]  # ends mid-GOP: re-encoded to the end
 
 
-def test_cancel_stops_and_removes_output(tmp: Path, src: Path):
+def test_cancel_stops_and_removes_output(tmp: Path, src: Path) -> None:
     out = tmp / "cancelled.mp4"
     calls = {"n": 0}
 
-    def cancel_after_3():
+    def cancel_after_3() -> bool:
         calls["n"] += 1
         return calls["n"] > 3
 
@@ -47,11 +49,11 @@ def test_cancel_stops_and_removes_output(tmp: Path, src: Path):
     assert not out.exists(), "partial output was not removed"
 
 
-def test_no_cancel_polls_and_succeeds(tmp: Path, src: Path):
+def test_no_cancel_polls_and_succeeds(tmp: Path, src: Path) -> None:
     out = tmp / "complete.mp4"
     calls = {"n": 0}
 
-    def never():
+    def never() -> bool:
         calls["n"] += 1
         return False
 
@@ -60,7 +62,7 @@ def test_no_cancel_polls_and_succeeds(tmp: Path, src: Path):
     assert calls["n"] >= 2, f"cancel_check polled only {calls['n']} times"
 
 
-def test_input_closed(tmp: Path, src: Path):
+def test_input_closed(tmp: Path, src: Path) -> None:
     copy = tmp / "input_copy.mp4"
     copy.write_bytes(src.read_bytes())
     assert smartcut.process_segments(str(copy), str(tmp / "from_copy.mp4"), SEGMENTS)
@@ -74,7 +76,7 @@ def test_input_closed_after_error(tmp: Path, src: Path) -> None:
     copy.write_bytes(src.read_bytes())
     real_segment = VideoCutter.segment
 
-    def failing_segment(self, cut_segment):
+    def failing_segment(self: VideoCutter, cut_segment: CutSegment) -> NoReturn:
         raise RuntimeError("test error while cutting")
 
     VideoCutter.segment = failing_segment
@@ -113,12 +115,12 @@ def cancel_midway(tmp: Path, src: Path, with_progress: bool, once: bool = False)
         state["cancelled"] = state["cancelled"] or state["polls"] > threshold
         return state["polls"] == threshold + 1 if once else state["cancelled"]
 
-    def on_progress(current, total):
+    def on_progress(current: int, total: int) -> None:
         state["updates"] += 1
         state["updates_after"] += state["cancelled"]
 
-    kw = {"progress_callback": on_progress} if with_progress else {}
-    ok = smartcut.process_segments(str(src), str(out), SEGMENTS, cancel_check=check, **kw)
+    ok = smartcut.process_segments(str(src), str(out), SEGMENTS, cancel_check=check,
+                                   progress_callback=on_progress if with_progress else None)
     assert ok is False and not out.exists(), (f"not cancelled (ok={ok}) after {state['polls']} polls, more than "
                                               f"{threshold} needed, or the partial output was left")
     assert state["polls_after"] == 0, f"cancel_check was asked {state['polls_after']} more times after it returned True"
@@ -186,7 +188,7 @@ def test_cancel_during_last_flush(tmp: Path, src: Path) -> None:
         f"the flush went on after the cancel: {state['after_cancel']} more frames ({state['flushed']} in all)"
 
 
-def test_progress_steady(tmp: Path, src: Path):
+def test_progress_steady(tmp: Path, src: Path) -> None:
     # Video fades only (with audio fades, re-encoding this clip's audio is most of the work), covering the whole
     # 6 s segment: progress counts frames as the encoder outputs them, and on a many-core PC x264's frame threads
     # plus lookahead hold back ~60 frames, so a short re-encoded run would only report at its flush
@@ -200,7 +202,7 @@ def test_progress_steady(tmp: Path, src: Path):
     assert len(values) > 30, f"only {len(values)} updates: no progress during re-encoding"
 
 
-def main():
+def main() -> int:
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
         src = tmp / "input.mp4"

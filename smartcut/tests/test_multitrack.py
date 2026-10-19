@@ -11,11 +11,14 @@ Usage (from the repo root):
 """
 import sys
 import tempfile
+from contextlib import closing  # with closing(av.open()): PyAV types a container's __exit__ as maybe swallowing errors
 from fractions import Fraction
 from pathlib import Path
+from typing import cast
 
 import av
 import numpy as np
+from av import AudioStream
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (tests live in smartcut/tests/)
 
@@ -30,7 +33,7 @@ def make_source(path: Path) -> None:
         video = out.add_stream("libx264", rate=FPS)
         video.width, video.height, video.pix_fmt = 192, 108, "yuv420p"
         video.codec_context.options = {"g": "30", "keyint_min": "30", "sc_threshold": "0"}
-        audio = [out.add_stream(codec, rate=rate, layout=layout) for codec, rate, layout, _ in TRACKS]
+        audio = [cast(AudioStream, out.add_stream(codec, rate=rate, layout=layout)) for codec, rate, layout, _ in TRACKS]
         for i in range(SECONDS * FPS):
             frame = av.VideoFrame.from_ndarray(np.full((108, 192, 3), i % 200, np.uint8), format="rgb24")
             frame.pts, frame.time_base = i, Fraction(1, FPS)
@@ -50,23 +53,23 @@ def make_source(path: Path) -> None:
 
 def read_tracks(path: Path) -> tuple[float, list[tuple[str, int, np.ndarray]]]:
     """Video duration and per audio track: codec, sample rate, mono samples."""
-    with av.open(str(path)) as c:
+    with closing(av.open(str(path))) as c:
         vs = c.streams.video[0]
-        video_s = float(vs.duration * vs.time_base)
+        video_s = float(cast(int, vs.duration) * cast(Fraction, vs.time_base))
         tracks = []
         for j, s in enumerate(c.streams.audio):
-            with av.open(str(path)) as c2:
+            with closing(av.open(str(path))) as c2:
                 x = np.concatenate([f.to_ndarray().astype(np.float64).mean(axis=0) for f in c2.decode(c2.streams.audio[j])])
             tracks.append((s.codec_context.name, s.sample_rate, x))
     return video_s, tracks
 
 
 def packets_of(path: Path) -> list[set[bytes]]:
-    with av.open(str(path)) as c:
+    with closing(av.open(str(path))) as c:
         found: list[set[bytes]] = [set() for _ in c.streams.audio]
         for p in c.demux(*c.streams.audio):
             if p.size:
-                found[list(c.streams.audio).index(p.stream)].add(bytes(p))
+                found[list(c.streams.audio).index(cast(AudioStream, p.stream))].add(bytes(p))
     return found
 
 

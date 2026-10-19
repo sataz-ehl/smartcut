@@ -13,6 +13,7 @@ import sys
 import tempfile
 import traceback
 from pathlib import Path
+from typing import Any
 
 import av
 
@@ -20,10 +21,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (tests
 from smartcut.tests.test_fade import generate_test_video
 
 
-def check_audio_parameters(video_path):
+def check_audio_parameters(video_path: str) -> dict[str, Any] | None:
     """Extract audio stream parameters from a video file."""
     container = av.open(video_path)
-    audio_stream = next((s for s in container.streams if s.type == 'audio'), None)
+    audio_stream = next(iter(container.streams.audio), None)
 
     if audio_stream is None:
         container.close()
@@ -42,7 +43,7 @@ def check_audio_parameters(video_path):
     return params
 
 
-def verify_frame_consistency(video_path):
+def verify_frame_consistency(video_path: str) -> tuple[bool, str]:
     """Verify all audio frames have consistent parameters."""
     container = av.open(video_path)
 
@@ -70,7 +71,7 @@ def verify_frame_consistency(video_path):
     return True, f"All {frame_count} frames consistent"
 
 
-def test_fully_reencoded_segment():
+def test_fully_reencoded_segment() -> bool:
     """Test segment that is entirely re-encoded (fade-in + fade-out covers entire segment)."""
     print("\n" + "="*60)
     print("TEST: Fully re-encoded segment (fade-in + fade-out)")
@@ -84,6 +85,7 @@ def test_fully_reencoded_segment():
 
         # Get source parameters
         source_params = check_audio_parameters(input_file)
+        assert source_params is not None, "no audio stream"
         print("\nSource parameters:")
         print(f"  Codec: {source_params['codec']}")
         print(f"  Sample rate: {source_params['sample_rate']} Hz")
@@ -104,6 +106,7 @@ def test_fully_reencoded_segment():
 
         # Get output parameters
         output_params = check_audio_parameters(output_file)
+        assert output_params is not None, "no audio stream"
         print("\nOutput parameters:")
         print(f"  Codec: {output_params['codec']}")
         print(f"  Sample rate: {output_params['sample_rate']} Hz")
@@ -159,7 +162,7 @@ def test_fully_reencoded_segment():
         return passed
 
 
-def test_mixed_passthrough_and_reencoded():
+def test_mixed_passthrough_and_reencoded() -> bool:
     """Test segment with both passthrough and re-encoded sections."""
     print("\n" + "="*60)
     print("TEST: Mixed passthrough and re-encoded sections")
@@ -172,6 +175,7 @@ def test_mixed_passthrough_and_reencoded():
         generate_test_video(input_file, duration=10)
 
         source_params = check_audio_parameters(input_file)
+        assert source_params is not None, "no audio stream"
         print(f"\nSource: {source_params['sample_rate']}Hz, {source_params['channels']}ch, {source_params['bitrate'] // 1000}kbps")
 
         # Process: 6s segment with 1s fade-in, 4s passthrough, 1s fade-out
@@ -185,6 +189,7 @@ def test_mixed_passthrough_and_reencoded():
             return False
 
         output_params = check_audio_parameters(output_file)
+        assert output_params is not None, "no audio stream"
         print(f"Output: {output_params['sample_rate']}Hz, {output_params['channels']}ch, {output_params['bitrate'] // 1000}kbps")
 
         # Verify critical parameters match
@@ -212,7 +217,7 @@ def test_mixed_passthrough_and_reencoded():
         return True
 
 
-def test_multi_segment_consistency():
+def test_multi_segment_consistency() -> bool:
     """Test multiple segments with different fade configurations."""
     print("\n" + "="*60)
     print("TEST: Multiple segments with mixed configurations")
@@ -225,6 +230,7 @@ def test_multi_segment_consistency():
         generate_test_video(input_file, duration=20)
 
         source_params = check_audio_parameters(input_file)
+        assert source_params is not None, "no audio stream"
         print(f"\nSource: {source_params['sample_rate']}Hz, {source_params['channels']}ch")
 
         # Complex case: multiple segments
@@ -243,6 +249,7 @@ def test_multi_segment_consistency():
             return False
 
         output_params = check_audio_parameters(output_file)
+        assert output_params is not None, "no audio stream"
         print(f"Output: {output_params['sample_rate']}Hz, {output_params['channels']}ch")
 
         # Open container and check all frames
@@ -271,7 +278,7 @@ def test_multi_segment_consistency():
             return False
 
 
-def test_keyword_segments():
+def test_keyword_segments() -> bool:
     """Test segments using keywords (start, end, -N) with fades."""
     print("\n" + "="*60)
     print("TEST: Keyword segments with fades")
@@ -284,6 +291,7 @@ def test_keyword_segments():
         generate_test_video(input_file, duration=20)
 
         source_params = check_audio_parameters(input_file)
+        assert source_params is not None, "no audio stream"
 
         # Use keywords with fades
         result = subprocess.run([
@@ -297,6 +305,7 @@ def test_keyword_segments():
             return False
 
         output_params = check_audio_parameters(output_file)
+        assert output_params is not None, "no audio stream"
 
         # Verify parameters
         passed = (

@@ -27,7 +27,7 @@ import smartcut
 from smartcut.tests.generate_synthetic_video import generate_test_video
 
 
-def test_video_only_fade():
+def test_video_only_fade() -> bool:
     """Test single segment with video-only fade (should be fast)."""
     print("\n" + "="*60)
     print("Test 1: Single segment with video-only fade")
@@ -70,7 +70,7 @@ def test_video_only_fade():
         return False
 
 
-def test_audio_only_fade():
+def test_audio_only_fade() -> bool:
     """Test single segment with audio-only fade."""
     print("\n" + "="*60)
     print("Test 2: Single segment with audio-only fade")
@@ -113,7 +113,7 @@ def test_audio_only_fade():
         return False
 
 
-def test_legacy_both_fade():
+def test_legacy_both_fade() -> bool:
     """Test single segment with legacy fadein/fadeout (both video and audio)."""
     print("\n" + "="*60)
     print("Test 3: Single segment with legacy fadein/fadeout")
@@ -156,7 +156,7 @@ def test_legacy_both_fade():
         return False
 
 
-def test_mixed_fade():
+def test_mixed_fade() -> bool:
     """Test single segment with mixed fade (video fadein, audio fadeout)."""
     print("\n" + "="*60)
     print("Test 4: Single segment with mixed fade effects")
@@ -199,7 +199,7 @@ def test_mixed_fade():
         return False
 
 
-def test_multiple_segments_dict():
+def test_multiple_segments_dict() -> bool:
     """Test multiple segments with dict-based configuration."""
     print("\n" + "="*60)
     print("Test 5: Multiple segments with dict configuration")
@@ -246,7 +246,7 @@ def test_multiple_segments_dict():
         return False
 
 
-def test_multiple_segments_config():
+def test_multiple_segments_config() -> bool:
     """Test multiple segments using CutSegmentConfig objects."""
     print("\n" + "="*60)
     print("Test 6: Multiple segments with CutSegmentConfig objects")
@@ -292,7 +292,7 @@ def test_multiple_segments_config():
         return False
 
 
-def main():
+def main() -> int:
     """Run all API tests."""
     print("\n" + "="*60)
     print("SMARTCUT API TEST SUITE")

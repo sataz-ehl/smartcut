@@ -17,7 +17,9 @@ import subprocess
 import sys
 import tempfile
 import traceback
+from contextlib import closing  # with closing(av.open()): PyAV types a container's __exit__ as maybe swallowing errors
 from pathlib import Path
+from typing import NoReturn
 
 import av
 import av.error
@@ -29,7 +31,7 @@ import smartcut
 from smartcut.tests.generate_synthetic_video import generate_test_video
 
 
-def test_cli_validation_reversed_segment():
+def test_cli_validation_reversed_segment() -> bool:
     """Test CLI validation: start > end within segment."""
     print("\n" + "="*60)
     print("Test 1: CLI validation - reversed segment (start > end)")
@@ -70,7 +72,7 @@ def test_cli_validation_reversed_segment():
         return False
 
 
-def test_cli_auto_sort_segments():
+def test_cli_auto_sort_segments() -> bool:
     """Test CLI auto-sorting: segments in wrong chronological order."""
     print("\n" + "="*60)
     print("Test 2: CLI auto-sort - segments in wrong order")
@@ -101,7 +103,7 @@ def test_cli_auto_sort_segments():
     # Check that it succeeded
     if result.returncode == 0 and os.path.exists(output_video):
         # Verify output duration is correct (10 seconds total)
-        with av.open(output_video) as container:
+        with closing(av.open(output_video)) as container:
             duration_sec = container.duration / av.time_base if container.duration else 0
             frame_count = sum(1 for _ in container.decode(video=0))
 
@@ -131,7 +133,7 @@ def test_cli_auto_sort_segments():
         return False
 
 
-def test_api_validation_reversed_segment():
+def test_api_validation_reversed_segment() -> bool:
     """Test API validation: start > end within segment."""
     print("\n" + "="*60)
     print("Test 3: API validation - reversed segment (start > end)")
@@ -177,7 +179,7 @@ def test_api_validation_reversed_segment():
             return False
 
 
-def test_api_auto_sort_segments():
+def test_api_auto_sort_segments() -> bool:
     """Test API auto-sorting: segments in wrong chronological order."""
     print("\n" + "="*60)
     print("Test 4: API auto-sort - segments in wrong order")
@@ -210,7 +212,7 @@ def test_api_auto_sort_segments():
     # Check result
     if success and os.path.exists(output_video):
         # Verify output duration is correct (10 seconds total)
-        with av.open(output_video) as container:
+        with closing(av.open(output_video)) as container:
             duration_sec = container.duration / av.time_base if container.duration else 0
             frame_count = sum(1 for _ in container.decode(video=0))
 
@@ -239,7 +241,7 @@ def test_api_auto_sort_segments():
         return False
 
 
-def test_api_processing_error_returns_false():
+def test_api_processing_error_returns_false() -> bool:
     """Test API: a ValueError raised while processing is not a validation error. FFmpeg's EINVAL is an
     av.error.ValueError (a ValueError), e.g. when libvpx can't open a 10-bit VP9 encoder."""
     print("\n" + "="*60)
@@ -252,7 +254,7 @@ def test_api_processing_error_returns_false():
         print("✗ Failed to create test video")
         return False
 
-    def failing_smart_cut(*args, **kwargs):
+    def failing_smart_cut(*args: object, **kwargs: object) -> NoReturn:
         raise av.error.ValueError(22, "Invalid argument", "avcodec_open2(libvpx-vp9)")  # as FFmpeg raises it
 
     real_smart_cut = smartcut.smart_cut
@@ -274,7 +276,7 @@ def test_api_processing_error_returns_false():
     return False
 
 
-def main():
+def main() -> int:
     """Run all validation tests."""
     print("\n" + "="*60)
     print("SMARTCUT VALIDATION TEST SUITE")

@@ -55,7 +55,7 @@ def check_video_exists(path: str, min_size: int = 1000) -> None:
 
     print(f"✓ Output file exists ({size} bytes)")
 
-def test_no_fade():
+def test_no_fade() -> None:
     """Test basic cutting without fades (baseline)."""
     print("\n" + "="*60)
     print("TEST: No fade (baseline)")
@@ -73,7 +73,7 @@ def test_no_fade():
 
         print("✓ TEST PASSED: No fade")
 
-def test_fadein_only():
+def test_fadein_only() -> None:
     """Test fade-in only."""
     print("\n" + "="*60)
     print("TEST: Fade-in only (1 second)")
@@ -91,7 +91,7 @@ def test_fadein_only():
 
         print("✓ TEST PASSED: Fade-in only")
 
-def test_fadeout_only():
+def test_fadeout_only() -> None:
     """Test fade-out only."""
     print("\n" + "="*60)
     print("TEST: Fade-out only (1 second)")
@@ -109,7 +109,7 @@ def test_fadeout_only():
 
         print("✓ TEST PASSED: Fade-out only")
 
-def test_both_fades():
+def test_both_fades() -> None:
     """Test both fade-in and fade-out."""
     print("\n" + "="*60)
     print("TEST: Both fade-in and fade-out")
@@ -127,7 +127,7 @@ def test_both_fades():
 
         print("✓ TEST PASSED: Both fades")
 
-def test_custom_fade_duration():
+def test_custom_fade_duration() -> None:
     """Test custom fade durations."""
     print("\n" + "="*60)
     print("TEST: Custom fade durations (1.5s in, 2.0s out)")
@@ -145,7 +145,7 @@ def test_custom_fade_duration():
 
         print("✓ TEST PASSED: Custom fade durations")
 
-def test_multiple_segments():
+def test_multiple_segments() -> None:
     """Test multiple segments with different fade configurations."""
     print("\n" + "="*60)
     print("TEST: Multiple segments with different fades")
@@ -164,7 +164,7 @@ def test_multiple_segments():
 
         print("✓ TEST PASSED: Multiple segments")
 
-def create_demo_video():
+def create_demo_video() -> bool:
     """Create a demo video saved to tests folder for manual inspection."""
     print("\n" + "="*60)
     print("DEMO: Creating demo video for manual inspection")
@@ -190,7 +190,7 @@ def create_demo_video():
     print("  You can play these files to visually verify the fade effects")
     return True
 
-def main():
+def main() -> int:
     """Run all tests."""
     print("="*60)
     print("Fade Functionality Test Suite")

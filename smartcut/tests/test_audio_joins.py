@@ -36,13 +36,17 @@ HE-AAC).
 Usage (from the repo root):
     python smartcut/tests/test_audio_joins.py [media dir]
 """
+import math
 import sys
 import tempfile
+from contextlib import closing  # with closing(av.open()): PyAV types a container's __exit__ as maybe swallowing errors
 from fractions import Fraction
 from pathlib import Path
+from typing import cast
 
 import av
 import numpy as np
+from av import AudioStream, VideoStream
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (tests live in smartcut/tests/)
 
@@ -74,11 +78,11 @@ def make_source(path: Path, video_codec: str, audio_codec: str, rate: int, signa
         x = np.stack([np.convolve(w, np.hanning(17), "same") for w in white])  # below ~5 kHz: a second lossy generation keeps it closely
         x *= AMPLITUDE / np.sqrt((x ** 2).mean(axis=1, keepdims=True))
     with av.open(str(path), "w") as out:
-        video = out.add_stream(video_codec, rate=FPS)
+        video = cast(VideoStream, out.add_stream(video_codec, rate=FPS))
         video.width, video.height, video.pix_fmt = 160, 96, "yuv420p"
         video.codec_context.options = ({"g": "30", "keyint_min": "30", "sc_threshold": "0"} if video_codec == "libx264"
                                        else {"g": "30", "cpu-used": "8", "deadline": "realtime"})
-        audio = out.add_stream(audio_codec, rate=rate, layout=layout)
+        audio = cast(AudioStream, out.add_stream(audio_codec, rate=rate, layout=layout))
         n = rate // FPS
         for i in range(SECONDS * FPS):
             frame = av.VideoFrame.from_ndarray(np.full((96, 160, 3), 40 + i % 150, np.uint8), format="rgb24")
@@ -88,7 +92,7 @@ def make_source(path: Path, video_codec: str, audio_codec: str, rate: int, signa
                                                  layout=layout)
             samples.sample_rate, samples.pts = rate, i * n
             for packet in audio.encode(samples):
-                if gap is None or not gap[0] <= packet.pts / rate < gap[1]:
+                if gap is None or not gap[0] <= cast(int, packet.pts) / rate < gap[1]:
                     out.mux(packet)
         out.mux(video.encode())
         out.mux(audio.encode())
@@ -96,19 +100,20 @@ def make_source(path: Path, video_codec: str, audio_codec: str, rate: int, signa
 
 def read(path: Path, channel: int | None = None) -> dict:
     """The first audio track (channel: that channel, else the channels' mean) and the video frame times."""
-    with av.open(str(path)) as c:
+    with closing(av.open(str(path))) as c:
         start = (c.start_time or 0) / av.time_base
-        vt = sorted(float(f.pts * f.time_base) for f in c.decode(video=0))
-    with av.open(str(path)) as c:
+        vt = sorted(float(cast(int, f.pts) * cast(Fraction, f.time_base)) for f in c.decode(video=0))
+    with closing(av.open(str(path))) as c:
         rate, codec = c.streams.audio[0].sample_rate, c.streams.audio[0].codec_context.name
         frames = list(c.decode(audio=0))
-    with av.open(str(path)) as c:
+    with closing(av.open(str(path))) as c:
         demuxed = [p for p in c.demux(audio=0) if p.size]
         packets = [bytes(p) for p in demuxed]
-        first_packet = min(float(p.pts * p.time_base) for p in demuxed if p.pts is not None)
+        first_packet = min(float(p.pts * cast(Fraction, p.time_base)) for p in demuxed if p.pts is not None)
     x = np.concatenate([f.to_ndarray().astype(np.float64)[channel] if channel is not None else
                         f.to_ndarray().astype(np.float64).mean(axis=0) for f in frames])
-    return {"start": start, "vt": vt, "rate": rate, "codec": codec, "a0": float(frames[0].pts * frames[0].time_base), "x": x,
+    return {"start": start, "vt": vt, "rate": rate, "codec": codec,
+            "a0": float(cast(int, frames[0].pts) * cast(Fraction, frames[0].time_base)), "x": x,
             "packets": packets, "first_packet": first_packet}
 
 
@@ -190,7 +195,7 @@ def check(src_path: Path, out_path: Path, segments: list[dict], copied: bool, si
     """Cut, then compare each channel (independent noise in multichannel sources) with the source's."""
     if not smartcut.process_segments(str(src_path), str(out_path), [dict(s) for s in segments]):
         return "process_segments failed"
-    with av.open(str(src_path)) as c:
+    with closing(av.open(str(src_path))) as c:
         names = [ch.name for ch in c.streams.audio[0].codec_context.layout.channels]
     # Each channel; not LFE, which the encoders band-limit (AAC: to ~120 Hz)
     for ch in [k for k, name in enumerate(names) if name != "LFE"] if len(names) > 1 else [None]:
@@ -284,9 +289,10 @@ def compare(src: dict, out: dict, out_path: Path, segments: list[dict], copied: 
 
 def by_pts(path: Path) -> dict:
     """The first audio track with each decoded frame at its timestamp (silence where the source has none)."""
-    with av.open(str(path)) as c:
+    with closing(av.open(str(path))) as c:
         rate = c.streams.audio[0].sample_rate
-        frames = [(float(f.pts * f.time_base), f.to_ndarray().astype(np.float64).mean(axis=0)) for f in c.decode(audio=0)]
+        frames = [(float(cast(int, f.pts) * cast(Fraction, f.time_base)), f.to_ndarray().astype(np.float64).mean(axis=0))
+                  for f in c.decode(audio=0)]
     a0 = frames[0][0]
     x = np.zeros(round((frames[-1][0] - a0) * rate) + len(frames[-1][1]))
     for t, samples in frames:
@@ -358,7 +364,7 @@ def check_keyframes(src_path: Path, out_path: Path, copied: bool) -> str | None:
     if not copied and same > 2:
         return f"{same}/{len(out['packets'])} audio packets copied, expected a re-encode"
     rate, gop = src["rate"], 1.0  # 1 s GOPs: the kept GOPs are the whole seconds the segments touch
-    kept = sorted({k for a, b in segments for k in range(int(a), int(np.ceil(b)))})
+    kept = sorted({k for a, b in segments for k in range(int(a), math.ceil(b))})
     runs, t = [], 0.0  # (output start, source start, length) per run of consecutive GOPs
     for k in kept:
         if runs and runs[-1][1] + runs[-1][2] == k * gop:

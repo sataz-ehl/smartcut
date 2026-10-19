@@ -18,11 +18,14 @@ Usage (from the repo root):
 import io
 import sys
 import tempfile
+from contextlib import closing  # with closing(av.open()): PyAV types a container's __exit__ as maybe swallowing errors
 from fractions import Fraction
 from pathlib import Path
+from typing import cast
 
 import av
 import numpy as np
+from av import AudioStream, VideoStream
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (tests live in smartcut/tests/)
 
@@ -40,10 +43,10 @@ def make_source(path: Path, codec: str, rate: int, layout: str, bit_rate: int, *
     x = np.stack([np.convolve(rng.standard_normal(SECONDS * rate), np.hanning(9), "same") for _ in range(channels)])
     x = (0.1 * x / np.abs(x).max()).astype(np.float32)
     with av.open(str(path), "w") as out:
-        v = out.add_stream(video, rate=FPS)
+        v = cast(VideoStream, out.add_stream(video, rate=FPS))
         v.width, v.height, v.pix_fmt = 96, 64, "yuv420p"
         v.codec_context.options = {"g": "30"} if video == "libx264" else {"g": "30", "cpu-used": "8", "deadline": "realtime"}
-        a = out.add_stream(codec, rate=rate)
+        a = cast(AudioStream, out.add_stream(codec, rate=rate))
         a.codec_context.layout = layout
         if bit_rate:
             a.codec_context.bit_rate = bit_rate
@@ -61,10 +64,11 @@ def make_source(path: Path, codec: str, rate: int, layout: str, bit_rate: int, *
 
 def packet_bitrate(path: Path) -> tuple[int | None, float]:
     """The first audio stream's reported bitrate, and its packets' average (size x 8 / the time they span)."""
-    with av.open(str(path)) as c:
+    with closing(av.open(str(path))) as c:
         s = c.streams.audio[0]
         packets = [p for p in c.demux(s) if p.size and p.pts is not None]
-        span = float((max(p.pts + (p.duration or 0) for p in packets) - min(p.pts for p in packets)) * s.time_base)
+        span = float((max(cast(int, p.pts) + (p.duration or 0) for p in packets) - min(cast(int, p.pts) for p in packets))
+                     * cast(Fraction, s.time_base))
         return s.bit_rate, sum(p.size for p in packets) * 8 / span
 
 
@@ -72,9 +76,9 @@ def configured(src: Path, out_format: str) -> tuple[str, int]:
     """Encoder and bitrate a re-encode of the source's first audio track into this format is set up with."""
     media = MediaContainer(str(src))
     try:
-        with av.open(io.BytesIO(), "w", format=out_format) as out:
+        with closing(av.open(io.BytesIO(), "w", format=out_format)) as out:
             stream = create_recode_audio_output_stream(media, out, 0)
-            return stream.codec_context.name, stream.codec_context.bit_rate
+            return stream.codec_context.name, cast(int, stream.codec_context.bit_rate)
     finally:
         media.close()
 

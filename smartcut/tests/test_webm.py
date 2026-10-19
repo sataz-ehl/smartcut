@@ -18,9 +18,11 @@ import sys
 import tempfile
 from fractions import Fraction
 from pathlib import Path
+from typing import cast
 
 import av
 import numpy as np
+from av import AudioStream, VideoStream
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (tests live in smartcut/tests/)
 
@@ -33,10 +35,10 @@ def make_source(path: Path, audio_codec: str, video_codec: str = "libvpx-vp9") -
     """VP9 (or other) video and a 440 Hz tone, keyframe every second."""
     rate = 48000
     with av.open(str(path), "w") as out:
-        video = out.add_stream(video_codec, rate=FPS)
+        video = cast(VideoStream, out.add_stream(video_codec, rate=FPS))
         video.width, video.height, video.pix_fmt = 160, 96, "yuv420p"
         video.codec_context.options = {"g": "30", "cpu-used": "8", "deadline": "realtime"} if "vpx" in video_codec else {"g": "30"}
-        audio = out.add_stream(audio_codec, rate=rate, layout="stereo")
+        audio = cast(AudioStream, out.add_stream(audio_codec, rate=rate, layout="stereo"))
         n = rate // FPS
         for i in range(SECONDS * FPS):
             frame = av.VideoFrame.from_ndarray(np.full((96, 160, 3), 40 + i % 150, np.uint8), format="rgb24")
@@ -52,11 +54,11 @@ def make_source(path: Path, audio_codec: str, video_codec: str = "libvpx-vp9") -
 
 
 def audio_of(path: Path) -> tuple[str, int, np.ndarray, list[bytes]]:
-    with av.open(str(path)) as c:
+    with contextlib.closing(av.open(str(path))) as c:  # closing(): PyAV types __exit__ as maybe swallowing errors
         s = c.streams.audio[0]
         name, rate = s.codec_context.name, s.sample_rate
         packets = [bytes(p) for p in c.demux(s) if p.size]
-    with av.open(str(path)) as c:
+    with contextlib.closing(av.open(str(path))) as c:
         x = np.concatenate([f.to_ndarray().astype(np.float64).mean(axis=0) for f in c.decode(audio=0)])
     return name, rate, x, packets
 
@@ -65,7 +67,7 @@ def check(src: Path, out: Path, fades: bool, copied: bool, start: float = 1) -> 
     segment = {"start": start, "end": start + 3, **({"audio_fadein": 1, "audio_fadeout": 1} if fades else {})}
     if not smartcut.process_segments(str(src), str(out), [segment]):
         return "process_segments failed"
-    with av.open(str(out)) as c:
+    with contextlib.closing(av.open(str(out))) as c:
         frames = sum(1 for _ in c.decode(video=0))
     if frames != 3 * FPS:
         return f"{frames} video frames decoded, expected {3 * FPS}"
