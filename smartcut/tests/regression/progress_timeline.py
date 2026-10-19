@@ -10,7 +10,7 @@ indexing the input) is reported separately and not counted.
 
 --calibrate also times every cut piece (the whole loop iteration, muxing and audio passthrough included). It
 prints per case the re-encode cost per frame and the cost per copied frame. Per codec it fits smart_cut's
-_RECODE_COST model (see fit_recode_cost) over the encoder runs of all the cases (the frames from the encoder's start
+progress_costs.RECODE_COST model (see fit_recode_cost) over the encoder runs of all the cases (the frames from the encoder's start
 to the end of its flush, with the flush; busyness and fades as smart_cut._recoded_frames gives them): run several
 resolutions (CALIBRATION_CASES adds 1080p) and content. It also
 prints the cost per copied frame and per second of re-encoded audio over all cases, to compare with the _*_COST_*
@@ -70,24 +70,24 @@ def install_timers(stats: dict[str, float], runs: list[dict]) -> None:
     re-encoding those frames, as _WorkProgress counts it. Counted as copies, they made copied frames look 7x
     dearer (249 instead of 35 us per frame over E5, E6, RE10, J1, J2, R2, RH7; E6 alone 1338 us).
 
-    runs gets one entry per encoder run (fed frames to the end of their flush): codec, megapixels, seconds, and the
+    runs gets one entry per encoder run (fed frames to the end of their flush): codec, megapixels, seconds, the
+    process's CPU seconds over the same time (all its threads: CPU / wall time is the cores the run used), and the
     sums over its frames of 1, busyness and faded."""
     from smartcut import track_cutters, video_cutter
 
     sc = importlib.import_module("smartcut.smart_cut")
     work_progress = sc._WorkProgress
     vc = video_cutter.VideoCutter
-    orig_segment, orig_flush, orig_piece_done, orig_init = (vc.segment, vc.flush_encoder, work_progress.piece_done,
-                                                            work_progress.__init__)
+    orig_segment, orig_flush, orig_piece_done, orig_plan = vc.segment, vc.flush_encoder, work_progress.piece_done, sc._work_plan
     piece = {}  # the piece in progress: start time, flush and audio time so far, kind and frame count
     run = {}  # the encoder run in progress: seconds and frame features so far
     features = {}  # id(cut piece) -> (busyness, faded) of the frames it re-encodes
 
-    def wp_init(self, *args, **kw) -> None:  # noqa: ANN001, ANN002, ANN003 (as _WorkProgress.__init__)
-        orig_init(self, *args, **kw)
-        media_container, cut_segments = args[2], args[3]
+    def work_plan(media_container, cut_segments, *args, **kw):  # noqa: ANN001, ANN002, ANN003, ANN202 (as smart_cut._work_plan)
+        plan = orig_plan(media_container, cut_segments, *args, **kw)
         features.clear()
-        features.update({id(s): f for s, f in zip(cut_segments, sc._recoded_frames(media_container, cut_segments))})
+        features.update({id(s): (b, f) for s, b, f in zip(cut_segments, plan.busyness, plan.faded)})
+        return plan
 
     def end_run(cutter: video_cutter.VideoCutter) -> None:
         ctx = cutter.in_stream.codec_context
@@ -97,13 +97,15 @@ def install_timers(stats: dict[str, float], runs: list[dict]) -> None:
 
     def flush_encoder(self):
         had = self.enc_codec is not None
-        t = time.perf_counter()
+        t, c = time.perf_counter(), time.process_time()
         packets = orig_flush(self)
-        spent = time.perf_counter() - t
+        spent, cpu = time.perf_counter() - t, time.process_time() - c
         stats["flush_s"] += spent
+        stats["flush_cpu"] += cpu
         stats["flush_packets"] += len(packets)
         if had and run:
             run["s"] += spent
+            run["cpu"] += cpu
             run["ending"] = True  # ended by segment() below; a flush in finish() ends it here
             if not piece:
                 end_run(self)
@@ -120,13 +122,13 @@ def install_timers(stats: dict[str, float], runs: list[dict]) -> None:
 
         self.on_frames_encoded = counting_hook
         hybrid = not s.require_recode and self._should_hybrid_recode_cra(s)
-        t = time.perf_counter()
-        piece.update(t=t, flush_s=stats["flush_s"], audio_s=stats["audio_s"])
+        t, c = time.perf_counter(), time.process_time()
+        piece.update(t=t, flush_s=stats["flush_s"], flush_cpu=stats["flush_cpu"], audio_s=stats["audio_s"])
         flushed_before = stats["flush_packets"]
         if s.require_recode or hybrid:
             busy, faded = features.get(id(s), (np.zeros(0), np.zeros(0, bool)))
             if not run:
-                run.update(s=0.0, n=0, busy=0.0, faded=0)
+                run.update(s=0.0, cpu=0.0, n=0, busy=0.0, faded=0)
             run.update(n=run["n"] + len(busy), busy=run["busy"] + float(busy.sum()), faded=run["faded"] + int(faded.sum()))
         try:
             packets = orig_segment(self, s)
@@ -138,6 +140,7 @@ def install_timers(stats: dict[str, float], runs: list[dict]) -> None:
         if s.require_recode or hybrid:
             piece.update(recode=True, frames=fed[0])
             run["s"] += time.perf_counter() - t - (stats["flush_s"] - piece["flush_s"])  # its flush is counted above
+            run["cpu"] += time.process_time() - c - (stats["flush_cpu"] - piece["flush_cpu"])
         else:
             piece.update(recode=False, frames=len(packets) - (stats["flush_packets"] - flushed_before))
         if run.get("ending"):
@@ -154,7 +157,7 @@ def install_timers(stats: dict[str, float], runs: list[dict]) -> None:
             piece.clear()
         orig_piece_done(self, index)
 
-    vc.segment, vc.flush_encoder, work_progress.piece_done, work_progress.__init__ = segment, flush_encoder, piece_done, wp_init
+    vc.segment, vc.flush_encoder, work_progress.piece_done, sc._work_plan = segment, flush_encoder, piece_done, work_plan
 
     ac = track_cutters.RecodeAudioCutter
     orig_audio = ac.segment
@@ -169,11 +172,15 @@ def install_timers(stats: dict[str, float], runs: list[dict]) -> None:
     ac.segment = audio_segment
 
 
-def fit_recode_cost(runs: list[dict]) -> tuple[tuple[float, float, float, float], np.ndarray]:
-    """smart_cut._RECODE_COST for one codec: least squares of the runs' seconds = sum over their frames of (fixed +
+def fit_recode_cost(runs: list[dict], shape: tuple[float, float] | None = None
+                    ) -> tuple[tuple[float, float, float, float], np.ndarray]:
+    """progress_costs.RECODE_COST for one codec: least squares of the runs' seconds = sum over their frames of (fixed +
     megapixels x per_mp) x (1 - busy + busy x busyness) + megapixels x fade x faded. busy (the share of the cost that
     follows busyness) on a grid from 0 to 1, the others 0 or more (a negative one is dropped and the rest refitted).
     Returns (fixed, per_mp, busy, fade) and the error of each run's predicted time.
+
+    shape: (fixed, per_mp) to keep in proportion, fitting one factor for both. Runs at a single frame size can't
+    separate them (calibrate_progress.py --quick).
 
     Not a negative fade: runs with a fade-in took libvpx and libaom less time, but not only for the faded frames (one
     core, 720p, the same 120 frames: VP9 faded 46 instead of 73 ms per frame, the unfaded ones after them 63 instead
@@ -184,18 +191,21 @@ def fit_recode_cost(runs: list[dict]) -> tuple[tuple[float, float, float, float]
     best = None
     for busy in np.linspace(0, 1, 21):
         frames = np.array([r["n"] * (1 - busy) + busy * r["busy"] for r in runs], float)  # in frames of average busyness
-        X = np.stack([frames, frames * [r["mp"] for r in runs], [r["faded"] * r["mp"] for r in runs]], axis=1)
-        use = [0, 1, 2]
+        mp = np.array([r["mp"] for r in runs], float)
+        faded = np.array([r["faded"] for r in runs], float) * mp
+        X = np.stack([frames * (shape[0] + shape[1] * mp), faded] if shape else [frames, frames * mp, faded], axis=1)
+        use = list(range(X.shape[1]))
         while True:
-            coef = np.zeros(3)
+            coef = np.zeros(X.shape[1])
             coef[use] = np.linalg.lstsq(X[:, use], y, rcond=None)[0]
             negative = [i for i in use if coef[i] < 0]
             if not negative:
                 break
             use.remove(min(negative, key=lambda i: coef[i]))
         residual = float(((X @ coef - y) ** 2).sum())
+        cost = (coef[0] * shape[0], coef[0] * shape[1], busy, coef[1]) if shape else (coef[0], coef[1], busy, coef[2])
         if best is None or residual < best[0]:
-            best = (residual, (coef[0], coef[1], busy, coef[2]), (X @ coef - y) / y)
+            best = (residual, tuple(float(v) for v in cost), (X @ coef - y) / y)
     return best[1], best[2]
 
 
@@ -273,7 +283,7 @@ def main():
               f"{np.mean([r[1] for r in rows]) * 100:11.1f}")
 
     if args.calibrate and runs:
-        print("\nMeasured re-encode cost per frame, (fixed, per_mp, busy, fade) as in smart_cut._RECODE_COST, least squares "
+        print("\nMeasured re-encode cost per frame, (fixed, per_mp, busy, fade) as in progress_costs.RECODE_COST, least squares "
               "over the encoder runs:")
         for codec in sorted({r["codec"] for r in runs}):
             mine = [r for r in runs if r["codec"] == codec]

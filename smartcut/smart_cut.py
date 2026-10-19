@@ -2,6 +2,7 @@ import os
 from collections import deque
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack
+from dataclasses import dataclass
 from fractions import Fraction
 from typing import Protocol, TypeAlias, runtime_checkable
 
@@ -10,6 +11,7 @@ import numpy as np
 from av.container.output import OutputContainer
 from av.packet import Packet
 
+from smartcut import progress_costs
 from smartcut.media_container import MediaContainer
 from smartcut.media_utils import VideoExportMode
 from smartcut.misc_data import AudioExportInfo, CutSegment, FadeInfo, SegmentWithFade
@@ -66,51 +68,8 @@ class CancelObject:
 # fed: encoders with lookahead (libaom, libvpx, x264, x265) take in their first frames instantly and finish the last
 # ones in a flush, which outputs them one by one. The same per-frame hook stops a re-encoded piece midway when
 # cancel_object is set, with or without progress.
-# Cost in seconds on one desktop core, measured with tests/regression/progress_timeline.py --one-core --calibrate
-# (Oct 2026: 29 edits of real clips, 360x360 to 1080p; synthetic clips re-encode 2-3x cheaper). Only the ratios matter.
-# - A re-encoded frame costs (fixed + megapixels x per_mp) x (1 - busy + busy x busyness) + megapixels x fade if its
-#   video fades, fitted over the encoder runs (each run's frames, from the encoder's start to the end of its flush):
-#   - fixed + megapixels x per_mp: a frame of average busyness. 720p: x264 25 ms, x265 60 ms, libvpx 53 ms, libaom
-#     129 ms.
-#   - An encoder's time per frame follows the content. In one 720p clip x264 took 14 ms per frame on a static scene
-#     and 32 ms on a busy one, whose source packets had 1.4 and 5.6 kB per frame (the clip's average: 3.8 kB); libaom
-#     118 and 198 ms. Busyness is that ratio: the source's bytes per frame within _BUSY_WINDOW of the frame, against
-#     the whole video's. busy is the share of the cost that follows it: x264 0.55, x265 0.75, libaom 0.85; libvpx's
-#     time hardly does (0.05).
-#   - A faded frame costs x264 and x265 more: every block changes, so none is skipped as unchanged (x264 at 720p:
-#     +28 ms, about 2x). libvpx and libaom no more (see progress_timeline.fit_recode_cost).
-#   - With one cost per frame and codec, as before, progress was up to 15-20 % off an even pace in common edits
-#     (2 segments without fades: H.264 720p 16.8-17.1 %, AV1 720p 14.6 %); now 3-7 % (one core, largest distance at
-#     the updates; 26 cases on average 9.5-9.7 % -> 4.4-4.7 %). libvpx's runs vary +-15 % in ways busyness doesn't
-#     predict (P2_vp9_720p 8-9 %).
-# - hevc: x265 with its default settings, as for camera footage (sources without x265's options in their headers;
-#   with them smartcut reuses the source's settings), with the 1-thread pool and 1 frame thread it uses on a 1-CPU
-#   machine. The earlier cost (0.005 + 0.020 per megapixel) was measured while x265 escaped the one-core pinning, and
-#   the one-core costs with that pool (43-49 / 108-116 / 181 ms per frame at 360p / 720p / 1080p) were mostly encoder
-#   closes stalling on Windows (see tests/regression/run_cases.pin_to_one_core); without them x265 takes as long as
-#   without a pool. An accurate single cost (0.075 per megapixel) made progress less even than the low one (replayed:
-#   14.0 % against 12.2 %), as the errors come from how the cost is spread over the frames: a lower video cost only
-#   shrinks re-encoding's share. With busyness and fades the measured level is the most even (5.7 %; half of it 5.7 %,
-#   twice 6.6 %).
-# - Not counted: decoding the frames before a cut (from the GOP's keyframe; an HEVC open GOP also decodes the GOP
-#   before) and starting an encoder (x265: ~1 s per run at 720p). Fitted, they made H.264 progress no more even
-#   (replayed: 3.8 % -> 4.0 %) and HEVC more even on average but not in every case (5.9 % -> 4.9 %).
-# - A copied frame costs the whole loop: remuxing, audio passthrough and muxing: 33-35 us over the 29 edits (11 884
-#   frames; timing the video cutter alone 14-19 us). HEVC pieces that re-encode their leading pictures count as
-#   re-encoding (calibrated as copies, they made copied frames look 7x dearer).
-# - Re-encoded audio: 0.027-0.029 s per second of audio over three calibrations (903 s each; HE-AAC sources ~0.032).
-_RECODE_COST = {  # (fixed, per_mp, busy, fade): s per frame, s per megapixel-frame, share, s per faded megapixel-frame
-    'h264': (0.0025, 0.024, 0.55, 0.030),
-    'hevc': (0.0035, 0.061, 0.75, 0.034),
-    'vp9': (0.011, 0.046, 0.05, 0.0),
-    'av1': (0.037, 0.10, 0.85, 0.0),
-}
-_RECODE_COST_OTHER = (0.005, 0.1, 0.0, 0.0)
-# Busyness: the source's bytes per frame within this many seconds either side of the frame, relative to the
-# whole video's
-_BUSY_WINDOW = 0.5
-_COPY_COST_PER_FRAME = 0.000035
-_AUDIO_RECODE_COST_PER_SECOND = 0.027
+# The costs the work is weighed with, and how they were measured: progress_costs.py (built-in, or a machine's own from
+# its progress_costs.json).
 
 
 class _Cancelled(Exception):
@@ -141,7 +100,7 @@ def _cra_leading_frames(media_container: MediaContainer, cut_segments: list[CutS
 
 def _recoded_frames(media_container: MediaContainer, cut_segments: list[CutSegment]) -> list[tuple[np.ndarray, np.ndarray]]:
     """Per cut piece, the frames VideoCutter re-encodes, in the order it feeds them (fork addition): each one's
-    busyness (see _BUSY_WINDOW; 1.0 without packet sizes) and whether its video fades (as in
+    busyness (see progress_costs.BUSY_WINDOW; 1.0 without packet sizes) and whether its video fades (as in
     VideoCutter._apply_fade_to_frame). Re-encoded pieces re-encode their frames, copied HEVC pieces right after a jump
     their leading pictures (_cra_leading_frames), other pieces none."""
     stream = media_container.video_stream
@@ -165,8 +124,8 @@ def _recoded_frames(media_container: MediaContainer, cut_segments: list[CutSegme
             continue
         t = times[first:last]
         if total is not None:
-            lo = np.searchsorted(times, t - _BUSY_WINDOW)
-            hi = np.searchsorted(times, t + _BUSY_WINDOW, side='right')
+            lo = np.searchsorted(times, t - progress_costs.BUSY_WINDOW)
+            hi = np.searchsorted(times, t + progress_costs.BUSY_WINDOW, side='right')
             busy = (total[hi] - total[lo]) / np.maximum(hi - lo, 1) / (total[-1] / len(times))
         else:
             busy = np.ones(len(t))
@@ -183,49 +142,65 @@ def _recoded_frames(media_container: MediaContainer, cut_segments: list[CutSegme
     return result
 
 
-def _recode_cost_of(media_container: MediaContainer) -> tuple[float, float, float]:
-    """For this source (_RECODE_COST): the cost of a re-encoded frame of average busyness, the share of it that
-    follows busyness, and the extra cost of a faded frame."""
+def _codec_family(media_container: MediaContainer) -> str:
+    """The video's codec family, as progress_costs.RECODE_COST names it: decoder names h264, hevc, vp9, libdav1d, ..."""
     stream = media_container.video_stream
-    if stream is None:
-        return 0.0, 0.0, 0.0
-    ctx = stream.codec_context
-    name = ctx.name or ''
-    family = 'av1' if 'av1' in name else name  # decoder names: h264, hevc, vp9, libdav1d, ...
-    fixed, per_mp, busy, fade = _RECODE_COST.get(family, _RECODE_COST_OTHER)
-    megapixels = (ctx.width or 0) * (ctx.height or 0) / 1e6
-    return fixed + per_mp * megapixels, busy, fade * megapixels
+    name = (stream.codec_context.name or '') if stream is not None else ''
+    return 'av1' if 'av1' in name else name
+
+
+@dataclass
+class _WorkPlan:
+    """What a cut is, as far as its cost goes, without the cost constants (fork addition): calibrate_progress.py records
+    it with a cut's progress calls and replays them under other constants. Per cut piece: the busyness and faded flags
+    of the frames it re-encodes (_recoded_frames), the frames it copies, and its seconds of re-encoded audio times the
+    tracks re-encoded."""
+    family: str
+    megapixels: float
+    busyness: list[np.ndarray]
+    faded: list[np.ndarray]
+    copied_frames: list[int]
+    audio_seconds: list[float]
+
+
+def _work_plan(media_container: MediaContainer, cut_segments: list[CutSegment], recode_audio: list[int],
+               include_video: bool = True) -> _WorkPlan:
+    """recode_audio: per cut piece, the number of audio tracks its output file re-encodes as a whole. Without video in
+    the output (e.g. .m4a) pieces only cost their audio and copied frames."""
+    stream = media_container.video_stream
+    frame_pts = getattr(media_container, 'video_frame_times_pts', None)
+    none = (np.zeros(0), np.zeros(0, bool))
+    recoded = _recoded_frames(media_container, cut_segments) if include_video else [none] * len(cut_segments)
+    ctx = stream.codec_context if stream is not None else None
+    media_start, media_end = media_container.start_time, media_container.start_time + media_container.duration
+    copied, audio = [], []
+    for i, s in enumerate(cut_segments):
+        frames = 0
+        if (not s.require_recode or not include_video) and stream is not None and stream.time_base is not None \
+                and frame_pts is not None and len(frame_pts):
+            frames = int(np.searchsorted(frame_pts, float(s.end_time / stream.time_base))
+                         - np.searchsorted(frame_pts, float(s.start_time / stream.time_base)))
+        copied.append(frames)
+        # pieces at the file edges reach 10 s past it (make_adjusted_segment_times)
+        seconds = max(0.0, float(min(s.end_time, media_end) - max(s.start_time, media_start))) if recode_audio[i] else 0.0
+        audio.append(seconds * recode_audio[i])
+    return _WorkPlan(_codec_family(media_container), (ctx.width or 0) * (ctx.height or 0) / 1e6 if ctx is not None else 0.0,
+                     [r[0] for r in recoded], [r[1] for r in recoded], copied, audio)
 
 
 class _WorkProgress:
-    def __init__(self, progress: WorkProgressCallback | None, cancel_object: CancelObject | None, media_container: MediaContainer,
-                 cut_segments: list[CutSegment], recode_audio: list[int], *, include_video: bool = True) -> None:
-        """recode_audio: per cut piece, the number of audio tracks its output file re-encodes as a whole."""
+    def __init__(self, progress: WorkProgressCallback | None, cancel_object: CancelObject | None, plan: _WorkPlan,
+                 costs: progress_costs.ProgressCosts) -> None:
         self.progress = progress
         self.cancel_object = cancel_object
-        stream = media_container.video_stream
-        frame_pts = getattr(media_container, 'video_frame_times_pts', None)
-        frame_cost, busy, fade = _recode_cost_of(media_container)
-        none = (np.zeros(0), np.zeros(0, bool))
-        recoded = _recoded_frames(media_container, cut_segments) if include_video else [none] * len(cut_segments)
-
-        media_start, media_end = media_container.start_time, media_container.start_time + media_container.duration
-        self.frame_costs: list[np.ndarray] = []  # per piece, the cost of each frame it re-encodes
-        self.piece_weights: list[float] = []  # everything else (copied frames, audio), counted when a piece is done
-        for i, s in enumerate(cut_segments):
-            busyness, faded = recoded[i]
-            self.frame_costs.append(frame_cost * (1 - busy + busy * busyness) + fade * faded)
-            weight = 0.0
-            if (not s.require_recode or not include_video) and stream is not None and stream.time_base is not None \
-                    and frame_pts is not None and len(frame_pts):
-                # copied; or no video in the output (e.g. .m4a), where pieces only cost their audio
-                frames = int(np.searchsorted(frame_pts, float(s.end_time / stream.time_base))
-                             - np.searchsorted(frame_pts, float(s.start_time / stream.time_base)))
-                weight += frames * _COPY_COST_PER_FRAME
-            if recode_audio[i]:  # pieces at the file edges reach 10 s past it (make_adjusted_segment_times)
-                weight += (max(0.0, float(min(s.end_time, media_end) - max(s.start_time, media_start)))
-                           * _AUDIO_RECODE_COST_PER_SECOND * recode_audio[i])
-            self.piece_weights.append(weight)
+        fixed, per_mp, busy, fade = costs.recode_for(plan.family)
+        frame_cost = fixed + per_mp * plan.megapixels  # a frame of average busyness
+        self.frame_costs: list[np.ndarray] = [  # per piece, the cost of each frame it re-encodes
+            frame_cost * (1 - busy + busy * busyness) + fade * plan.megapixels * faded
+            for busyness, faded in zip(plan.busyness, plan.faded)]
+        self.piece_weights: list[float] = [  # everything else (copied frames, audio), counted when a piece is done
+            frames * costs.copy_per_frame + seconds * costs.audio_per_second
+            for frames, seconds in zip(plan.copied_frames, plan.audio_seconds)]
         self.video_total = float(sum(c.sum() for c in self.frame_costs))
         self.total = (self.video_total + sum(self.piece_weights)) or 1.0
         # A frame fed beyond the estimate (it can be a few frames off) costs the average
@@ -495,7 +470,8 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                     for i in pieces:
                         recode_audio[i] = count
                 work = _WorkProgress(progress if isinstance(progress, WorkProgressCallback) else None, cancel_object,
-                                     media_container, cut_segments, recode_audio, include_video=include_video)
+                                     _work_plan(media_container, cut_segments, recode_audio, include_video),
+                                     progress_costs.current())
 
                         # Preserve container attachments (e.g., MKV attachments) when supported by the output format
             container_name = (output_av_container.format.name or "").lower()
