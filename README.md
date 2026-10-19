@@ -153,6 +153,27 @@ smartcut input.mp4 output.mp4 --keep 10:fadein,20:fadeout    # 1 second fades
 
 By default, all audio tracks are included with passthrough codec settings (re-encoded when audio fades are used, see above). This can be adjusted by modifying the `AudioExportInfo` in the script if needed.
 
+### Progress and the machine's costs
+
+`process_segments(..., progress_callback=...)` reports the estimated share of the work done. The estimate weighs
+re-encoded frames, copied frames and re-encoded audio by costs measured per codec (`smartcut/progress_costs.py`).
+
+The costs' ratios depend on the machine: with more cores the encoders get faster, while copying and audio don't. So a
+machine can have its own costs in a `progress_costs.json`, made on that machine by
+`smartcut/tests/regression/calibrate_progress.py` (see `smartcut/tests/regression/README.md`).
+
+smartcut reads the file named by `SMARTCUT_PROGRESS_COSTS`, else the per-user default:
+- Linux: `~/.config/smartcut/progress_costs.json` (`$XDG_CONFIG_HOME` if set);
+- Windows: `%APPDATA%\smartcut\progress_costs.json`.
+
+The file:
+- is read once per process, at its first edit, and the costs used are logged then (logger `smartcut`, INFO);
+- is machine-specific, so keep it outside the smartcut folder;
+- is optional: without it, the built-in costs are used. A file that is malformed, from another version or out of
+  range falls back to them with a warning. It never stops an edit.
+
+Restart a long-running app after changing the file.
+
 ## Contributing
 
 Contributions are welcome! All the code will be licensed under MIT license.

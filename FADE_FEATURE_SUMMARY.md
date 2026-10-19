@@ -68,7 +68,10 @@ by measured per-codec costs, copied frames and re-encoded audio far less, and co
 encoder outputs them, also one by one in its flush (`_WorkProgress` in `smart_cut.py`). A re-encoded frame's cost
 follows how busy the source is around it (its packets' bytes per frame over a second, against the whole video's)
 and whether its video fades: x264 took 14 ms per frame on a static scene and 32 ms on a busy one in the same 720p
-clip, and about twice as long for a faded frame. They honour `cancel_check()`: it is polled before every
+clip, and about twice as long for a faded frame. The costs are a desktop core's (`progress_costs.py`). A machine's
+own, measured there by `tests/regression/calibrate_progress.py`, come from the `progress_costs.json` that
+`SMARTCUT_PROGRESS_COSTS` names, else `~/.config/smartcut/` or `%APPDATA%\smartcut\`. A broken file falls back to the
+built-in costs with a warning. They honour `cancel_check()`: it is polled before every
 GOP and after every re-encoded frame (also without a progress callback), processing stops, the partial output is
 removed and the call returns `False`. Once it returned True it isn't polled again, so True once is enough, and the
 encoder's buffered frames are dropped rather than encoded into the removed file. The input file is always closed
@@ -91,6 +94,7 @@ smartcut.process_segments("in.mp4", "out.mp4", [
 | File | Fade-related code |
 |---|---|
 | `misc_data.py` | `FadeInfo` (video/audio fade-in/out durations), `SegmentWithFade`; `CutSegment.fade_info`, `orig_segment_start/end`, `join_before/join_after` |
+| `progress_costs.py` | The progress estimate's costs: built-in, or a machine's own `progress_costs.json` (validated, with a fallback) |
 | `smart_cut.py` | `smart_cut()` accepts `SegmentWithFade` lists; attaches fade info and segment bounds to the cut pieces, marks the GOPs that overlap a video fade for re-encoding, finds each output's joins and picks `RecodeAudioCutter` for the audio tracks a copy wouldn't be exact for; sets the MP4 movie timescale |
 | `video_cutter.py` | `VideoCutter._apply_fade_to_frame()` / `_fade_yuv_frame()`: per-frame video fade in the re-encode path; faster VP9/AV1 encoder settings |
 | `track_cutters.py` | `audio_needs_recode()`: copy or re-encode; `RecodeAudioCutter` + `create_recode_audio_output_stream()`: audio fades, join fades, lead-in, bitrate (`_recode_audio_bitrate()`); `PrerollPassthruAudioCutter` / `OpusPassthruAudioCutter`: exact copies into MP4 |
@@ -321,6 +325,8 @@ Run from the repo root (tests live in `smartcut/tests/`):
 | `test_webm.py` | `.webm` outputs: AAC re-encoded to Opus (with and without fades), Opus copied from the start, re-encoded from mid-stream |
 | `test_audio_bitrate.py` | Bitrate of re-encoded audio: from the packets when the source reports none, floors per channel, MP3, lossless sources, encoder limits; cuts at about the source's rate |
 | `test_audio_joins.py` | Copied or re-encoded as the rule says; A/V sync within 1 ms at the start and every join; level and clicks at the joins (AAC, AC-3, MP3, Opus; MP4, MKV, WebM; HE-AAC with a media dir) |
+| `test_progress_costs.py` | A machine's `progress_costs.json`: used when valid; missing, malformed, other versions, out of range fall back to the built-in costs; paths; logged once; edits with a broken file |
+| `test_calibrate_progress.py` | `calibrate_progress.py --quick` on a synthetic clip, and its refusal of changed or missing clips (needs ffmpeg) |
 | `regression/` | Measurement-based regression harness, test media generator and diagnostic tools, e.g. `join_sync.py` for A/V sync at every join (see its README) |
 
 ## Usage Examples

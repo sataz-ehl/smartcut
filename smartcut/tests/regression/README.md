@@ -24,7 +24,8 @@ pool from all the machine's CPUs, so its re-encodes get a 1-CPU machine's thread
 unless their options set them. On Windows the calling thread also runs below normal priority, as x265's pool
 threads do: at normal priority, every x265 encoder close stalled 0.5-10 s on one core (x265 waits for its pool with
 `Sleep(0)`, which doesn't let a lower-priority thread run), so HEVC edits seemed 2-3x slower and varied 2x from run
-to run. Call `pin_to_one_core()` from the thread that cuts.
+to run. Call `pin_to_one_core()` from the thread that cuts. `pin_to_cores(n)` does the same for n cores (one per
+physical core, x265 sized for n; the priority only for one core).
 
 `make_test_media.py` also makes the HEVC clips (`synth_hevc*.mp4`; with `--real`, `real_hevc*.mp4`). For the
 HEVC calibration case `RE10_hevc_1080p` in `progress_timeline.py`, transcode a 1080p clip with `--real`'s HEVC settings.
@@ -78,7 +79,8 @@ join are easy to check by eye too.
 | `psnr_reencoded.py <source> '<segments json>' <output> [<output> ...]` | PSNR of all of an edit's re-encoded frames against what the encoder was given (faded frames against the source faded by smartcut), copied frames checked bit-exact; several outputs compared frame by frame |
 | `exp_encoder.py <config.json> <media> <out> [cases] [--one-core]` | Run the cases with another encoder / encoder options for re-encoded GOPs, without changing smartcut |
 | `bench_audio.py <repo> <video> <out dir>` | Cost of re-encoding the whole audio track (audio fades) and of FFmpeg's AAC coders |
-| `progress_timeline.py <media> <out> [cases] [--one-core] [--timeline] [--calibrate]` | How steadily `progress_callback` moves: longest stretch without an update and the largest distance from an even pace, at the updates and as shown (a pause counts). `--calibrate` measures the costs that `smart_cut.py`'s work estimate uses: per case, and `_RECODE_COST` per codec fitted over the encoder runs of all the cases. Besides run_cases' cases it has 1080p calibration cases and typical app edits (`P2*`, `P3*`, `FB*`: 2 or 3 segments, without and with fades; H.264 720p, and 2 segments for 1080p, the other codecs and Facebook's H.264 + HE-AAC), run by name |
+| `progress_timeline.py <media> <out> [cases] [--one-core] [--timeline] [--calibrate]` | How steadily `progress_callback` moves: longest stretch without an update and the largest distance from an even pace, at the updates and as shown (a pause counts). `--calibrate` measures the costs that `smart_cut.py`'s work estimate uses: per case, and `progress_costs.RECODE_COST` per codec fitted over the encoder runs of all the cases (the built-in costs; a machine's own: `calibrate_progress.py`). Besides run_cases' cases it has 1080p calibration cases and typical app edits (`P2*`, `P3*`, `FB*`: 2 or 3 segments, without and with fades; H.264 720p, and 2 segments for 1080p, the other codecs and Facebook's H.264 + HE-AAC), run by name |
+| `calibrate_progress.py` | A machine's own progress costs, see below |
 | `audio_coder_ab.py <out dir> <video>` | Listening files, "what was lost" difference files and spectrograms for AAC default vs fast coder |
 
 ## Unit tests next to this folder
@@ -94,6 +96,76 @@ These need no test media and run like the other test scripts (`python smartcut/t
 - `smartcut/tests/test_audio_bitrate.py`: the bitrate of re-encoded audio (source's, floors, encoder limits).
 - `smartcut/tests/test_audio_joins.py`: copied or re-encoded as the rule says, A/V sync within 1 ms at the start and
   every join, level and clicks at the joins (AAC, AC-3, MP3, Opus; MP4, MKV, WebM; HE-AAC with a media dir).
+- `smartcut/tests/test_progress_costs.py`: progress_costs.json loading: valid, missing, malformed, other versions, out
+  of range (fallback to the built-in costs), the paths, logged once, edits with a broken file.
+- `smartcut/tests/test_calibrate_progress.py`: a `--quick` run of `calibrate_progress.py` on a synthetic clip, and its
+  refusal of changed or missing clips (needs the ffmpeg command: PATH or `SMARTCUT_TEST_FFMPEG`; ~40 s).
+
+## A machine's own progress costs (`calibrate_progress.py`)
+
+The progress estimate weighs re-encoded frames, copied frames and re-encoded audio by costs (`progress_costs.py`). Only
+their ratios matter, and those change with the machine: more cores make the encoders faster, while copying and audio
+don't. The built-in costs are one desktop core's. `calibrate_progress.py` measures the machine it runs on and writes
+its costs to the `progress_costs.json` smartcut reads:
+- the file `SMARTCUT_PROGRESS_COSTS` names;
+- else `~/.config/smartcut/progress_costs.json` (Linux) or `%APPDATA%\smartcut\progress_costs.json` (Windows).
+
+Keep the file outside the smartcut folder: deploying by copying that folder over would overwrite it.
+
+The test clips come from one real H.264 + AAC clip: a YouTube download, landscape, ideally 1080p and at least 95 s.
+- Synthetic clips re-encode 2-3x cheaper, so they don't calibrate.
+- VP9, AV1 and (with `--codecs ...,hevc`) HEVC are derived from its first 90 s with `make_test_media.py`'s `--real`
+  settings. HEVC carries no x265 options, so nothing of the machine that made it.
+- A Facebook download (H.264 + HE-AAC) is optional. It is copied, since FFmpeg can't make HE-AAC.
+
+Making them needs CPU (~20 min on one desktop core, 6 min on a 6-core / 12-thread desktop; 74 MB), so make them
+where that is cheap and copy them over. The media folder's `manifest.json` records the recipe and every clip's size and SHA-256. The calibration refuses
+media that is missing a clip, changed, or made by another recipe.
+
+```bash
+# On the dev PC: the clips, once (kept; rerunning reuses what is already made)
+python smartcut/tests/regression/calibrate_progress.py --make-media calib_media clip.mp4 --facebook fb_clip.mp4
+
+# On the target machine, after copying calib_media there: the plan and its estimated time, then the calibration
+python smartcut/tests/regression/calibrate_progress.py --media calib_media --estimate
+python smartcut/tests/regression/calibrate_progress.py --media calib_media
+
+# Or everything on one machine
+python smartcut/tests/regression/calibrate_progress.py clip.mp4 --facebook fb_clip.mp4 --media calib_media
+```
+
+The calibration itself:
+- Runs 2-segment edits with and without 2 s fades for every codec and resolution (default H.264, VP9, AV1 at
+  360/720/1080p, none above the clip's), plus the app's typical edits. One desktop core: ~10 min, 14 min with the
+  real runs below (4 cores: 7 min in all).
+- Uses the cores the process gets, as the app does. `--cores N` measures N cores, as on an N-CPU machine: one CPU per
+  physical core, x265 sized for N.
+- Checks the cores used, as CPU time / wall time per encoder run. Above the cores expected, the pinning didn't hold
+  (as x265's threads once escaped it), and nothing is adopted. Below 0.85 of one core, something else used the CPU:
+  rerun at a quiet time.
+- Fits the costs per codec, the copy cost per frame and the audio cost per second (`progress_timeline.fit_recode_cost`;
+  `--quick` keeps the built-in proportions between frame sizes). Codecs left out get the costs in use, scaled by the
+  calibrated codecs' median speed ratio.
+- Compares the costs in use with the new ones on the app's typical edits (P2/P2F/P3/P3F H.264 at 720p, VP9 and AV1 P2,
+  FB2), replaying each edit's recorded progress calls through `smart_cut._WorkProgress`:
+  - on the calibration runs;
+  - on fresh real runs, ~4 min of one desktop core per `--repeat`. Each fresh run is replayed under both sets, so
+    both get the same timings. The runs' own evenness is printed too, but the same short edit varies a few % from
+    run to run.
+- Adopts the new costs only if both comparisons are more even, and reports both either way:
+  - adopted: the file is written, the one before kept as `progress_costs.previous.json`;
+  - not adopted: the candidate goes to `progress_costs.candidate.json` next to it, and the file is left alone.
+- Restart the app after an adoption. smartcut reads the file at a process's first edit, and logs which costs it uses
+  (logger `smartcut`, INFO).
+- `--quick` takes ~2 min: the smallest resolution, 2-segment edits, a 45 s excerpt when it makes the media. It is
+  for a quick check, not a calibration: single short edits are noisy.
+- To go back to the built-in costs, delete the file, or rename `progress_costs.previous.json` back.
+
+### When the server gets more (or fewer) cores
+
+Rerun the calibration there, with the media folder you already have, as the app runs:
+`calibrate_progress.py --media calib_media`, without `--cores`. Nothing else changes. The file's `measured.cores`
+says how many cores it was made with. Until you rerun, the old costs give a less even bar, but edits work as before.
 
 ## Windows notes
 
