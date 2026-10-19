@@ -4,8 +4,8 @@ Tests of tests/regression/calibrate_progress.py.
 
 Unit tests (no encoding):
 1. The adoption rule: adopted only if both checks are more even by ADOPT_MARGIN, never with --quick, when the
-   pinning didn't hold, when the CPU check warned or without a held-out check
-2. The held-out edits (the app's height and the Facebook clip's), and when there is no held-out check
+   pinning didn't hold, when the CPU check warned, without the Facebook clip or without a held-out check
+2. The held-out edits (the app's height and the Facebook clip's, always), and when there is no held-out check
 3. The costs fitted without the held-out edits use only the other edits' runs and copy / audio times
 4. The CPU checks: an encoder run or a real run on more cores than expected, or less than LOW_CPU of one core
 5. The files: adopted, the file is replaced through a temporary file in its folder and the one before kept as
@@ -50,13 +50,14 @@ M = cp.ADOPT_MARGIN
 # ------------------------------------------------------------------------------------------------------ unit tests
 
 def test_rule() -> None:
-    ok = {"quick": False, "pinned": True, "quiet": True, "no_split": None}
+    ok = {"quick": False, "pinned": True, "quiet": True, "facebook": True, "no_split": None}
     better, worse = (6.0, 6.0 - M), (5.0, 5.0 - M + 0.01)
     assert cp.decide(**ok, held_out=better, real=better) == (True, []), "both checks better by the margin: adopted"
     for held, real in ((better, worse), (worse, better), (worse, worse), ((4.0, 4.5), better)):
         adopt, reasons = cp.decide(**ok, held_out=held, real=real)
         assert not adopt and len(reasons) == 1 and "not more even by" in reasons[0], (held, real, reasons)
     for change, words in (({"quick": True}, "--quick"), ({"pinned": False}, "pinning"), ({"quiet": False}, "CPU check"),
+                          ({"facebook": False}, "no Facebook clip: no held-out footage"),
                           ({"no_split": "one resolution"}, "no held-out check: one resolution")):
         adopt, reasons = cp.decide(**{**ok, **change}, held_out=better, real=better)
         assert not adopt and reasons == [r for r in reasons if words in r] and reasons, (change, reasons)
@@ -74,6 +75,7 @@ def test_held_out() -> None:
     cases, app, held = cp.plan_cases(manifest, ["h264", "vp9"], [360, 720, 1080], False)
     assert held == ["P2_h264_720p", "P2F_h264_720p", "P3_h264_720p", "P3F_h264_720p", "P2_vp9_720p", "P2F_vp9_720p", "FB2", "FB2F"], held
     assert set(app) <= set(held), "the real runs must be of held-out edits"
+    assert {"FB2", "FB2F"} <= set(held), "the Facebook clip's edits must be held out"
     assert cp.split_problem(cases, held, manifest) is None
     one = manifest_for([720], False)
     cases, app, held = cp.plan_cases(one, ["h264", "vp9"], [720], False)
@@ -214,7 +216,8 @@ def smoke(tmp: Path, check) -> None:  # noqa: ANN001
     candidate = target.with_name("progress_costs.candidate.json")
     verdicts = [line for line in r.stdout.splitlines() if line.startswith(("ADOPTED:", "NOT ADOPTED:"))]
     ok = (r.returncode == 0 and "cores: 1 expected" in r.stdout and len(verdicts) == 1
-          and verdicts[0].startswith("NOT ADOPTED: --quick is a smoke check") and target.read_text(encoding="utf-8") == before
+          and verdicts[0].startswith("NOT ADOPTED: --quick is a smoke check") and "no Facebook clip: no held-out footage" in verdicts[0]
+          and target.read_text(encoding="utf-8") == before
           and not target.with_name("progress_costs.previous.json").exists())
     try:
         costs = progress_costs.parse(json.loads(candidate.read_text()))

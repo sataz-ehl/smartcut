@@ -21,7 +21,8 @@ Input clips:
   - VP9, AV1 and, with --codecs ...,hevc, HEVC, with make_test_media.py's --real settings. HEVC carries no x265
     options in its headers, so nothing of the encoding machine.
   - Resolutions above the clip's own are left out.
-- --facebook <fb clip.mp4> (optional): a Facebook download, H.264 + HE-AAC. FFmpeg can't make HE-AAC, so it is copied.
+- --facebook <fb clip.mp4>: a Facebook download, H.264 + HE-AAC. FFmpeg can't make HE-AAC, so it is copied. Optional
+  for making the media, but required for an adoption: it is the only footage other than the source clip's.
 
 What it does:
 1. Checks the media against its manifest (the recipe version, every file's size and SHA-256, its codec and size). It
@@ -44,7 +45,8 @@ What it does:
    - real runs: fresh runs of the app's typical edits, interleaved (--repeat), under the costs fitted on all edits.
 6. The adoption rule (the regression README, "The adoption rule"): adopts the costs fitted on all the edits only if
    both comparisons are more even by at least ADOPT_MARGIN (0.5) points, and not with --quick, when the pinning
-   didn't hold, when the CPU check warned, or without a held-out check (one resolution). It writes them to the file
+   didn't hold, when the CPU check warned, without the Facebook clip (the only footage other than the source clip's),
+   or without a held-out check (one resolution). It writes them to the file
    smartcut reads (SMARTCUT_PROGRESS_COSTS, else ~/.config/smartcut/progress_costs.json or %APPDATA%\\smartcut\\, or
    --out), keeping the previous file as progress_costs.previous.json. Otherwise it writes
    progress_costs.candidate.json next to it and leaves the file alone. Either way it prints the comparison and
@@ -180,6 +182,9 @@ def make_media(clip: Path, out: Path, *, codecs: list[str], resolutions: list[in
             jobs.append((f"{codec}_{res}p.mp4", codec, res, ["-c:v", "copy"] if copy else ["-vf", f"scale=-2:{res}", *args]))
     if facebook is not None:
         jobs.append(("fb.mp4", "facebook", None, ["-c:v", "copy"]))
+    else:
+        print("NOTE: no --facebook clip. A calibration with this media reports its comparison but adopts nothing: the "
+              "Facebook clip is the held-out footage it needs")
     est = sum(length * src["fps"] * MAKE_MS_PER_FRAME[c][(360, 720, 1080).index(r) if r in (360, 720, 1080) else 1] / 1000
               for _, c, r, a in jobs if c in MAKE_MS_PER_FRAME and a[1] != "copy")
     print(f"making {len(jobs)} clips of {length:.0f} s in {out}: ~{est / 60:.0f} min on one desktop core (less on more cores)")
@@ -576,9 +581,10 @@ def real_core_check(result: dict) -> tuple[list[str], list[str]]:
     return escaped, loaded
 
 
-def decide(*, quick: bool, pinned: bool, quiet: bool, no_split: str | None, held_out: tuple[float, float],
-           real: tuple[float, float]) -> tuple[bool, list[str]]:
-    """The adoption rule: whether to adopt the new costs, and the reasons not to. held_out and real are the mean
+def decide(*, quick: bool, pinned: bool, quiet: bool, facebook: bool, no_split: str | None,
+           held_out: tuple[float, float], real: tuple[float, float]) -> tuple[bool, list[str]]:
+    """The adoption rule: whether to adopt the new costs, and the reasons not to. facebook: the plan has the Facebook
+    clip's edits, the only footage other than the source clip's (decided: required). held_out and real are the mean
     evenness (%, in use and new) of the held-out check and of the real runs; both must improve by ADOPT_MARGIN."""
     reasons = []
     if quick:
@@ -587,6 +593,8 @@ def decide(*, quick: bool, pinned: bool, quiet: bool, no_split: str | None, held
         reasons.append("the pinning didn't hold")
     if not quiet:
         reasons.append("the CPU check warned of other load")
+    if not facebook:
+        reasons.append("no Facebook clip: no held-out footage (make the media with --facebook)")
     if no_split:
         reasons.append(f"no held-out check: {no_split}")
     elif not (held_out[1] <= held_out[0] - ADOPT_MARGIN and real[1] <= real[0] - ADOPT_MARGIN):
@@ -706,6 +714,7 @@ def main() -> None:
     manifest = check_media(media, codecs, resolutions)
     cases, app, held = plan_cases(manifest, codecs, resolutions, args.quick)
     no_split = split_problem(cases, held, manifest)
+    facebook = any(manifest["files"][c["file"]]["facebook"] for c in cases)
     fit_on = [c["name"] for c in cases if c["name"] not in held]
     target = args.out or progress_costs.progress_costs_path()
     old, messages = progress_costs.load(target)
@@ -720,6 +729,8 @@ def main() -> None:
     print(f"      cores: {args.cores or 'as this process gets them'}; media {media} (excerpt {manifest['excerpt']:.0f} s)")
     if args.quick:
         print("      --quick: a smoke check; it writes the candidate only, never the file smartcut reads")
+    if not facebook:
+        print("      no Facebook clip: no held-out footage (make the media with --facebook): it writes the candidate only")
     print(f"estimated: ~{edits_s / 60:.1f} min of edits + ~{real_s / 60:.1f} min of real runs on one desktop core "
           "(one server core may be slower; more cores, faster)")
     if args.estimate:
@@ -816,7 +827,7 @@ def main() -> None:
           f"  {ADOPT_MARGIN} points. As they went: each run with its own costs; noisy (the same short edit varies a few % from\n"
           f"  run to run).")
 
-    adopt, reasons = decide(quick=args.quick, pinned=not escaped, quiet=not loaded, no_split=no_split,
+    adopt, reasons = decide(quick=args.quick, pinned=not escaped, quiet=not loaded, facebook=facebook, no_split=no_split,
                             held_out=(held_old, held_new), real=(real_old, real_new))
     import importlib  # noqa: PLC0415
 
