@@ -7,7 +7,8 @@ Tests for process_segments() cancellation, progress and resource handling.
 3. The input file is closed afterwards, also after an error (on Windows an open file can't be deleted)
 4. Cancelling midway through a re-encoded piece stops it within a frame, not at the end of the piece, also
    without progress_callback; cancel_check isn't asked again once it returned True, so True once is enough
-5. Cancelling during the encoder's last flush (at the end of the output) stops it within a frame too
+5. Cancelling during the encoder's last flush (at the end of the output) stops it within a frame too, and the
+   input is closed
 6. Progress is reported as thousandths of the work, rising steadily to 1000, also during re-encoding
 
 Usage (from the repo root):
@@ -172,9 +173,17 @@ def test_cancel_during_last_flush(tmp: Path, src: Path) -> None:
     assert ok, "the edit failed"
     assert state["flushed"] >= 6, f"the last flush output only {state['flushed']} frames: the test needs more"
     out = tmp / "cancelled_in_flush.mp4"
-    ok, state = run_watching_last_flush(src, out, 3)
+    copy = tmp / "input_copy_flush.mp4"  # the cancelled finish() must still close the input
+    copy.write_bytes(src.read_bytes())
+    gc.disable()  # PyAV containers are freed by the garbage collector only: it mustn't close the file by chance
+    try:
+        ok, state = run_watching_last_flush(copy, out, 3)
+        os.remove(copy)  # raises on Windows if the input was left open
+    finally:
+        gc.enable()
     assert ok is False and not out.exists(), f"not cancelled (ok={ok}), or the partial output was left"
-    assert state["flushed"] == 3 and state["after_cancel"] == 0,         f"the flush went on after the cancel: {state['after_cancel']} more frames ({state['flushed']} in all)"
+    assert state["flushed"] == 3 and state["after_cancel"] == 0, \
+        f"the flush went on after the cancel: {state['after_cancel']} more frames ({state['flushed']} in all)"
 
 
 def test_progress_steady(tmp: Path, src: Path):
