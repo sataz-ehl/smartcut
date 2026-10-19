@@ -10,7 +10,8 @@ Unit tests (no encoding):
 3. The costs fitted without the held-out edits use only the other edits' runs and copy / audio times
 4. The CPU checks: an encoder run or a real run on more cores than expected, or less than LOW_CPU of one core
 5. The files: adopted, the file is replaced through a temporary file in its folder and the one before kept as
-   progress_costs.previous.json; not adopted, only progress_costs.candidate.json is written
+   progress_costs.previous.json; not adopted, only progress_costs.candidate.json is written; on Windows a replace
+   refused because another process has the file open is retried
 6. The measuring processes release memory after every edit
 7. --cores N takes one CPU per physical core (the fastest kind first on hybrid CPUs), from the real topology
 8. progress_timeline's evenness from the cut's real start: the start is when the video cutter starts the first piece,
@@ -20,16 +21,18 @@ Unit tests (no encoding):
    real runs' paired means (both runs, replayed under the costs in use and the all-edit fit), the same per edit, and
    the app's codecs not calibrated (--codecs h264: vp9, av1), which the plan names
 10. main()'s temporary work folder is removed also when it stops early (a real run failed)
+11. Atomic writes while another thread loads the file every millisecond, or holds it open for 0.3 s: no write
+    fails, no read falls back to the built-in costs
 
 Smoke test of the harness on a short synthetic clip (H.264 only, --quick; needs the ffmpeg command on PATH or in
 SMARTCUT_TEST_FFMPEG, skipped without it; ~2 min):
-11. --make-media makes the clips and a manifest
-12. A --quick run checks the cores, fits, compares and says NOT ADOPTED: the file SMARTCUT_PROGRESS_COSTS names is
+12. --make-media makes the clips and a manifest
+13. A --quick run checks the cores, fits, compares and says NOT ADOPTED: the file SMARTCUT_PROGRESS_COSTS names is
     left as it was, and the candidate it writes loads with progress_costs.parse()
-13. main() in this process, the rule's verdict forced: decide() gets the run's facts (--quick, no Facebook clip, one
+14. main() in this process, the rule's verdict forced: decide() gets the run's facts (--quick, no Facebook clip, one
     resolution, the pinning held), and an adoption replaces the file and keeps the one before as
     progress_costs.previous.json
-14. A changed clip, or one the calibration needs but the media lacks, is refused
+15. A changed clip, or one the calibration needs but the media lacks, is refused
 
 Synthetic clips re-encode differently from real ones: the smoke test checks the harness works, not the costs.
 
@@ -193,6 +196,32 @@ def test_files(tmp: Path) -> None:
     finally:
         os.replace = real_replace
     assert target.read_text() == "new\n" and len(list(folder.iterdir())) == 3, "a failed write must leave the file and no temporary"
+
+    # Windows: a replace refused while another process has the file open (PermissionError) is retried; Linux raises
+    calls: list[str] = []
+
+    def busy_twice(src, dst):  # noqa: ANN001, ANN202
+        calls.append(sys.platform)
+        if len(calls) <= 2:
+            raise PermissionError(13, "Access is denied")
+        real_replace(src, dst)
+
+    saved_platform = sys.platform
+    os.replace = busy_twice
+    try:
+        sys.platform = "win32"
+        cp.write_atomic(target, "retried\n")
+        assert target.read_text() == "retried\n" and len(calls) == 3, calls
+        calls.clear()
+        sys.platform = "linux"
+        try:
+            cp.write_atomic(target, "linux\n")
+            raise AssertionError("on Linux a PermissionError must be raised at once")
+        except PermissionError:
+            assert len(calls) == 1, calls
+    finally:
+        os.replace, sys.platform = real_replace, saved_platform
+    assert target.read_text() == "retried\n" and len(list(folder.iterdir())) == 3, "no temporary file left"
 
 
 def test_memory_released() -> None:
@@ -414,6 +443,68 @@ def test_work_removed(tmp: Path) -> None:
     assert len(made) == 1 and not made[0].exists(), f"work folder left: {made}"
 
 
+def test_concurrent_reader(tmp: Path) -> None:
+    """write_atomic() replacing the costs file while another thread reads it with progress_costs.load() every
+    millisecond, as smartcut processes do at their first edit: no write fails and no read falls back to the built-in
+    costs. On Windows a file open elsewhere can't be replaced, nor opened while it is being replaced
+    (PermissionError): with a reader in a tight loop 160 of 300 writes failed and 282 reads fell back. A file held
+    open for 0.3 s is replaced once it is closed; one held open for longer than the retries raises the error.
+    (A reader in a tight loop, under heavy load, could still hold the file open for all of the ~1.8 s of retries.)"""
+    import threading  # noqa: PLC0415
+    import time  # noqa: PLC0415
+    target = tmp / "concurrent" / "progress_costs.json"
+    target.parent.mkdir()
+    cp.write_atomic(target, progress_costs.to_json(progress_costs.BUILT_IN))
+    if sys.platform == "win32":  # held open for 0.3 s: the replace waits for it
+        opened = threading.Event()
+
+        def hold() -> None:
+            with open(target, encoding="utf-8"):
+                opened.set()
+                time.sleep(0.3)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        opened.wait()
+        try:
+            cp.write_atomic(target, "after the reader\n")
+        finally:
+            holder.join()
+        assert target.read_text(encoding="utf-8") == "after the reader\n"
+        cp.write_atomic(target, progress_costs.to_json(progress_costs.BUILT_IN))
+    stop, fallbacks, failures = [False], [], []
+
+    def reader() -> None:
+        while not stop[0]:
+            costs, messages = progress_costs.load(target)
+            if costs is progress_costs.BUILT_IN:
+                fallbacks.append(messages)
+            time.sleep(0.001)
+
+    thread = threading.Thread(target=reader)
+    thread.start()
+    try:
+        for i in range(100):
+            try:
+                cp.write_atomic(target, progress_costs.to_json(progress_costs.BUILT_IN, {"host": f"h{i}"}))
+            except OSError as e:
+                failures.append(repr(e))
+    finally:
+        stop[0] = True
+        thread.join()
+    assert not failures and not fallbacks, f"{len(failures)} writes failed ({failures[:1]}), {len(fallbacks)} reads fell back ({fallbacks[:1]})"
+    assert sorted(p.name for p in target.parent.iterdir()) == ["progress_costs.json"], "temporary files left"
+    if sys.platform == "win32":
+        with open(target, encoding="utf-8"):
+            t = time.perf_counter()
+            try:
+                cp.write_atomic(target, "new\n")
+                raise AssertionError("a file held open can't be replaced on Windows: the error must be raised")
+            except PermissionError:
+                assert time.perf_counter() - t > 1.0, "retried before giving up"
+        assert sorted(p.name for p in target.parent.iterdir()) == ["progress_costs.json"], "temporary file left"
+
+
 # ------------------------------------------------------------------------------------------------------ smoke test
 
 def run_main(args: list[str], target: Path) -> tuple[str, dict]:
@@ -552,7 +643,9 @@ def main() -> int:
                            ("progress_timeline: evenness from the cut's real start", lambda: test_real_start(tmp)),
                            ("main() on a recording: the held-out check, the real runs and per edit, as decide() gets them",
                             lambda: test_main_recorded(tmp)),
-                           ("main(): the temporary work folder removed when it stops early", lambda: test_work_removed(tmp))):
+                           ("main(): the temporary work folder removed when it stops early", lambda: test_work_removed(tmp)),
+                           ("Atomic writes with a reader at the same time: none fails, no read falls back",
+                            lambda: test_concurrent_reader(tmp))):
             try:
                 test()
                 check(name, True)

@@ -52,8 +52,8 @@ What it does:
    --out), keeping the previous file as progress_costs.previous.json. Otherwise it writes
    progress_costs.candidate.json next to it and leaves the file alone. Either way it prints the comparison and
    "ADOPTED: ..." or "NOT ADOPTED: <every reason>. ...". Files are written to a temporary file next to them and
-   renamed over them (os.replace). The temporary work folder is removed however the calibration ends, unless --work
-   named it.
+   renamed over them (os.replace; on Windows retried while another process has the file open). The temporary work
+   folder is removed however the calibration ends, unless --work named it.
 
 Time, on one desktop core (the built-in costs' machine; a server core may be slower):
 - --make-media: H.264, VP9, AV1 at 360/720/1080p, ~20 min (VP9 ~10, AV1 ~7, HEVC another ~12); 6 min on a
@@ -623,9 +623,17 @@ def decide(*, quick: bool, pinned: bool, quiet: bool, facebook: bool, uncalibrat
     return not reasons, reasons
 
 
+REPLACE_TRIES = 12  # Windows: os.replace() tries over ~1.8 s while another process has the file open (see write_atomic)
+
+
 def write_atomic(path: Path, text: str) -> None:
     """Write text to path through a temporary file in its folder and os.replace(): readers (smartcut at a process's
-    first edit) see the old file or the new one, never part of it, also if this process stops midway."""
+    first edit) see the old file or the new one, never part of it, also if this process stops midway.
+
+    On Windows os.replace() fails with PermissionError while another process has the file open (Python opens files
+    without sharing their deletion): a smartcut process reading it at its first edit, or a virus scanner. That lasts
+    a moment, so it is retried with a short backoff (over ~1.8 s) before the error is raised. Linux replaces open
+    files."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
@@ -633,7 +641,18 @@ def write_atomic(path: Path, text: str) -> None:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        delay = 0.01
+        for _ in range(REPLACE_TRIES - 1):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if sys.platform != "win32":
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, 0.25)
+        else:
+            os.replace(tmp, path)  # the last try: its error is raised
     except BaseException:
         with contextlib.suppress(OSError):
             tmp.unlink()

@@ -19,6 +19,7 @@ import math
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -157,6 +158,23 @@ def parse(data: object, source: str = "progress_costs.json") -> ProgressCosts:
     return ProgressCosts(recode, copy, audio, source, measured if isinstance(measured, dict) else {})
 
 
+READ_TRIES = 20  # Windows: reads of a file being replaced, 50 ms apart (see _read_text)
+
+
+def _read_text(path: Path) -> str:
+    """The file's text. On Windows a file that calibrate_progress.py is replacing (os.replace) can't be opened for a
+    moment (PermissionError), so that is retried for up to ~1 s: the costs are read once per process, and a failed
+    read would leave it on the built-in costs for life."""
+    for _ in range(READ_TRIES - 1):
+        try:
+            return path.read_text(encoding="utf-8")
+        except PermissionError:
+            if sys.platform != "win32" or path.is_dir():
+                raise
+            time.sleep(0.05)
+    return path.read_text(encoding="utf-8")
+
+
 def load(path: str | os.PathLike | None = None) -> tuple[ProgressCosts, list[tuple[int, str]]]:
     """The costs to use, from path (default: progress_costs_path()), and the messages to log as (level, text).
     Falls back to BUILT_IN when there is no file or it can't be used; never raises."""
@@ -165,7 +183,7 @@ def load(path: str | os.PathLike | None = None) -> tuple[ProgressCosts, list[tup
     except Exception as e:  # no home folder for the default path (RuntimeError), ...
         return BUILT_IN, [(logging.WARNING, f"no path for progress_costs.json ({e!r}); using the built-in values")]
     try:
-        text = path.read_text(encoding="utf-8")
+        text = _read_text(path)
     except FileNotFoundError:
         return BUILT_IN, [(logging.INFO, f"built-in (no {path})")]
     except Exception as e:  # unreadable: permissions, a directory, ...

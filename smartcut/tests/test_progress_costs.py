@@ -10,6 +10,8 @@ Tests for progress_costs.py: a machine's progress_costs.json, and the fallback t
 6. An edit with a broken file still succeeds (and logs a warning); one with a valid file weighs its work with the
    file's costs
 7. Without a home folder for the default path: the built-in costs and a warning, no error
+8. Windows: a read refused while calibrate_progress.py replaces the file (PermissionError) is retried; elsewhere,
+   and for a folder, the built-in costs at once
 
 Usage (from the repo root):
     python smartcut/tests/test_progress_costs.py
@@ -207,6 +209,36 @@ def test_no_home(tmp: Path) -> None:
     assert costs is progress_costs.BUILT_IN and warned(messages, "home directory"), messages
 
 
+def test_read_retried(tmp: Path) -> None:
+    # Windows: a file being replaced can't be opened for a moment (PermissionError); the read is retried, else the
+    # process would keep the built-in costs for life. Elsewhere, and for a folder, it falls back at once
+    path = write(tmp, "busy.json", VALID)
+    real_read, platform, tries = Path.read_text, sys.platform, []
+
+    def busy_twice(self: Path, *args, **kw) -> str:  # noqa: ANN002, ANN003
+        if self == path:
+            tries.append(1)
+            if len(tries) <= 2:
+                raise PermissionError(13, "Permission denied", str(self))
+        return real_read(self, *args, **kw)
+
+    Path.read_text = busy_twice  # type: ignore[method-assign]
+    try:
+        sys.platform = "win32"
+        costs, messages = progress_costs.load(path)
+        assert costs.recode["h264"] == (0.002, 0.03, 0.5, 0.02) and len(tries) == 3, (len(tries), messages)
+        tries.clear()
+        sys.platform = "linux"
+        costs, messages = progress_costs.load(path)
+        assert costs is progress_costs.BUILT_IN and warned(messages, "can't read") and len(tries) == 1, (len(tries), messages)
+    finally:
+        Path.read_text, sys.platform = real_read, platform  # type: ignore[method-assign]
+    folder = tmp / "a_folder.json"
+    folder.mkdir()
+    costs, messages = progress_costs.load(folder)
+    assert costs is progress_costs.BUILT_IN and messages[0][0] == logging.WARNING, messages
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
@@ -216,7 +248,8 @@ def main() -> int:
                  ("SMARTCUT_PROGRESS_COSTS, else the per-user default path", test_paths),
                  ("Loaded and logged once per process", test_logged_once),
                  ("Edits work with a broken file, and weigh their work with a valid one's costs", test_edit_with_files),
-                 ("No home folder for the default path: the built-in costs, no error", test_no_home)]
+                 ("No home folder for the default path: the built-in costs, no error", test_no_home),
+                 ("Windows: a read refused while the file is replaced is retried", test_read_retried)]
         failed = 0
         for name, test in tests:
             try:
