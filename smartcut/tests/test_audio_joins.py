@@ -368,7 +368,7 @@ def main() -> int:
             failed += problem is not None
             name = f"AAC in {ext.upper()}: no source audio across a join"
             print(f"✗ FAIL - {name}: {problem}" if problem else f"✓ PASS - {name}")
-        for name, acodec, copied in (("AAC", "aac", True),):
+        for name, acodec, copied in (("AAC", "aac", True), ("MP3", "libmp3lame", False)):
             total += 1
             src = tmp / f"kf_{acodec}.mp4"
             make_source(src, "libx264", acodec, 44100, "noise")

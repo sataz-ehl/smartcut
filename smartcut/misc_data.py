@@ -44,7 +44,8 @@ class CutSegment:
     fade_info: FadeInfo | None = None  # Fade information for this segment
     orig_segment_start: Fraction | None = None  # Original segment start for fade calculation
     orig_segment_end: Fraction | None = None  # Original segment end for fade calculation
-    # The segment this piece belongs to starts / ends at a join: its neighbour in the output file comes from elsewhere
-    # in the source (fork addition; re-encoded audio gets a short fade there, see RecodeAudioCutter)
-    join_before: bool = False
-    join_after: bool = False
+    # Where the segment this piece belongs to starts / ends at a join, i.e. its neighbour in the output file comes from
+    # elsewhere in the source: its first piece's start, its last piece's end (whole GOPs in KEYFRAMES mode); None if
+    # not at a join (fork addition; re-encoded audio gets a short fade there, see RecodeAudioCutter)
+    join_start: Fraction | None = None
+    join_end: Fraction | None = None

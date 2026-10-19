@@ -584,32 +584,26 @@ class RecodeAudioCutter:
         """Flush the encoder at the end of all segments."""
         return self._mux_ready(self.encoder.encode(None))
 
-    def _fade_durations(self, cut_segment: CutSegment) -> tuple[Fraction, Fraction]:
-        """Fade-in and fade-out of the segment this piece belongs to: the user's audio fades, and at least JOIN_FADE
-        where the segment starts or ends at a join (0: none)."""
-        fade = cut_segment.fade_info
-        fade_in = (fade.audio_fadein_duration if fade is not None else None) or Fraction(0)
-        fade_out = (fade.audio_fadeout_duration if fade is not None else None) or Fraction(0)
-        if cut_segment.join_before:
-            fade_in = max(fade_in, self.JOIN_FADE)
-        if cut_segment.join_after:
-            fade_out = max(fade_out, self.JOIN_FADE)
-        return fade_in, fade_out
-
     def _apply_fade(self, chunk: np.ndarray, start: int, cut_segment: CutSegment) -> np.ndarray:
-        """Multiply by a per-sample gain ramp. Fades use the original segment bounds, so a segment that
-        spans several cut segments gets one continuous fade. Returns chunk itself when nothing fades."""
-        fade_in, fade_out = self._fade_durations(cut_segment)
-        if not (fade_in or fade_out):
+        """Multiply by a per-sample gain ramp: the user's audio fades from the requested segment bounds, so a segment
+        that spans several cut pieces gets one continuous fade, and the JOIN_FADE ramps from where the segment's
+        pieces start and end at a join (CutSegment.join_start / join_end; whole GOPs in KEYFRAMES mode). The lower
+        gain wins, so on a side the longer fade applies. Returns chunk itself when nothing fades."""
+        fade = cut_segment.fade_info
+        seg_start = cut_segment.orig_segment_start if cut_segment.orig_segment_start is not None else cut_segment.start_time
+        seg_end = cut_segment.orig_segment_end if cut_segment.orig_segment_end is not None else cut_segment.end_time
+        ramps_in = [(seg_start, fade.audio_fadein_duration if fade is not None else None), (cut_segment.join_start, self.JOIN_FADE)]
+        ramps_out = [(seg_end, fade.audio_fadeout_duration if fade is not None else None), (cut_segment.join_end, self.JOIN_FADE)]
+        ramps_in = [(float(at), float(length)) for at, length in ramps_in if at is not None and length]
+        ramps_out = [(float(at), float(length)) for at, length in ramps_out if at is not None and length]
+        if not (ramps_in or ramps_out):
             return chunk
-        seg_start = float(cut_segment.orig_segment_start if cut_segment.orig_segment_start is not None else cut_segment.start_time)
-        seg_end = float(cut_segment.orig_segment_end if cut_segment.orig_segment_end is not None else cut_segment.end_time)
         t = (start + np.arange(chunk.shape[1])) / self.rate
         gain = np.ones(chunk.shape[1])
-        if fade_in:
-            gain = np.minimum(gain, np.clip((t - seg_start) / float(fade_in), 0, 1))
-        if fade_out:
-            gain = np.minimum(gain, np.clip((seg_end - t) / float(fade_out), 0, 1))
+        for at, length in ramps_in:
+            gain = np.minimum(gain, np.clip((t - at) / length, 0, 1))
+        for at, length in ramps_out:
+            gain = np.minimum(gain, np.clip((at - t) / length, 0, 1))
         if gain.min() >= 1.0:  # a piece away from the segment's ends
             return chunk
         result = chunk * gain.astype(chunk.dtype)
@@ -617,7 +611,7 @@ class RecodeAudioCutter:
             orig_peak = float(np.abs(chunk).max())
             peak = float(np.abs(result).max())
             reduction = (1 - peak / orig_peak) * 100 if orig_peak > 0 else 0
-            print(f"[AUDIO_FADE] t={t[0] - seg_start:.3f}..{t[-1] - seg_start:.3f}s | gain {gain.min():.3f}..{gain.max():.3f} | "
+            print(f"[AUDIO_FADE] t={t[0] - float(seg_start):.3f}..{t[-1] - float(seg_start):.3f}s | gain {gain.min():.3f}..{gain.max():.3f} | "
                   f"peak {orig_peak:.6f} → {peak:.6f} ({reduction:.1f}% reduction)", file=sys.stderr)
         return result
 

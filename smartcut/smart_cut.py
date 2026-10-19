@@ -437,7 +437,9 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
         output_files = [(out_path, adjusted_segment_times[-1])]
 
     # The cut pieces of each output file, and its joins (fork addition): consecutive pieces that aren't contiguous in
-    # the source. The pieces of one segment are, and so are segments that touch.
+    # the source. The pieces of one segment are, and so are segments that touch. Each piece gets where its segment's
+    # pieces start and end at a join: the audio's join fades are timed from what is actually kept there (whole GOPs
+    # in KEYFRAMES mode; the requested bounds muted the audio the video kept beyond them).
     file_pieces: list[range] = []
     file_has_joins: list[bool] = []
     for _, (_, file_end) in output_files:
@@ -445,15 +447,16 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
         while last < len(cut_segments) and cut_segments[last].start_time < file_end:
             last += 1
         file_pieces.append(range(first, last))
-        starts_at_join, ends_at_join = set(), set()  # segment indices
+        join_start: dict[int, Fraction] = {}  # per segment index: its first piece's start, if at a join
+        join_end: dict[int, Fraction] = {}  # its last piece's end, if at a join
         for i in range(first + 1, last):
             if cut_segments[i].start_time != cut_segments[i - 1].end_time:
-                starts_at_join.add(piece_segment[i])
-                ends_at_join.add(piece_segment[i - 1])
+                join_start[piece_segment[i]] = cut_segments[i].start_time
+                join_end[piece_segment[i - 1]] = cut_segments[i - 1].end_time
         for i in range(first, last):
-            cut_segments[i].join_before = piece_segment[i] in starts_at_join
-            cut_segments[i].join_after = piece_segment[i] in ends_at_join
-        file_has_joins.append(bool(starts_at_join))
+            cut_segments[i].join_start = join_start.get(piece_segment[i])
+            cut_segments[i].join_end = join_end.get(piece_segment[i])
+        file_has_joins.append(bool(join_start))
 
     keyframes = video_settings.mode == VideoExportMode.KEYFRAMES
     setups: dict[tuple[int, str], AudioRecode | str] = {}  # recode_setup per (track, output format)

@@ -93,7 +93,7 @@ smartcut.process_segments("in.mp4", "out.mp4", [
 ## Implementation
 | File | Fade-related code |
 |---|---|
-| `misc_data.py` | `FadeInfo` (video/audio fade-in/out durations), `SegmentWithFade`; `CutSegment.fade_info`, `orig_segment_start/end`, `join_before/join_after` |
+| `misc_data.py` | `FadeInfo` (video/audio fade-in/out durations), `SegmentWithFade`; `CutSegment.fade_info`, `orig_segment_start/end`, `join_start/join_end` |
 | `progress_costs.py` | The progress estimate's costs: built-in, or a machine's own `progress_costs.json` (validated, with a fallback) |
 | `smart_cut.py` | `smart_cut()` accepts `SegmentWithFade` lists; attaches fade info and segment bounds to the cut pieces, marks the GOPs that overlap a video fade for re-encoding, finds each output's joins and picks `RecodeAudioCutter` for the audio tracks a copy wouldn't be exact for |
 | `video_cutter.py` | `VideoCutter._apply_fade_to_frame()` / `_fade_yuv_frame()`: per-frame video fade in the re-encode path; faster VP9/AV1 encoder settings |
@@ -164,6 +164,10 @@ whole, if that can be done faithfully** (decided; `audio_needs_recode()` and `re
   - Copied MP3 had ~50 ms of silence after every join: a frame can take bits from earlier frames (the bit reservoir).
 - **Fades at joins.** At every join of a re-encoded track, the earlier segment fades out over its last 3 ms and the
   later one fades in over its first 3 ms (`RecodeAudioCutter.JOIN_FADE`).
+  - They are timed from what the output keeps at the join: the segment's first piece's start and its last piece's
+    end (`CutSegment.join_start` / `join_end`, decided). Those are the requested bounds, except in KEYFRAMES mode,
+    which keeps whole GOPs; timed from the requested bounds, a re-encoded KEYFRAMES join was silent while the video
+    went on (1.2 s of a 6 s output). The user's audio fades stay on the requested bounds.
   - Not at the very start or end of the output, and not between segments that touch.
   - On a side with a user audio fade, the longer of the two applies.
   - Edits with fades get them too: before, their re-encoded joins were hard cuts.
