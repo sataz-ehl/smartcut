@@ -4,9 +4,15 @@
 
 Runs run_cases.py's cases (those whose media exists) and prints per case: total time, number of progress
 updates, the longest stretch without an update, and how far the progress shown is from an even pace (the share of
-the time elapsed; 0 = perfectly even): at the updates ("max off %"), and over the whole run ("shown off %": also the
-value still shown just before each update, so a pause counts). The time before the first update (opening and
-indexing the input) is reported separately and not counted.
+the time elapsed; 0 = perfectly even):
+- "real off %": at the updates, from the cut's real start ("start s": its first piece; before it the input is opened
+  and indexed, which the estimate can't see). Changes are judged on this one.
+- "max off %": at the updates, from the first update ("first s"), as measured before Oct 2026. It leaves out the wait
+  for the first update: with AV1 that is the first encoder run's keyframe (2-4 s at 720p-1080p on one core, see
+  smart_cut.py), so it flatters AV1.
+- "shown off %": over the whole run from the first update: also the value still shown just before each update, so a
+  pause counts.
+"max gap s", the longest stretch without an update, counts from the first update, as before.
 
 --calibrate also times every cut piece (the whole loop iteration, muxing and audio passthrough included). It
 prints per case the re-encode cost per frame and the cost per copied frame. Per codec it fits the
@@ -211,7 +217,7 @@ def fit_recode_cost(runs: list[dict], shape: tuple[float, float] | None = None
 
 def evenness(calls: list[tuple[float, float]], first: float, total: float) -> tuple[float, float]:
     """(at the updates, over the whole run): the largest distance between the progress shown and the share of the
-    time elapsed since the first update."""
+    time elapsed since first: the first update's time, or the cut's real start (install_start_timer)."""
     work_time = total - first
     if work_time <= 0:
         return 0.0, 0.0
@@ -221,6 +227,23 @@ def evenness(calls: list[tuple[float, float]], first: float, total: float) -> tu
         shown = max(shown, abs(prev - (t - first) / work_time))
         prev = f
     return at, max(shown, abs(prev - 1.0))
+
+
+def install_start_timer() -> list[float]:
+    """The times (perf_counter) the video cutter starts a piece, from the next process_segments call on (clear the list
+    between calls): the first is the cut's real start. VideoCutter.segment exists in every smartcut version, so --repo
+    can measure older ones."""
+    from smartcut import video_cutter  # noqa: PLC0415
+    vc = video_cutter.VideoCutter
+    orig, started = vc.segment, []
+
+    def segment(self, s):  # noqa: ANN001, ANN202
+        if not started:
+            started.append(time.perf_counter())
+        return orig(self, s)
+
+    vc.segment = segment
+    return started
 
 
 def main():
@@ -241,10 +264,11 @@ def main():
     stats, runs = defaultdict(float), []
     if args.calibrate:
         install_timers(stats, runs)
+    started = install_start_timer()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"{'case':<16} {'total s':>7} {'first s':>7} {'updates':>7} {'max gap s':>9} {'at %':>5} {'max off %':>9} {'shown off %':>11}"
-          + ("  re-encode ms/frame at MP  copy us/frame" if args.calibrate else ""))
+    print(f"{'case':<16} {'total s':>7} {'start s':>7} {'first s':>7} {'updates':>7} {'max gap s':>9} {'at %':>5} {'real off %':>10} "
+          f"{'max off %':>9} {'shown off %':>11}" + ("  re-encode ms/frame at MP  copy us/frame" if args.calibrate else ""))
     rows = []
     for case in args.cases or CASES:
         src, segs = CASES[case] if case in CASES else CALIBRATION_CASES[case]
@@ -252,6 +276,7 @@ def main():
             continue
         before = dict(stats)
         calls = []
+        started.clear()
         t0 = time.perf_counter()
         ok = smartcut.process_segments(str(args.media_dir / src), str(args.out_dir / f"{case}.mp4"),
                                        segments=[dict(s) for s in segs],
@@ -265,7 +290,9 @@ def main():
         values = [0.0] + [f for _, f in calls] + [1.0]
         gap, at = max((times[i + 1] - times[i], values[i]) for i in range(len(times) - 1))
         off, shown = evenness(calls, first, total)
-        rows.append((off, shown))
+        start = min(started[0] - t0, first) if started else first
+        real = evenness(calls, start, total)[0]
+        rows.append((real, off, shown))
         frames = stats["recode_frames"] - before.get("recode_frames", 0.0)
         seconds = (stats["recode_s"] + stats["flush_s"]) - (before.get("recode_s", 0.0) + before.get("flush_s", 0.0))
         per_frame = f"  {seconds / frames * 1000:7.1f} at {stats['megapixels']:.2f}" if args.calibrate and frames else ""
@@ -273,14 +300,15 @@ def main():
         if args.calibrate and copy_frames:
             copy_us = (stats["copy_s"] - before.get("copy_s", 0.0)) / copy_frames * 1e6
             per_frame = f"{per_frame or ' ' * 18}  {copy_us:13.0f}"
-        print(f"{case:<16} {total:7.1f} {first:7.1f} {len(calls):7d} {gap:9.2f} {at * 100:5.0f} {off * 100:9.1f} {shown * 100:11.1f}{per_frame}")
+        print(f"{case:<16} {total:7.1f} {start:7.1f} {first:7.1f} {len(calls):7d} {gap:9.2f} {at * 100:5.0f} {real * 100:10.1f} "
+              f"{off * 100:9.1f} {shown * 100:11.1f}{per_frame}")
         if args.timeline:
             shown_at = [max([f for t, f in calls if t <= total * k / 20], default=0.0) for k in range(1, 21)]
             print("  time %:     " + " ".join(f"{k * 5:3d}" for k in range(1, 21)))
             print("  progress %: " + " ".join(f"{f * 100:3.0f}" for f in shown_at))
     if len(rows) > 1:
-        print(f"{'mean':<16} {'':>7} {'':>7} {'':>7} {'':>9} {'':>5} {np.mean([r[0] for r in rows]) * 100:9.1f} "
-              f"{np.mean([r[1] for r in rows]) * 100:11.1f}")
+        print(f"{'mean':<16} {'':>7} {'':>7} {'':>7} {'':>7} {'':>9} {'':>5} {np.mean([r[0] for r in rows]) * 100:10.1f} "
+              f"{np.mean([r[1] for r in rows]) * 100:9.1f} {np.mean([r[2] for r in rows]) * 100:11.1f}")
 
     if args.calibrate and runs:
         print("\nMeasured re-encode cost per frame, (fixed, per_mp, busy, fade) as in progress_costs.RECODE_COST, least squares "
