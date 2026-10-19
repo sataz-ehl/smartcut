@@ -424,6 +424,7 @@ class RecodeAudioCutter:
         self.buf = np.zeros((self.channels, 0), np.float32)
         self.buf_start = 0
         self.next_packet: int | None = None  # None: the decoder must be (re)started before decoding
+        self.drained = False  # the decoder was flushed after the last packet
         self.resampler: av.AudioResampler | None = None
 
     def segment(self, cut_segment: CutSegment) -> list[Packet]:
@@ -501,6 +502,11 @@ class RecodeAudioCutter:
         while buf_end < end and self.next_packet is not None and self.next_packet < len(self.track.packets):
             buf_end = self._decode_packet(self.track.packets[self.next_packet], pending, buf_end)
             self.next_packet += 1
+        if buf_end < end and self.next_packet == len(self.track.packets) and not self.drained:
+            # The decoder can hold frames back: frame-threaded decoders (FLAC, ALAC, ...) by up to a frame per thread,
+            # ~1 s of FLAC on 12 threads, which the output's end lost (fork fix)
+            self.drained = True
+            buf_end = self._decode_packet(None, pending, buf_end)
         if pending:
             self.buf = np.concatenate([self.buf, *pending], axis=1)
 
@@ -521,12 +527,14 @@ class RecodeAudioCutter:
         first = int(np.searchsorted(self.track.frame_times_pts, start_pts, side='right')) - 1
         self.next_packet = max(first - self.PREROLL_PACKETS, 0)
         self.decoder.flush_buffers()
+        self.drained = False
         self.resampler = av.AudioResampler(format='fltp', layout=self.layout_name, rate=self.rate)
         self.buf = np.zeros((self.channels, 0), np.float32)
         self.buf_start = start
 
-    def _decode_packet(self, packet: Packet, pending: list[np.ndarray], buf_end: int) -> int:
-        """Decode one packet, append its samples to `pending` and return the new buffer end."""
+    def _decode_packet(self, packet: Packet | None, pending: list[np.ndarray], buf_end: int) -> int:
+        """Decode one packet (None: drain the decoder), append its samples to `pending` and return the new buffer
+        end."""
         for frame in self.decoder.decode(packet):
             if frame.pts is None:
                 continue
