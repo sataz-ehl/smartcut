@@ -73,7 +73,9 @@ re-encoded run's first frame, a keyframe, in a single call (2.1-2.4 s at 720p, 3
 and accepted, see `smart_cut.py`). The costs are a desktop core's (`progress_costs.py`). A machine's
 own, measured there by `tests/regression/calibrate_progress.py`, come from the `progress_costs.json` that
 `SMARTCUT_PROGRESS_COSTS` names, else `~/.config/smartcut/` or `%APPDATA%\smartcut\`. A broken file falls back to the
-built-in costs with a warning. They honour `cancel_check()`: it is polled before every
+built-in costs with a warning. The calibration adopts new costs only if they are more even by 0.5 points on edits
+they weren't fitted on and in fresh runs, no edit is worse by more than 1.5 points in either, and H.264, VP9 and AV1
+were all calibrated (the regression README, "The adoption rule"). They honour `cancel_check()`: it is polled before every
 GOP and after every re-encoded frame, also each frame an encoder flush outputs and the last flush at the end of the
 output (also without a progress callback). Processing stops within a frame, the partial output is removed and the
 call returns `False`. Once it returned True it isn't polled again, so True once is enough, and the encoder's
@@ -401,10 +403,10 @@ Run from the repo root (tests live in `smartcut/tests/`):
 | `test_audio_joins.py` | Copied or re-encoded as the rule says; A/V sync within 1.5 ms at the start and every join; level and clicks at the joins (AAC, AC-3, MP3, Opus; mono, stereo, 5.1; MP4, MKV, WebM; HE-AAC with a media dir); copies into MP4 end at the cut; KEYFRAMES mode (AAC copied; MP3, FLAC and ALAC re-encoded at the joins, the lossless ones bit-identical) |
 | `test_audio_decode.py` | Decoding for re-encodes: Opus (10 and 20 ms packets) after a jump as in a continuous decode; a copy's pre-roll without packet durations; a backwards timestamp jump of three frames; a one-tick gap; resampled re-encodes in sync, also across a gap in the source; a frame-threaded decoder drained (4 threads, on any number of CPUs) |
 | `test_audio_faithful.py` | Re-encodes keep the codec, sample format, bit depth and layout: lossless ones bit-identical outside the join fades (FLAC, ALAC, PCM); the source's tags but not its encoder's name; otherwise copied with a warning (AAC "6 channels"; MP2 in MP4, never re-encoded as MP3; DTS, TrueHD and 32-bit FLAC with the ffmpeg command); every file's reason warned in segment mode; WebM's clear error |
-| `test_progress_costs.py` | A machine's `progress_costs.json`: used when valid (an edit weighs its work with its costs); missing, malformed, other versions, out of range fall back to the built-in costs; paths, also without a home folder; logged once; edits with a broken file |
+| `test_progress_costs.py` | A machine's `progress_costs.json`: used when valid (an edit weighs its work with its costs); missing, malformed, other versions, out of range fall back to the built-in costs; paths, also without a home folder; logged once; edits with a broken file; a read refused while the file is replaced retried (Windows) |
 | `test_work_progress.py` | `_WorkProgress`, the progress estimate: frame costs, frames counted as the encoder outputs them, beyond or short of the estimate, the cap, cancelling |
 | `test_x265_options.py` | x265 options of HEVC re-encodes: the source's without its machine's threads, the lookahead cap, sources without options |
-| `test_calibrate_progress.py` | `calibrate_progress.py`: the adoption rule, held-out edits, CPU checks, file writes, memory release, `--cores`; `progress_timeline`'s evenness from the cut's real start; on a synthetic clip a `--quick` run that must not adopt, `main()` with the verdict forced, and its refusal of changed or missing clips (needs ffmpeg) |
+| `test_calibrate_progress.py` | `calibrate_progress.py`: the adoption rule (margin, per-edit guard, codecs not calibrated), held-out edits, CPU checks, file writes (retried on Windows while another process has the file open; a reader at the same time), memory release, `--cores`; `progress_timeline`'s evenness from the cut's real start; `main()` on a synthetic recording (what `decide()` is given, no encoding) and its work folder removed when it stops early; on a synthetic clip a `--quick` run that must not adopt, `main()` with the verdict forced, and its refusal of changed or missing clips (needs ffmpeg) |
 | `regression/` | Measurement-based regression harness, test media generator and diagnostic tools, e.g. `join_sync.py` for A/V sync at every join (see its README) |
 
 ## Usage Examples

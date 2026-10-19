@@ -125,8 +125,11 @@ These need no test media and run like the other test scripts (`python smartcut/t
   encoder outputs them (first in, first out), frames beyond or short of the estimate, the cap, cancelling.
 - `smartcut/tests/test_x265_options.py`: the x265 options of HEVC re-encodes: the source's reused without its
   machine's threading options, the lookahead cap (bframes + 1 when needed), sources without options, RECODE mode.
-- `smartcut/tests/test_calibrate_progress.py`: `calibrate_progress.py`'s adoption rule, held-out edits, CPU checks,
-  file writes, memory release and `--cores`' topology (unit tests); then, with the ffmpeg command (PATH or
+- `smartcut/tests/test_calibrate_progress.py`: `calibrate_progress.py`'s adoption rule (margin, per-edit guard,
+  codecs not calibrated), held-out edits, CPU checks, file writes (retried on Windows; a reader at the same time),
+  memory release and `--cores`' topology (unit tests); `main()` on a synthetic two-resolution recording, with no
+  encoding: what `decide()` gets from the held-out check and the paired real runs, overall and per edit, and its work
+  folder removed when it stops early; then, with the ffmpeg command (PATH or
   `SMARTCUT_TEST_FFMPEG`), on a synthetic clip: a `--quick` run, which must leave the file `SMARTCUT_PROGRESS_COSTS`
   names alone; `main()` with the verdict forced to adopt (what the rule is given, what an adoption writes); and the
   refusal of changed or missing clips (~1 min).
@@ -192,7 +195,12 @@ The calibration itself:
   - New costs outside the ranges smartcut accepts (`progress_costs.py`) stop the calibration with a message, and
     nothing is written.
   - Every file is written to a temporary file next to it and then renamed over it (`os.replace`), so smartcut never
-    reads half a file, also if the calibration is stopped midway.
+    reads half a file, also if the calibration is stopped midway. On Windows a file another process has open can't
+    be replaced, nor opened while it is being replaced (`PermissionError`): the rename is retried for ~1.8 s and
+    smartcut's read for ~1 s. Before, with a process reading the file in a loop, 160 of 300 writes failed and 282
+    reads fell back to the built-in costs, which a process then keeps; now none. Linux is unaffected.
+  - The temporary work folder (the edits' outputs) is removed however the calibration ends, also when it stops on a
+    failed edit; `--work` keeps it.
 - Restart the app after an adoption. smartcut reads the file at a process's first edit, and logs which costs it uses
   (logger `smartcut`, INFO).
 - `--quick` takes ~2 min: the smallest resolution, 2-segment edits, a 45 s excerpt when it makes the media. It is a
@@ -215,6 +223,14 @@ asks for a margin:
    **0.5 points** (`ADOPT_MARGIN`; mean largest distance from an even pace at the updates, from each edit's first
    update: both sets of costs are replayed on the same timings, so the time before the first update is the same for
    both), and:
+   - **no single edit gets worse by more than 1.5 points** in either check (`EDIT_GUARD`, decided; in the real runs
+     an edit's mean over its paired runs). A better mean can hide one edit made clearly worse: the 1-core
+     calibration's P2_h264_720p, the app's most common edit, went 3.68 -> 5.38 % in the held-out check (+1.70) and
+     3.45 -> 6.65 % in its last real run (+3.20). One edit's paired difference varied between two runs by sigma
+     0.26-0.48 points, at most 1.55, so 1.5 is past the noise;
+   - H.264, VP9 and AV1, the app's codecs, were all calibrated (`APP_CODECS`). A codec left out (e.g. `--codecs
+     h264`) would get the costs in use, scaled by the others' speed, written without any check. HEVC, which the app
+     doesn't offer, keeps the costs in use, scaled, unless `--codecs` includes it;
    - not `--quick`;
    - the pinning held (no encoder run or real run on more cores than expected);
    - the CPU check didn't warn: on one core, the median encoder run, or a real run of 1 s or more, got at least 0.85 of
@@ -227,20 +243,29 @@ asks for a margin:
      differently from source to source (`progress_timeline.fit_recode_cost`), which this check can't see;
    - a held-out check could be made: the plan has at least two resolutions for every codec held out.
 
-Every reason that applies is printed after `NOT ADOPTED:`:
+Every reason that applies is printed after `NOT ADOPTED:`, in this order:
 - `--quick is a smoke check, not a calibration`;
 - `the pinning didn't hold`;
 - `the CPU check warned of other load`;
 - `no Facebook clip: no held-out footage (make the media with --facebook)`;
+- `vp9, av1 not calibrated: their costs would be the costs in use, scaled, unchecked (see --codecs)` (one codec:
+  `av1 not calibrated: its costs would be ...`);
 - `no held-out check: ...`;
-- `not more even by 0.5 points (held-out edits X -> Y %, real runs X -> Y %)`.
+- `not more even by 0.5 points (held-out edits X -> Y %, real runs X -> Y %)`;
+- `<edit> worse by D points in the held-out check (X -> Y %)`, and `... in the real runs (X -> Y %)`: one per edit
+  and check (D with two decimals).
+
+An adoption prints `ADOPTED: more even by at least 0.5 points (held-out edits X -> Y %, real runs X -> Y %), no edit
+worse by more than 1.5 points. Wrote <file>`. The plan also says `not calibrated: vp9, av1 (see --codecs): it writes
+the candidate only` before any edit runs. The JSON's comparison block records `edit_guard` (1.5) next to `margin`.
 
 **The margin, from the noise measured.** The two checks compare two sets of costs on the same timings, so the
 timing noise largely cancels.
 - Each app edit of the two calibrations below ran twice: its calibration run and a fresh real run.
 - The paired difference (new minus in use) of one edit varied between its two runs by sigma 0.26-0.48 points.
-- The mean over the 7-10 edits of a check varied by sigma 0.10-0.17 points. The largest swing of one edit was 1.55
-  points (P2_h264_720p, one core).
+- The mean over a check's 7-10 edits varied by sigma 0.08-0.18 points (over the 7 app edits 0.10-0.18, over the 10
+  held-out ones 0.08-0.15; with the costs fitted on all the edits, or without the held-out ones). The largest swing
+  of one edit was 1.55 points (P2_h264_720p, one core).
 - 0.5 points is about 3 sigma of a check's mean, and about a tenth of a typical 4.5-5 % evenness.
 - A smaller gain isn't visible, while the built-in costs are the better tested ones (fitted on 29 edits, checked on
   26 with 3 runs each).
@@ -250,13 +275,15 @@ timing noise largely cancels.
 **Replayed verdicts** of the recorded calibrations on this PC (no encoding: `measure_result.json` and the last
 `real_result.json` of each). Mean evenness, in use -> new:
 
-| Calibration | Held-out check (10 edits) | Real runs, paired (7 edits) | Verdict |
-|---|---|---|---|
-| 1 core (`--cores 1`) | 4.69 -> 4.76 % (+0.07) | 4.74 -> 5.05 % (+0.31) | not adopted (right: the built-in costs are this setup's) |
-| 4 cores (`--cores 4`) | 6.03 -> 4.52 % (-1.51) | 7.00 -> 4.52 % (-2.48) | adopted |
-| `--quick`, 1 core | none (one resolution) | 5.74 -> 5.70 % | not adopted (the old rule adopted it) |
+| Calibration | Held-out check (10 edits) | Real runs, paired (7 edits) | Worst edit, held-out / real | Verdict |
+|---|---|---|---|---|
+| 1 core (`--cores 1`) | 4.69 -> 4.76 % (+0.07) | 4.74 -> 5.05 % (+0.31) | P2_h264_720p +1.70 / +3.20 | not adopted (right: the built-in costs are this setup's): the margin, and P2_h264_720p in both checks |
+| 4 cores (`--cores 4`) | 6.03 -> 4.52 % (-1.51) | 7.00 -> 4.52 % (-2.48) | P3F_h264_720p +0.49 / P2_vp9_720p +0.20 | adopted |
+| `--quick`, 1 core | none (one resolution) | 5.74 -> 5.70 % | | not adopted (the old rule adopted it) |
 
-The verdicts are the same with any margin from 0 to 1.5 points.
+The verdicts are the same with any margin from 0 to 1.5 points. With both recorded real runs of each edit (the
+calibration file's paired runs), the worst real-run edit is P2_h264_720p +2.31 (1 core) and P2_vp9_720p +0.20
+(4 cores): the same verdicts.
 
 ### When the server gets more (or fewer) cores
 
