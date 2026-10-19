@@ -455,6 +455,7 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             cut_segments[i].join_after = piece_segment[i] in ends_at_join
         file_has_joins.append(bool(starts_at_join))
 
+    keyframes = video_settings.mode == VideoExportMode.KEYFRAMES
     setups: dict[tuple[int, str], AudioRecode | str] = {}  # recode_setup per (track, output format)
     warned: set[int] = set()
 
@@ -471,7 +472,8 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
         tracks = set()
         for i, t in enumerate(audio_export_info.output_tracks[:len(media_container.audio_tracks)]):
             if t is None or t.codec != 'passthru' or not (
-                    has_audio_fades or audio_needs_recode(media_container, format_name, i, pieces[0], file_has_joins[file_index])):
+                    has_audio_fades or audio_needs_recode(media_container, format_name, i, pieces[0], file_has_joins[file_index],
+                                                          keyframes=keyframes)):
                 continue
             setup = setups.get((i, format_name))
             if setup is None:
@@ -538,9 +540,9 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                 for factory in external_generator_factories:
                     generators.append(factory(output_av_container))
 
-            # Re-encode the whole audio track with one encoder (see RecodeAudioCutter) with audio fades, or when a copy
-            # wouldn't be exact (audio_needs_recode: joins, a mid-stream start without an exact pre-roll copy, WebM).
-            # Otherwise the audio is copied untouched.
+            # Re-encode the whole audio track with one encoder (see RecodeAudioCutter) with audio fades, at joins, for
+            # lossless tracks starting mid-stream and in WebM (audio_needs_recode), when it can be done faithfully
+            # (recode_setup). Otherwise the audio is copied untouched.
             if audio_export_info is not None:
                 for track_i, track_export_settings in enumerate(audio_export_info.output_tracks):
                     if track_export_settings is not None and track_export_settings.codec == 'passthru':

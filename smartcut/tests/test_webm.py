@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Tests .webm outputs. WebM holds only Opus and Vorbis audio, so other audio (e.g. AAC) is re-encoded to Opus as a
-whole track, with or without audio fades. Opus audio is copied when the copy is exact: no audio fades, no join, and a
-start with the stream (WebM has no edit list to start a copy exactly mid-stream, so mid-stream starts re-encode).
+whole track, with or without audio fades. Opus audio is copied without audio fades or a join, also from mid-stream
+(decided: from the first whole packet after the cut, as WebM has no edit list).
 
 Checks: the output decodes completely, the audio track is Opus at 48 kHz and as long as the video, fades have the
 right gain, and copied Opus packets are byte-identical to the source's. Sources (VP9 + AAC, VP9 + Opus) are made
@@ -121,7 +121,7 @@ def main() -> int:
         cases = [("AAC -> Opus, no fades", "aac", False, False, 1), ("AAC -> Opus, audio fades", "aac", True, False, 1),
                  ("PCM (1536 kb/s) -> Opus at a lossy rate", "pcm_s16le", False, False, 1),
                  ("Opus copied from the start, no fades", "libopus", False, True, 0),
-                 ("Opus re-encoded from mid-stream, no fades", "libopus", False, False, 1),
+                 ("Opus copied from mid-stream, no fades", "libopus", False, True, 1),
                  ("Opus re-encoded, audio fades", "libopus", True, False, 1)]
         for i, (name, codec, fades, copied, start) in enumerate(cases):
             total += 1

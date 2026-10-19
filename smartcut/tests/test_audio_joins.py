@@ -2,13 +2,15 @@
 """
 Tests that cut audio stays in sync with the video, at the start and at every join, without level changes or clicks.
 
-Audio is copied only when the copy is exact (track_cutters.audio_needs_recode), otherwise re-encoded as a whole:
+Lossy audio is copied unless the output has a join or an audio fade (track_cutters.audio_needs_recode):
 - Joins: copied whole frames shifted A/V by up to a frame at every join (a random walk: AAC-LC -15.5 ms after
   5 joins), frames that overlap their neighbours (AAC, AC-3) decoded as a mix of both sides, and copied MP3 had
   ~50 ms of silence after a join (bit reservoir). Outputs with a join are re-encoded, with a 3 ms fade-out and
   fade-in at each join (a hard cut clicks).
-- Mid-stream starts: copied exactly only into MP4 (AAC, AC-3 and Opus, with pre-roll packets the edit list or the
-  Opus pre-skip skips). Matroska / WebM outputs, and other codecs, are re-encoded.
+- Mid-stream starts are copied (decided): exactly into MP4 for AAC, AC-3 and Opus (pre-roll packets the edit list
+  or the Opus pre-skip skips); into Matroska / WebM, and MP3 anywhere, from the first whole frame after the cut, so
+  their first ~100 ms aren't level-checked.
+- KEYFRAMES mode copies the audio (decided), and its joins stay in sync with the whole GOPs it keeps.
 
 Checks per case, against the source:
 - copied or re-encoded, as the rule says
@@ -52,6 +54,7 @@ START = [{"start": 1.37, "end": 4.6}]  # a single segment starting mid-stream
 FROM_0 = [{"start": 0, "end": 3}]  # from the media start: copied in any container
 TOUCHING = [{"start": 1.37, "end": 2.5}, {"start": 2.5, "end": 4.6}]  # contiguous in the source: no join
 FADES = [{"start": 0.9, "end": 2.37, "audio_fadeout": 0.001}, {"start": 2.9, "end": 4.1, "audio_fadein": 0.5}]
+KEYFRAMES = [{"start": 0.9, "end": 2.37}, {"start": 4.6, "end": 6.3}]  # KEYFRAMES mode: GOPs 0-2 and 4-6, a join
 GAP = (3.0, 5.0)  # source audio left out here
 GAP_SEGMENTS = [{"start": 0.9, "end": 3.5}, {"start": 4.6, "end": 6.3}]  # the join falls inside the gap
 
@@ -191,8 +194,12 @@ def check(src_path: Path, out_path: Path, segments: list[dict], copied: bool, si
     o = out["x"][-lead:] if lead < 0 else np.concatenate([np.zeros(lead), out["x"]])
     win = rate // 100
     bad = []
-    cold = not copied and segs[0][0] > src["vt"][0]  # a re-encode starting mid-stream: the encoder starts cold
-    for i in range(int(0.02 * rate) if cold else 0, min(len(o), total) - win, win):
+    mid_stream = segs[0][0] > src["vt"][0]
+    cold = not copied and mid_stream  # a re-encode starting mid-stream: the encoder starts cold
+    # A copy that starts at the first whole frame after the cut: up to a frame missing (HE-AAC: 43 ms), its first
+    # frame softened (Opus: ~40 ms; MP3: may be silent, the bit reservoir)
+    rough = copied and mid_stream and (out_path.suffix in (".mkv", ".webm") or "mp3" in out["codec"])
+    for i in range(int(0.1 * rate) if rough else int(0.02 * rate) if cold else 0, min(len(o), total) - win, win):
         ri = np.sqrt((ideal[i:i + win] ** 2).mean())
         if ri > 0.05 * AMPLITUDE:
             r = np.sqrt((o[i:i + win] ** 2).mean()) / ri
@@ -265,6 +272,58 @@ def check_gap(src_path: Path, out_path: Path) -> str | None:
     return None
 
 
+def check_keyframes(src_path: Path, out_path: Path, copied: bool) -> str | None:
+    """KEYFRAMES mode with KEYFRAMES's segments: every piece is a whole GOP. AAC is copied; MP3 is re-encoded at the joins (as main:
+    copied MP3 joins decoded ~50 ms of silence). Either way the audio runs with the video: in sync with each kept
+    GOP and at the source's level throughout (the join fades were timed from the requested bounds, inside the GOPs,
+    which muted 1.2 s of a 6 s output)."""
+    from smartcut.media_container import MediaContainer  # noqa: PLC0415
+    from smartcut.media_utils import VideoExportMode, VideoExportQuality  # noqa: PLC0415
+    from smartcut.misc_data import AudioExportInfo, AudioExportSettings  # noqa: PLC0415
+    from smartcut.smart_cut import smart_cut  # noqa: PLC0415
+    from smartcut.video_cutter import VideoSettings  # noqa: PLC0415
+    media = MediaContainer(str(src_path))
+    try:
+        segments = [(Fraction(s["start"]).limit_denominator(1000), Fraction(s["end"]).limit_denominator(1000))
+                    for s in KEYFRAMES]
+        error = smart_cut(media, segments, str(out_path), audio_export_info=AudioExportInfo([AudioExportSettings("passthru")]),
+                          video_settings=VideoSettings(VideoExportMode.KEYFRAMES, VideoExportQuality.NORMAL))
+    finally:
+        media.close()
+    if error is not None:
+        return f"smart_cut failed: {error}"
+    src, out = read(src_path), read(out_path)
+    same = sum(p in set(src["packets"]) for p in out["packets"])
+    if copied and same < len(out["packets"]):
+        return f"only {same}/{len(out['packets'])} audio packets copied, expected a copy"
+    if not copied and same > 2:
+        return f"{same}/{len(out['packets'])} audio packets copied, expected a re-encode"
+    rate, gop = src["rate"], 1.0  # 1 s GOPs: the kept GOPs are the whole seconds the segments touch
+    kept = sorted({k for a, b in segments for k in range(int(a), int(np.ceil(b)))})
+    runs, t = [], 0.0  # (output start, source start, length) per run of consecutive GOPs
+    for k in kept:
+        if runs and runs[-1][1] + runs[-1][2] == k * gop:
+            runs[-1] = (runs[-1][0], runs[-1][1], runs[-1][2] + gop)
+        else:
+            runs.append((t, k * gop, gop))
+        t += gop
+    if abs(len(out["vt"]) - len(kept) * FPS) > 1:
+        return f"{len(out['vt'])} video frames, expected {len(kept) * FPS}"
+    lead = round(out["a0"] * rate)
+    o = out["x"][-lead:] if lead < 0 else np.concatenate([np.zeros(lead), out["x"]])
+    win, m = rate // 100, 0.03  # 10 ms windows, away from the joins (copied joins mix two places for a frame)
+    for o0, s0, length in runs:
+        late = lag(src, out, out["vt"][round(o0 * FPS)] + 0.2, s0 + 0.2 + src["vt"][0])
+        if abs(late) > (0.025 if copied else 0.0015):  # a copied join is up to a frame off
+            return f"audio {late * 1000:+.2f} ms late at {o0 + 0.2:.2f} s"
+        for u in np.arange(m, length - m - 0.01, 0.01):  # where the audio is, from its lag
+            i, j = round((o0 + u) * rate), round((s0 + u - late - src["a0"]) * rate)
+            r = np.sqrt((o[i:i + win] ** 2).mean()) / max(np.sqrt((src["x"][j:j + win] ** 2).mean()), 1e-9)
+            if not 0.85 <= r <= 1.2:
+                return f"level {r:.2f} of the source at {o0 + u:.2f} s (source {s0 + u:.2f} s)"
+    return None
+
+
 def main() -> int:
     media = Path(sys.argv[1]) if len(sys.argv) > 1 else None
     cases = [  # name, video encoder, audio encoder, rate, container, segments, copied
@@ -273,14 +332,14 @@ def main() -> int:
         ("AAC in MP4: touching segments, copied", "libx264", "aac", 44100, "mp4", TOUCHING, True),
         ("AAC in MP4: joins with short and long fades", "libx264", "aac", 44100, "mp4", FADES, False),
         ("AAC in MKV: joins", "libx264", "aac", 48000, "mkv", JOINS, False),
-        ("AAC in MKV: mid-stream start", "libx264", "aac", 48000, "mkv", START, False),
+        ("AAC in MKV: mid-stream start, copied", "libx264", "aac", 48000, "mkv", START, True),
         ("AAC in MKV: from the start, copied", "libx264", "aac", 48000, "mkv", FROM_0, True),
         ("AC-3 in MP4: joins", "libx264", "ac3", 48000, "mp4", JOINS, False),
         ("AC-3 in MP4: mid-stream start, copied", "libx264", "ac3", 48000, "mp4", START, True),
         ("MP3 in MP4: joins", "libx264", "libmp3lame", 44100, "mp4", JOINS, False),
-        ("MP3 in MP4: mid-stream start", "libx264", "libmp3lame", 44100, "mp4", START, False),
+        ("MP3 in MP4: mid-stream start, copied", "libx264", "libmp3lame", 44100, "mp4", START, True),
         ("Opus in WebM: joins", "libvpx-vp9", "libopus", 48000, "webm", JOINS, False),
-        ("Opus in WebM: mid-stream start", "libvpx-vp9", "libopus", 48000, "webm", START, False),
+        ("Opus in WebM: mid-stream start, copied", "libvpx-vp9", "libopus", 48000, "webm", START, True),
         ("Opus in WebM: from the start, copied", "libvpx-vp9", "libopus", 48000, "webm", FROM_0, True),
         ("Opus in MP4: joins", "libvpx-vp9", "libopus", 48000, "mp4", JOINS, False),
         ("Opus in MP4: mid-stream start, copied", "libvpx-vp9", "libopus", 48000, "mp4", START, True),
@@ -309,11 +368,19 @@ def main() -> int:
             failed += problem is not None
             name = f"AAC in {ext.upper()}: no source audio across a join"
             print(f"✗ FAIL - {name}: {problem}" if problem else f"✓ PASS - {name}")
+        for name, acodec, copied in (("AAC", "aac", True),):
+            total += 1
+            src = tmp / f"kf_{acodec}.mp4"
+            make_source(src, "libx264", acodec, 44100, "noise")
+            problem = check_keyframes(src, tmp / f"out{total}.mp4", copied)
+            failed += problem is not None
+            name = f"KEYFRAMES mode, {name} in MP4, joins: " + ("copied" if copied else "re-encoded")
+            print(f"✗ FAIL - {name}: {problem}" if problem else f"✓ PASS - {name}")
         heaac = media / "synth_heaac.mp4" if media else None
         if heaac is not None and heaac.exists():  # real (noise-like) HE-AAC audio
             for name, segments, copied in (("HE-AAC in MP4: joins", JOINS, False),
                                            ("HE-AAC in MP4: mid-stream start, copied", START, True),
-                                           ("HE-AAC in MKV: mid-stream start", START, False)):
+                                           ("HE-AAC in MKV: mid-stream start, copied", START, True)):
                 total += 1
                 ext = "mkv" if "MKV" in name else "mp4"
                 problem = check(heaac, tmp / f"out{total}.{ext}", segments, copied, "noise")

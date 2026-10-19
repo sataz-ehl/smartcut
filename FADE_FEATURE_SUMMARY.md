@@ -114,27 +114,36 @@ smartcut.process_segments("in.mp4", "out.mp4", [
   At 1080p this takes ~14 ms per frame, against ~39 ms for the earlier RGB round trip.
 
 ### Audio
-**Copy only when the copy is exact; otherwise re-encode the whole track** (`audio_needs_recode()` in
-`track_cutters.py`).
+**Copy the track, unless it joins segments, fades, or is lossless and starts mid-stream; then re-encode it as a
+whole, if that can be done faithfully** (decided; `audio_needs_recode()` and `recode_setup()` in `track_cutters.py`).
 
-- A copy keeps the source's packets, which are whole frames. It is used only when it is exact: no audio fade in that
-  output, and
-  - **no join**: the output's segments are contiguous in the source (a single segment, or segments that touch);
-  - **a start that a copy can match**: with the source's audio, or mid-stream into an MP4-family output
-    (.mp4/.mov/.m4a) for AAC, AC-3/E-AC-3 and Opus. These copies include the packets just before the cut
-    (pre-roll: 50 ms for AAC/AC-3, 80 ms for Opus), at times before the output start. The MP4 edit list skips them,
-    and for Opus also the pre-skip, which is set to their length (`PrerollPassthruAudioCutter`,
-    `OpusPassthruAudioCutter`). Before PR #27 a mid-stream copy began at the first whole frame after the cut (up to
-    a frame after the video), and its first ~20 ms were low. A pre-roll that reaches the stream's first packet is
-    exact too.
-  - in WebM, an Opus or Vorbis track (the only audio WebM holds).
-- Otherwise every audio track of that output is re-encoded as one continuous stream (`RecodeAudioCutter`): decoded,
-  cut sample-accurately to each cut piece, faded, and fed to one encoder. That covers any codec when:
-  - the output has a join or an audio fade;
-  - it starts mid-stream into Matroska/WebM (no edit list);
-  - it starts mid-stream with a codec that has no pre-roll copy (MP3, FLAC, PCM, ...). FLAC and PCM re-encode
-    losslessly.
-  - it is a WebM output and the track's codec isn't Opus or Vorbis (re-encoded to Opus).
+- **Re-encoded** as one continuous stream (`RecodeAudioCutter`: decoded, cut sample-accurately to each cut piece,
+  faded, fed to one encoder), every audio track of an output that
+  - has a **join**: segments that aren't contiguous in the source (segments that touch aren't a join);
+  - has an **audio fade**;
+  - starts **mid-stream with a lossless track** (FLAC, ALAC, PCM, ...): the re-encode is exact, while a copy would
+    start at the first whole frame after the cut (FLAC: up to ~100 ms late);
+  - is a **WebM** output and the track isn't Opus or Vorbis (re-encoded to Opus, the only audio WebM holds besides
+    Vorbis).
+
+  ...but only if the re-encode is faithful (see "Faithful re-encodes only" below); otherwise the track is copied, with
+  a warning.
+- **Copied** (the source's packets, whole frames), every other track:
+  - one segment, or segments that touch, **from the source's start** or **mid-stream**:
+    - into an MP4-family output (.mp4/.mov/.m4a), AAC, AC-3/E-AC-3 and Opus start exactly at the cut. These copies
+      include the packets just before the cut (pre-roll: 50 ms for AAC/AC-3, 80 ms for Opus), at times before the
+      output start. The MP4 edit list skips them, and for Opus also the pre-skip, which is set to their length
+      (`PrerollPassthruAudioCutter`, `OpusPassthruAudioCutter`). A pre-roll that reaches the stream's first packet
+      is exact too.
+    - Other lossy tracks, and every lossy track into Matroska / WebM (no edit list), start at the first whole frame
+      after the cut (decided, as main): up to a frame late, with a softened first frame, then exact. Measured: AAC
+      into MKV silent for up to a frame; Opus into WebM silent for 10 ms, then x0.53-0.97 for 40 ms (the decoder
+      settling), in sync (+1.0 ms, Matroska's ms); MP3's first frame may decode silent (its bit reservoir). Main's
+      Opus pre-roll copy into WebM shifted every stream by 72 ms; the branch had re-encoded these.
+  - in **KEYFRAMES mode** (`VideoExportMode.KEYFRAMES`, decided: it promises a lossless, fast cut, as on main),
+    every track except for audio fades, WebM's Opus, and MP3 at a join (copied MP3 joins decode ~50 ms of silence).
+    Before, its joins were re-encoded, and their join fades, timed from the requested bounds inside the whole GOPs
+    kept, muted 1.2 s of a 6 s output.
 
   Mixing re-encoded and copied packets in one track instead left the encoder's buffered samples misplaced at the
   joins (an audible tick).

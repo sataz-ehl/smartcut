@@ -99,8 +99,8 @@ CASES = {
     # Many joins, no fades (audio re-encoded with 3 ms fades at the joins), and starts mid-stream into Matroska
     "J1_real_6seg":    ("real_h264_720p.mp4", SIX_SEGMENTS),
     "J2_fb_6seg":      ("fb_sd_h264.mp4", SIX_SEGMENTS),
-    "J3_mkv_start":    ("real_h264_720p.mp4", [{"start": 30.3, "end": 40}]),
-    "J4_mkv_heaac":    ("fb_sd_h264.mp4", [{"start": 30.3, "end": 40}, {"start": 50, "end": 55}]),
+    "J3_mkv_start":    ("real_h264_720p.mp4", [{"start": 30.3, "end": 40}]),  # copied from the first frame after the cut
+    "J4_mkv_heaac":    ("fb_sd_h264.mp4", [{"start": 30.3, "end": 40}, {"start": 50, "end": 55}]),  # re-encoded: a join
     "J5_mp4_start":    ("fb_sd_h264.mp4", [{"start": 30.3, "end": 40}]),  # copied: pre-roll and edit list
     # HEVC (x265: open GOPs with CRA keyframes and RASL leading pictures; and closed GOPs)
     "E1_hevc_cuts":    ("synth_hevc.mp4", [{"start": 5, "end": 9}, {"start": 12, "end": 17}]),

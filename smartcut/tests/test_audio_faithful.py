@@ -7,7 +7,8 @@ format (bit depth), the channel layout and the sample rate, and the encoder has 
 becomes AAC-LC (test_audio_joins.py with a media dir), and .webm outputs re-encode other codecs to Opus.
 
 Cases, each cut into three segments (two joins) or one mid-stream segment:
-- Lossless re-encodes keep the codec, the sample format and the bit depth, and every sample outside the 3 ms join
+- Lossless re-encodes (at joins, and for a mid-stream start, where a copy would start at the first whole frame
+  after the cut) keep the codec, the sample format and the bit depth, and every sample outside the 3 ms join
   fades is bit-identical to the source: FLAC 16 and 24 bits, ALAC 16 and 24 bits, PCM s16 / s24 / s32 / f32 / f64 /
   u8. Before, 24-bit FLAC came out as 16 bits, 16-bit ALAC as 24 bits, and PCM went through 32-bit float. PCM in
   Matroska has no channel layout ("2 channels"): kept, as lossless encoders store channels as they are.
@@ -131,14 +132,17 @@ def cut(src: Path, out: Path, segments: list[tuple[float, float]]) -> tuple[bool
     return ok, handler.messages
 
 
-def check_lossless(tmp: Path, codec: str, ext: str, layout: str, sample_format: str, bits: int) -> str | None:  # noqa: PLR0917
-    """A cut with two joins: the same codec, sample format and bits, samples bit-identical outside the join fades.
+def check_lossless(tmp: Path, codec: str, ext: str, layout: str, sample_format: str, bits: int,  # noqa: PLR0917
+                   segments: list[tuple[float, float]] = JOINS) -> str | None:
+    """A cut with two joins (or segments): the same codec, sample format and bits, samples bit-identical outside the
+    join fades.
 
     In Matroska, whose timestamps are in ms, a segment's audio may be placed up to 0.5 ms off (PCM packets of 33.3 ms;
     FLAC's 96 ms frames fall on whole ms): there the samples must be bit-identical at some offset within 0.5 ms."""
-    src, out = tmp / f"{codec}_{sample_format}_{bits}.{ext}", tmp / f"out_{codec}_{sample_format}_{bits}.{ext}"
-    make_source(src, codec, layout, sample_format, bits)
-    ok, warnings = cut(src, out, JOINS)
+    src, out = tmp / f"{codec}_{sample_format}_{bits}.{ext}", tmp / f"out_{codec}_{sample_format}_{bits}_{len(segments)}.{ext}"
+    if not src.exists():
+        make_source(src, codec, layout, sample_format, bits)
+    ok, warnings = cut(src, out, segments)
     if not ok:
         return "process_segments failed"
     s_name, s_fmt, s_layout, s_bits, sx, s_packets = decoded(src)  # PCM in Matroska has no layout: "2 channels"
@@ -149,14 +153,14 @@ def check_lossless(tmp: Path, codec: str, ext: str, layout: str, sample_format: 
         return "copied, expected a re-encode"
     if warnings:
         return f"warned: {warnings}"
-    expected = round(sum(b - a for a, b in JOINS) * RATE)
+    expected = round(sum(b - a for a, b in segments) * RATE)
     if abs(ox.shape[1] - expected) > RATE // 1000:
         return f"{ox.shape[1] / RATE:.3f} s of audio, expected {expected / RATE:.3f} s"
     t, m = 0.0, round(JOIN_FADE * RATE) + 2
     max_shift = RATE // 2000 if ext == "mkv" else 0
-    for k, (a, b) in enumerate(JOINS):
+    for k, (a, b) in enumerate(segments):
         i, j, n = round(t * RATE), round(a * RATE), round((b - a) * RATE)
-        lo, hi = (m if k else 0) + max_shift, n - (m if k < len(JOINS) - 1 else 2) - max_shift
+        lo, hi = (m if k else 0) + max_shift, n - (m if k < len(segments) - 1 else 2) - max_shift
         if not any(np.array_equal(ox[:, i + lo:i + hi], sx[:, j + lo + d:j + hi + d]) for d in range(-max_shift, max_shift + 1)):
             diff = np.argwhere(ox[:, i + lo:i + hi] != sx[:, j + lo:j + hi])
             return f"segment {k + 1}: {len(diff)} samples differ from the source, the first at {(lo + diff[0][1]) / RATE:.4f} s"
@@ -212,6 +216,9 @@ def main() -> int:
                 ("pcm_s32le", "mkv", "stereo", "s32", 32)):  # Matroska: no layout ("2 channels"), ms timestamps
             report(f"{codec} {sample_format} {bits}-bit {layout} in {ext.upper()}, joins: re-encoded bit-exact",
                    check_lossless(tmp, codec, ext, layout, sample_format, bits))
+        # A single segment from mid-stream: lossless tracks re-encode (exact), where a copy starts at the next frame
+        report("flac s32 24-bit stereo in MKV, mid-stream start: re-encoded bit-exact",
+               check_lossless(tmp, "flac", "mkv", "stereo", "s32", 24, [(1.37, 4.6)]))
 
         # Lossy codecs with an encoder: re-encoded as themselves (AAC 5.1 keeps its layout)
         mp2 = tmp / "mp2.mkv"

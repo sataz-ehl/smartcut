@@ -55,9 +55,10 @@ third-party content, so they are not committed.
 The audio columns are the first track's. Every other audio track gets the same checks (`track N:` in the notes
 gives its `A-V ms` and `aFadeErr`), and the output must have as many audio tracks as the source.
 
-The `W*` cases write `.webm` (AAC / HE-AAC audio re-encoded to Opus, Opus audio copied when exact). The `J*` cases
-have many joins (6 segments: audio re-encoded with 3 ms fades at the joins, in sync) and mid-stream starts into
-Matroska (`J3`, `J4` write `.mkv`) and MP4 (`J5`: a copy). The `E*` cases are HEVC: `synth_hevc.mp4` has x265's open
+The `W*` cases write `.webm` (AAC / HE-AAC audio re-encoded to Opus, Opus audio copied without a join or fades). The
+`J*` cases have many joins (6 segments: audio re-encoded with 3 ms fades at the joins, in sync) and mid-stream starts
+into Matroska (`J3`: one segment, copied from the first frame after the cut; `J4`: a join, re-encoded) and MP4 (`J5`:
+a copy with pre-roll). The `E*` cases are HEVC: `synth_hevc.mp4` has x265's open
 GOPs (CRA keyframes with RASL leading pictures, which smartcut re-encodes after a jump), `synth_hevc_closed.mp4`
 closed ones, and `real_hevc*.mp4` carry no x265 options, like camera footage.
 

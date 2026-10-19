@@ -429,32 +429,42 @@ def recode_setup(track: AudioTrack, format_name: str) -> AudioRecode | str:
     return AudioRecode(encoder, rate, layout.name, sample_format or '', bit_rate)
 
 
+_MP3_DECODERS = ('mp3', 'mp3float')
+
+
 def audio_needs_recode(media_container: MediaContainer, format_name: str, track_index: int, first_piece: CutSegment,
-                       has_joins: bool) -> bool:
+                       has_joins: bool, *, keyframes: bool = False) -> bool:
     """
-    True if a copy of the track into this output wouldn't be exact, so it is re-encoded as a whole (fork addition).
+    True if the track is to be re-encoded as a whole rather than copied (fork addition). smart_cut re-encodes it
+    if recode_setup allows, and re-encodes any track for audio fades.
 
     format_name: the output's FFmpeg format name. first_piece: the output's first cut piece. has_joins: the output
-    joins segments that aren't contiguous in the source.
+    joins segments that aren't contiguous in the source. keyframes: VideoExportMode.KEYFRAMES.
 
-    A copy keeps whole packets, so it is exact only
-    - without a join. At a join the copied frames end and start up to a frame off the cut: each join shifted A/V by
+    Re-encoded:
+    - in WebM, a track that isn't Opus or Vorbis: WebM holds no other audio;
+    - at a join. A copy keeps whole frames, which end and start up to a frame off the cut: each join shifted A/V by
       up to a frame (AAC-LC after 5 joins: -15.5 ms; HE-AAC: -27 ms, a random walk). Frames that overlap their
-      neighbours (AAC, AC-3) decode as a mix of both sides (level in 5 ms windows x0.48-x2.0 for AAC-LC, x0.13-x9.9
-      for HE-AAC), and MP3 frames that take bits from earlier frames (the bit reservoir) decoded as ~50 ms of
-      silence.
-    - starting with the stream, or mid-stream where a pre-roll copy starts exactly: MP4-family outputs with Opus, AAC
-      or AC-3 (see _copy_preroll). Otherwise the copy started at the first whole packet after the cut (up to a frame
-      late, and low for MDCT codecs). Re-encoding FLAC or PCM is lossless anyway.
-    - and in WebM only for Opus and Vorbis, the only audio WebM holds.
+      neighbours (AAC, AC-3) decoded as a mix of both sides (level in 5 ms windows x0.48-x2.0 for AAC-LC, x0.13-x9.9
+      for HE-AAC), and MP3 frames that take bits from earlier frames (the bit reservoir) as ~50 ms of silence;
+    - a lossless track (FLAC, ALAC, PCM, ...) starting mid-stream: its re-encode is exact, while a copy starts at the
+      first whole frame after the cut (FLAC: up to ~100 ms late).
+    Copied (decided):
+    - a lossy track without a join, also from mid-stream. Into MP4-family outputs AAC, AC-3/E-AC-3 and Opus start
+      exactly at the cut (pre-roll packets the edit list skips, see passthru_audio_cutter). Others, and every lossy
+      track into Matroska / WebM, start at the first whole frame after the cut: up to a frame late with a softened
+      first frame, then exact (MP3: the first frame may decode silent, its bit reservoir);
+    - in KEYFRAMES mode, which promises a lossless, fast cut (as main): every track but MP3 at a join.
     """
     track = media_container.audio_tracks[track_index]
     name = track.av_stream.codec_context.name
-    if (format_name == 'webm' and name not in _WEBM_AUDIO_DECODERS) or has_joins:
+    if format_name == 'webm' and not webm_holds(track):
         return True
-    if _first_copied_packet(track, first_piece.start_time) == 0:
-        return False  # the copy starts with the stream
-    return _copy_preroll(track, format_name) is None
+    if keyframes:
+        return has_joins and name in _MP3_DECODERS
+    if has_joins:
+        return True
+    return _is_lossless(name) and _first_copied_packet(track, first_piece.start_time) > 0
 
 
 def create_recode_audio_output_stream(
