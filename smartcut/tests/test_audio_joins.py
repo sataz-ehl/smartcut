@@ -18,6 +18,7 @@ Checks per case, against the source:
   audio; a steady tone is ambiguous), within 1.5 ms: Matroska / WebM timestamps are rounded to 1 ms, and MP4's edit
   list places the first video frame in FFmpeg's default movie timescale of 1000, up to 1 ms early (decided); the
   video starts where it should (nothing shifted)
+- the end of a copy into MP4: its last sample ends at the cut (stts and the edit list, within 1 ms)
 - level: 10 ms RMS against the ideal output (the source with the expected fades), 0.85-1.2, from the start through
   every join (copied MDCT joins had bursts up to x33). A re-encode that starts mid-stream starts the encoder cold at
   the cut, and its first 20 ms may reach x1.3 on a pure tone: not checked
@@ -27,7 +28,8 @@ Checks per case, against the source:
 Also a source without audio across a join (its audio packets left out from 3 to 5 s): the output keeps the timing
 with silence there, in sync on both sides.
 
-Sources (H.264 / VP9 video, 1 s GOPs, and a noise-like signal or a 440 Hz tone) are made with PyAV, no media needed.
+Sources (H.264 / VP9 video, 1 s GOPs, and a noise-like signal or a 440 Hz tone; mono, and stereo / 5.1 with
+independent noise per channel, checked channel by channel) are made with PyAV, no media needed.
 With a media dir argument, HE-AAC cases also run on its synth_heaac.mp4 (make_test_media.py; FFmpeg can't encode
 HE-AAC).
 
@@ -60,29 +62,30 @@ GAP_SEGMENTS = [{"start": 0.9, "end": 3.5}, {"start": 4.6, "end": 6.3}]  # the j
 
 
 def make_source(path: Path, video_codec: str, audio_codec: str, rate: int, signal: str, *,
-                gap: tuple[float, float] | None = None) -> None:
-    """signal: 'noise' (low-passed white noise, for correlation) or 'tone' (440 Hz, for clicks). gap: seconds whose
-    audio packets are left out."""
+                gap: tuple[float, float] | None = None, layout: str = "mono") -> None:
+    """signal: 'noise' (low-passed white noise, for correlation; independent in each channel) or 'tone' (440 Hz, for
+    clicks). gap: seconds whose audio packets are left out."""
     rng = np.random.default_rng(1)
-    n_all = SECONDS * rate
+    n_all, channels = SECONDS * rate, len(av.AudioLayout(layout).channels)
     if signal == "tone":
-        x = AMPLITUDE * np.sin(2 * np.pi * 440 * np.arange(n_all) / rate)
+        x = np.tile(AMPLITUDE * np.sin(2 * np.pi * 440 * np.arange(n_all) / rate), (channels, 1))
     else:
-        white = rng.standard_normal(n_all)
-        x = np.convolve(white, np.hanning(17), "same")  # below ~5 kHz: a second lossy generation keeps it closely
-        x *= AMPLITUDE / np.sqrt((x ** 2).mean())
+        white = rng.standard_normal((channels, n_all))
+        x = np.stack([np.convolve(w, np.hanning(17), "same") for w in white])  # below ~5 kHz: a second lossy generation keeps it closely
+        x *= AMPLITUDE / np.sqrt((x ** 2).mean(axis=1, keepdims=True))
     with av.open(str(path), "w") as out:
         video = out.add_stream(video_codec, rate=FPS)
         video.width, video.height, video.pix_fmt = 160, 96, "yuv420p"
         video.codec_context.options = ({"g": "30", "keyint_min": "30", "sc_threshold": "0"} if video_codec == "libx264"
                                        else {"g": "30", "cpu-used": "8", "deadline": "realtime"})
-        audio = out.add_stream(audio_codec, rate=rate, layout="mono")
+        audio = out.add_stream(audio_codec, rate=rate, layout=layout)
         n = rate // FPS
         for i in range(SECONDS * FPS):
             frame = av.VideoFrame.from_ndarray(np.full((96, 160, 3), 40 + i % 150, np.uint8), format="rgb24")
             frame.pts, frame.time_base = i, Fraction(1, FPS)
             out.mux(video.encode(frame))
-            samples = av.AudioFrame.from_ndarray(x[i * n:(i + 1) * n].astype(np.float32)[None, :], format="fltp", layout="mono")
+            samples = av.AudioFrame.from_ndarray(np.ascontiguousarray(x[:, i * n:(i + 1) * n], np.float32), format="fltp",
+                                                 layout=layout)
             samples.sample_rate, samples.pts = rate, i * n
             for packet in audio.encode(samples):
                 if gap is None or not gap[0] <= packet.pts / rate < gap[1]:
@@ -91,7 +94,8 @@ def make_source(path: Path, video_codec: str, audio_codec: str, rate: int, signa
         out.mux(audio.encode())
 
 
-def read(path: Path) -> dict:
+def read(path: Path, channel: int | None = None) -> dict:
+    """The first audio track (channel: that channel, else the channels' mean) and the video frame times."""
     with av.open(str(path)) as c:
         start = (c.start_time or 0) / av.time_base
         vt = sorted(float(f.pts * f.time_base) for f in c.decode(video=0))
@@ -102,7 +106,8 @@ def read(path: Path) -> dict:
         demuxed = [p for p in c.demux(audio=0) if p.size]
         packets = [bytes(p) for p in demuxed]
         first_packet = min(float(p.pts * p.time_base) for p in demuxed if p.pts is not None)
-    x = np.concatenate([f.to_ndarray().astype(np.float64).mean(axis=0) for f in frames])
+    x = np.concatenate([f.to_ndarray().astype(np.float64)[channel] if channel is not None else
+                        f.to_ndarray().astype(np.float64).mean(axis=0) for f in frames])
     return {"start": start, "vt": vt, "rate": rate, "codec": codec, "a0": float(frames[0].pts * frames[0].time_base), "x": x,
             "packets": packets, "first_packet": first_packet}
 
@@ -112,6 +117,44 @@ def mvhd_timescale(path: Path) -> int:
     data = path.read_bytes()
     i = data.index(b"mvhd") + 4
     return int.from_bytes(data[i + (12 if data[i] == 0 else 20):][:4], "big")
+
+
+def mp4_audio_end(path: Path) -> float:
+    """Where an MP4's last track (the audio here) ends, from its boxes: its empty edits, then its samples' durations
+    (stts) from the media edit's start. PyAV re-derives MP3 and AC-3 packet durations from the frames, so its demuxed
+    durations don't show a shortened last sample."""
+    data = path.read_bytes()
+
+    def boxes(start: int, end: int) -> dict[bytes, list[tuple[int, int]]]:
+        found: dict[bytes, list[tuple[int, int]]] = {}
+        while start + 8 <= end:
+            size, kind = int.from_bytes(data[start:start + 4], "big"), data[start + 4:start + 8]
+            found.setdefault(kind, []).append((start + 8, start + size))
+            start += size
+        return found
+
+    moov = boxes(*boxes(0, len(data))[b"moov"][0])
+    movie_scale = mvhd_timescale(path)
+    trak = boxes(*moov[b"trak"][-1])
+    mdia = boxes(*trak[b"mdia"][0])
+    s, _ = mdia[b"mdhd"][0]
+    media_scale = int.from_bytes(data[s + (12 if data[s] == 0 else 20):][:4], "big")
+    stbl = boxes(*boxes(*mdia[b"minf"][0])[b"stbl"][0])
+    s, _ = stbl[b"stts"][0]
+    samples = sum(int.from_bytes(data[s + 8 + 8 * k:s + 12 + 8 * k], "big") * int.from_bytes(data[s + 12 + 8 * k:s + 16 + 8 * k], "big")
+                  for k in range(int.from_bytes(data[s + 4:s + 8], "big")))
+    s, _ = boxes(*trak[b"edts"][0])[b"elst"][0]
+    v, n = data[s], int.from_bytes(data[s + 4:s + 8], "big")
+    empty, media_time = 0, 0
+    for k in range(n):
+        q = s + 8 + k * (20 if v else 12)
+        duration = int.from_bytes(data[q:q + (8 if v else 4)], "big")
+        at = int.from_bytes(data[q + (8 if v else 4):q + (16 if v else 8)], "big", signed=True)
+        if at < 0:
+            empty += duration
+        else:
+            media_time = at
+    return empty / movie_scale + (samples - media_time) / media_scale
 
 
 def lag(src: dict, out: dict, out_t: float, src_t: float, *, win: float = 0.3, search: float = 0.03) -> float:
@@ -144,9 +187,20 @@ def expected(segments: list[dict], src: dict) -> tuple[list[tuple[float, float, 
 
 
 def check(src_path: Path, out_path: Path, segments: list[dict], copied: bool, signal: str) -> str | None:
+    """Cut, then compare each channel (independent noise in multichannel sources) with the source's."""
     if not smartcut.process_segments(str(src_path), str(out_path), [dict(s) for s in segments]):
         return "process_segments failed"
-    src, out = read(src_path), read(out_path)
+    with av.open(str(src_path)) as c:
+        names = [ch.name for ch in c.streams.audio[0].codec_context.layout.channels]
+    # Each channel; not LFE, which the encoders band-limit (AAC: to ~120 Hz)
+    for ch in [k for k, name in enumerate(names) if name != "LFE"] if len(names) > 1 else [None]:
+        problem = compare(read(src_path, ch), read(out_path, ch), out_path, segments, copied, signal)
+        if problem:
+            return f"channel {ch + 1}: {problem}" if ch is not None else problem
+    return None
+
+
+def compare(src: dict, out: dict, out_path: Path, segments: list[dict], copied: bool, signal: str) -> str | None:  # noqa: PLR0917
     same = sum(p in set(src["packets"]) for p in out["packets"])
     if copied and same < len(out["packets"]):
         return f"only {same}/{len(out['packets'])} audio packets copied, expected a copy"
@@ -161,6 +215,11 @@ def check(src_path: Path, out_path: Path, segments: list[dict], copied: bool, si
     tolerance = 0.0015  # Matroska: timestamps in 1 ms; MP4: the edit list in the movie timescale (1000)
     if out_path.suffix == ".mp4" and mvhd_timescale(out_path) != 1000:
         return f"movie timescale {mvhd_timescale(out_path)}, expected FFmpeg's default 1000"
+    length = sum(b - a for a, b, _, _ in segs)
+    if copied and out_path.suffix == ".mp4" and abs(mp4_audio_end(out_path) - length) > 0.001:
+        # the copy's last sample is shortened to end at the cut, so the track and its edit list end there (1 ms: empty
+        # edits are in the movie timescale)
+        return f"the copied audio ends {(mp4_audio_end(out_path) - length) * 1000:+.2f} ms after the cut"
 
     # Video where it belongs, and A/V sync per segment (noise sources)
     n = 0
@@ -326,11 +385,15 @@ def check_keyframes(src_path: Path, out_path: Path, copied: bool) -> str | None:
 
 def main() -> int:
     media = Path(sys.argv[1]) if len(sys.argv) > 1 else None
-    cases = [  # name, video encoder, audio encoder, rate, container, segments, copied
+    cases = [  # name, video encoder, audio encoder, rate, container, segments, copied[, layout (default mono)]
         ("AAC in MP4: joins", "libx264", "aac", 44100, "mp4", JOINS, False),
         ("AAC in MP4: mid-stream start, copied", "libx264", "aac", 44100, "mp4", START, True),
         ("AAC in MP4: touching segments, copied", "libx264", "aac", 44100, "mp4", TOUCHING, True),
         ("AAC in MP4: joins with short and long fades", "libx264", "aac", 44100, "mp4", FADES, False),
+        ("AAC stereo in MP4: joins", "libx264", "aac", 48000, "mp4", JOINS, False, "stereo"),
+        ("AAC stereo in MP4: mid-stream start, copied", "libx264", "aac", 48000, "mp4", START, True, "stereo"),
+        ("AAC 5.1 in MKV: joins", "libx264", "aac", 48000, "mkv", JOINS, False, "5.1"),
+        ("AC-3 5.1 in MP4: joins", "libx264", "ac3", 48000, "mp4", JOINS, False, "5.1"),
         ("AAC in MKV: joins", "libx264", "aac", 48000, "mkv", JOINS, False),
         ("AAC in MKV: mid-stream start, copied", "libx264", "aac", 48000, "mkv", START, True),
         ("AAC in MKV: from the start, copied", "libx264", "aac", 48000, "mkv", FROM_0, True),
@@ -348,14 +411,15 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
         made = {}
-        for name, vcodec, acodec, rate, ext, segments, copied in cases:
+        for name, vcodec, acodec, rate, ext, segments, copied, *more in cases:
+            layout = more[0] if more else "mono"
             for signal in ("noise", "tone"):
-                if signal == "tone" and len(segments) == 1:
-                    continue  # no join: nothing to click
-                key = (vcodec, acodec, rate, ext, signal)
+                if signal == "tone" and (len(segments) == 1 or layout != "mono"):
+                    continue  # no join: nothing to click (tones: mono only)
+                key = (vcodec, acodec, rate, ext, signal, layout)
                 if key not in made:
                     made[key] = tmp / f"src{len(made)}.{ext}"
-                    make_source(made[key], vcodec, acodec, rate, signal)
+                    make_source(made[key], vcodec, acodec, rate, signal, layout=layout)
                 total += 1
                 problem = check(made[key], tmp / f"out{total}.{ext}", segments, copied, signal)
                 failed += problem is not None

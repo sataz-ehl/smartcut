@@ -355,7 +355,7 @@ Run from the repo root (tests live in `smartcut/tests/`):
 | `test_multitrack.py` | Every audio track is kept: copied when exact, each re-encoded as a whole with a join or audio fades |
 | `test_webm.py` | `.webm` outputs: AAC re-encoded to Opus (with and without fades), Opus copied from the start, re-encoded from mid-stream |
 | `test_audio_bitrate.py` | Bitrate of re-encoded audio: from the packets when the source reports none, floors per channel, MP3, lossless sources, encoder limits; cuts at about the source's rate |
-| `test_audio_joins.py` | Copied or re-encoded as the rule says; A/V sync within 1.5 ms at the start and every join; level and clicks at the joins (AAC, AC-3, MP3, Opus; MP4, MKV, WebM; HE-AAC with a media dir) |
+| `test_audio_joins.py` | Copied or re-encoded as the rule says; A/V sync within 1.5 ms at the start and every join; level and clicks at the joins (AAC, AC-3, MP3, Opus; mono, stereo, 5.1; MP4, MKV, WebM; HE-AAC with a media dir); copies into MP4 end at the cut; KEYFRAMES mode |
 | `test_audio_decode.py` | Decoding for re-encodes: Opus (10 and 20 ms packets) after a jump as in a continuous decode; a copy's pre-roll without packet durations; a one-tick gap; resampled re-encodes in sync |
 | `test_audio_faithful.py` | Re-encodes keep the codec, sample format, bit depth and layout: lossless ones bit-identical outside the join fades (FLAC, ALAC, PCM); otherwise copied with a warning (AAC "6 channels"; DTS, TrueHD and 32-bit FLAC with the ffmpeg command); WebM's clear error |
 | `test_progress_costs.py` | A machine's `progress_costs.json`: used when valid; missing, malformed, other versions, out of range fall back to the built-in costs; paths; logged once; edits with a broken file |
