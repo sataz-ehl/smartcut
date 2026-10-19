@@ -336,9 +336,9 @@ class VideoCutter:
         # Track decoder continuity between GOPs: last GOP end DTS consumed
         self._last_fetch_end_dts: int | None = None
 
-        # Called after every frame fed to the encoder and after every encoder flush, with the number of frames
-        # the encoder output: progress within a re-encoded piece, and cancelling midway (fork addition)
-        self.on_frames_encoded: Callable[[int], None] | None = None
+        # Called with (frames fed, frames output) after every frame fed to the encoder, (1, n), and after every frame
+        # an encoder flush outputs, (0, 1): progress within a re-encoded piece, and cancelling midway (fork addition)
+        self.on_frames_encoded: Callable[[int, int], None] | None = None
 
     def init_encoder(self) -> None:
         self.encoder_inited = True
@@ -697,7 +697,7 @@ class VideoCutter:
             encoded = self.enc_codec.encode(frame)
             result_packets.extend(encoded)
             if self.on_frames_encoded is not None:
-                self.on_frames_encoded(len(encoded))
+                self.on_frames_encoded(1, len(encoded))
 
         if self.codec_name == 'mpeg2video':
             for p in result_packets:
@@ -807,7 +807,7 @@ class VideoCutter:
             encoded = self.enc_codec.encode(frame)
             result_packets.extend(encoded)
             if self.on_frames_encoded is not None:
-                self.on_frames_encoded(len(encoded))
+                self.on_frames_encoded(1, len(encoded))
 
         result_packets.extend(self.flush_encoder())
 
@@ -837,20 +837,23 @@ class VideoCutter:
         if self.enc_codec is None:
             return []
 
-        result_packets = self.enc_codec.encode()
-
-        if self.codec_name == 'mpeg2video':
-            for p in result_packets:
+        # Packet by packet (fork addition): the encoder encodes the frames it still holds one by one, and progress
+        # counts each as it comes out. Counted at the end, progress paused for the whole flush: 9-34 frames, up to
+        # 3.5 s (x265 at 1080p, one core).
+        result_packets = []
+        for p in self.enc_codec.encode_lazy(None):
+            if self.codec_name == 'mpeg2video':
                 if p.time_base is not None:
                     if p.pts is not None:
                         p.pts = int(p.pts * p.time_base / self.out_time_base)
                     if p.dts is not None:
                         p.dts = int(p.dts * p.time_base / self.out_time_base)
                 p.time_base = self.out_time_base
+            result_packets.append(p)
+            if self.on_frames_encoded is not None:
+                self.on_frames_encoded(0, 1)
 
         self.enc_codec = None
-        if self.on_frames_encoded is not None:
-            self.on_frames_encoded(len(result_packets))
         return result_packets
 
     def _scale_frame_if_needed(self, frame: VideoFrame) -> VideoFrame:

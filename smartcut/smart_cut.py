@@ -62,7 +62,8 @@ class CancelObject:
 # Progress by estimated work (fork addition). emit() counts cut pieces, but re-encoding a piece can take a
 # thousand times longer than copying one, so a progress object that also has emit_fraction(fraction) gets the
 # share of the estimated work done. Re-encoded frames count when the encoder outputs them: encoders with
-# lookahead (libaom, libvpx, x264) take in their first frames instantly and finish the last ones in a flush.
+# lookahead (libaom, libvpx, x264, x265) take in their first frames instantly and finish the last ones in a flush,
+# which outputs them one by one.
 # The same per-frame hook stops a re-encoded piece midway when cancel_object is set, with or without progress.
 # Cost in seconds on one desktop core, measured with tests/regression/progress_timeline.py --one-core --calibrate
 # (Oct 2026). Only the ratios matter.
@@ -155,13 +156,13 @@ class _WorkProgress:
         self.pieces_done = 0.0
         self.finishing = False  # no cancelling inside the generators' finish()
 
-    def frames_encoded(self, count: int) -> None:
-        """VideoCutter calls this after every frame it feeds to its encoder and after every encoder flush,
-        with the number of frames the encoder output."""
+    def frames_encoded(self, fed: int, out: int) -> None:
+        """VideoCutter calls this after every frame it feeds to its encoder (fed 1) and after every frame an encoder
+        flush outputs (fed 0, out 1), with the number of frames the encoder output."""
         if not self.finishing and self.cancel_object is not None and self.cancel_object.cancelled:
             raise _Cancelled()
-        if count:
-            self.video_done += count * self.frame_cost
+        if out:
+            self.video_done += out * self.frame_cost
             self._emit()
 
     def piece_done(self, index: int) -> None:

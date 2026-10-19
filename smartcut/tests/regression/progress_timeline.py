@@ -68,22 +68,21 @@ def install_timers(stats):
         packets = orig_flush(self)
         stats["flush_s"] += time.perf_counter() - t
         stats["flush_packets"] += len(packets)
-        stats["flush_calls"] += 1
         return packets
 
     def segment(self, s):
-        frames = [0]  # frames fed to the encoder: one hook call each, and one per encoder flush
+        frames = [0]  # frames fed to the encoder
         hook = self.on_frames_encoded
 
-        def counting_hook(count):
-            frames[0] += 1
+        def counting_hook(fed, out):
+            frames[0] += fed
             if hook is not None:
-                hook(count)
+                hook(fed, out)
 
         self.on_frames_encoded = counting_hook
         hybrid = not s.require_recode and self._should_hybrid_recode_cra(s)
         piece.update(t=time.perf_counter(), flush_s=stats["flush_s"], audio_s=stats["audio_s"])
-        flushed_before, flush_calls_before = stats["flush_packets"], stats["flush_calls"]
+        flushed_before = stats["flush_packets"]
         try:
             packets = orig_segment(self, s)
         finally:
@@ -92,7 +91,7 @@ def install_timers(stats):
         stats["megapixels"] = ctx.width * ctx.height / 1e6
         stats["codec"] = "av1" if "av1" in (ctx.name or "") else ctx.name  # as in smart_cut._WorkProgress
         if s.require_recode or hybrid:
-            piece.update(recode=True, frames=frames[0] - (stats["flush_calls"] - flush_calls_before))
+            piece.update(recode=True, frames=frames[0])
         else:
             piece.update(recode=False, frames=len(packets) - (stats["flush_packets"] - flushed_before))
         return packets
