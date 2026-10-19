@@ -14,9 +14,10 @@ Usage (from the repo root):
     python smartcut/tests/test_api.py
 """
 
-import sys
 import os
+import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 # Make the repo root importable (tests live in smartcut/tests/)
@@ -314,7 +315,6 @@ def main():
             results.append((name, passed))
         except Exception as e:
             print(f"\n✗ Test '{name}' crashed with exception: {e}")
-            import traceback
             traceback.print_exc()
             results.append((name, False))
 

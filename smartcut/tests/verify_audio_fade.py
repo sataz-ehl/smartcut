@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Verify audio fade effects by analyzing volume levels."""
 
-import sys
 import os
 import subprocess
+import sys
 import tempfile
+from pathlib import Path
+
 import av
 import numpy as np
-from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (tests live in smartcut/tests/)
 from smartcut.tests.test_fade import generate_test_video
@@ -44,7 +45,6 @@ def analyze_audio_volume(video_path, duration_seconds=None):
 
     # Convert to numpy array
     samples = np.array(all_samples)
-    times = np.arange(len(samples)) / sample_rate
 
     # Calculate RMS in windows
     window_size = int(sample_rate * 0.1)  # 100ms windows
@@ -81,7 +81,7 @@ def test_fade_in():
         subprocess.run([
             sys.executable, '-m', 'smartcut', input_file, output_file,
             '--keep', '2:fadein:2,8'
-        ], capture_output=True)
+        ], capture_output=True, check=False)
 
         times, rms = analyze_audio_volume(output_file)
 
@@ -144,7 +144,7 @@ def test_fade_out():
         subprocess.run([
             sys.executable, '-m', 'smartcut', input_file, output_file,
             '--keep', '2,8:fadeout:2'
-        ], capture_output=True)
+        ], capture_output=True, check=False)
 
         times, rms = analyze_audio_volume(output_file)
 
@@ -205,7 +205,7 @@ def test_both_fades():
         subprocess.run([
             sys.executable, '-m', 'smartcut', input_file, output_file,
             '--keep', '2:fadein:1.5,8:fadeout:1.5'
-        ], capture_output=True)
+        ], capture_output=True, check=False)
 
         times, rms = analyze_audio_volume(output_file)
 

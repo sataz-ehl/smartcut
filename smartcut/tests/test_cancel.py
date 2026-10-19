@@ -24,11 +24,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (tests live in smartcut/tests/)
 
-import smartcut  # noqa: E402
-from smartcut.media_container import MediaContainer  # noqa: E402
-from smartcut.smart_cut import make_adjusted_segment_times, make_cut_segments  # noqa: E402
-from smartcut.tests.generate_synthetic_video import generate_test_video  # noqa: E402
-from smartcut.video_cutter import VideoCutter  # noqa: E402
+import smartcut
+from smartcut.media_container import MediaContainer
+from smartcut.smart_cut import make_adjusted_segment_times, make_cut_segments
+from smartcut.tests.generate_synthetic_video import generate_test_video
+from smartcut.video_cutter import VideoCutter
 
 SEGMENTS = [{"start": 2, "end": 8, "fadein": 1, "fadeout": 1}, {"start": 12, "end": 18}]
 LAST_FLUSH_SEGMENTS = [{"start": 2, "end": 8}, {"start": 12, "end": 17.5}]  # ends mid-GOP: re-encoded to the end

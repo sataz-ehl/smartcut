@@ -5,9 +5,10 @@ Generates synthetic test video with audio and tests various fade scenarios.
 """
 
 import os
-import sys
 import subprocess
+import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 # Make the repo root importable (tests live in smartcut/tests/; run from the repo root)
@@ -15,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 # Import synthetic video generator
 from smartcut.tests.generate_synthetic_video import generate_test_video
+
 
 def run_smartcut(input_path: str, output_path: str, keep_args: list[str]) -> None:
     """
@@ -33,11 +35,11 @@ def run_smartcut(input_path: str, output_path: str, keep_args: list[str]) -> Non
         cmd.extend(['--keep', keep_arg])
 
     print(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
 
     assert result.returncode == 0, f"Smartcut failed: {result.stderr}"
 
-    print(f"✓ Smartcut completed successfully")
+    print("✓ Smartcut completed successfully")
 
 def check_video_exists(path: str, min_size: int = 1000) -> None:
     """
@@ -214,7 +216,6 @@ def main():
         except Exception as e:
             failed += 1
             print(f"✗ TEST FAILED: {test_name} - {e}")
-            import traceback
             traceback.print_exc()
 
     # Create demo video
@@ -223,7 +224,6 @@ def main():
         create_demo_video()
     except Exception as e:
         print(f"✗ Demo creation failed: {e}")
-        import traceback
         traceback.print_exc()
 
     # Summary

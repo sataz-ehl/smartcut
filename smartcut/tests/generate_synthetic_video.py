@@ -24,10 +24,12 @@ Examples:
 """
 
 import sys
+import traceback
+from typing import cast
+
 import av
 import numpy as np
-from typing import cast
-from av import VideoStream, AudioStream
+from av import AudioStream, VideoStream
 
 
 def generate_test_video(output_path: str, duration: int = 20, fps: int = 30, sample_rate: int = 48000):
@@ -121,12 +123,11 @@ def generate_test_video(output_path: str, duration: int = 20, fps: int = 30, sam
             container.mux(packet)
 
         container.close()
-        print(f"✓ Test video generated successfully")
+        print("✓ Test video generated successfully")
         return True
 
     except Exception as e:
         print(f"✗ Error generating video: {e}")
-        import traceback
         traceback.print_exc()
         return False
 

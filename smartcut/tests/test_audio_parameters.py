@@ -7,12 +7,14 @@ Verifies that re-encoded fade sections maintain the same audio parameters
 and that all segments can be properly muxed together.
 """
 
-import sys
 import os
 import subprocess
+import sys
 import tempfile
-import av
+import traceback
 from pathlib import Path
+
+import av
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (tests live in smartcut/tests/)
 from smartcut.tests.test_fade import generate_test_video
@@ -82,7 +84,7 @@ def test_fully_reencoded_segment():
 
         # Get source parameters
         source_params = check_audio_parameters(input_file)
-        print(f"\nSource parameters:")
+        print("\nSource parameters:")
         print(f"  Codec: {source_params['codec']}")
         print(f"  Sample rate: {source_params['sample_rate']} Hz")
         print(f"  Channels: {source_params['channels']}")
@@ -94,7 +96,7 @@ def test_fully_reencoded_segment():
         result = subprocess.run([
             sys.executable, '-m', 'smartcut', input_file, output_file,
             '--keep', '2:fadein:1,4:fadeout:1'
-        ], capture_output=True, text=True)
+        ], capture_output=True, text=True, check=False)
 
         if result.returncode != 0:
             print(f"✗ Smartcut failed: {result.stderr}")
@@ -102,7 +104,7 @@ def test_fully_reencoded_segment():
 
         # Get output parameters
         output_params = check_audio_parameters(output_file)
-        print(f"\nOutput parameters:")
+        print("\nOutput parameters:")
         print(f"  Codec: {output_params['codec']}")
         print(f"  Sample rate: {output_params['sample_rate']} Hz")
         print(f"  Channels: {output_params['channels']}")
@@ -176,7 +178,7 @@ def test_mixed_passthrough_and_reencoded():
         result = subprocess.run([
             sys.executable, '-m', 'smartcut', input_file, output_file,
             '--keep', '2:fadein:1,8:fadeout:1'
-        ], capture_output=True, text=True)
+        ], capture_output=True, text=True, check=False)
 
         if result.returncode != 0:
             print(f"✗ Smartcut failed: {result.stderr}")
@@ -234,7 +236,7 @@ def test_multi_segment_consistency():
             '--keep', '2:fadein:1,5',       # 1s re-encode + 2s passthrough
             '--keep', '8,12',                # 4s passthrough
             '--keep', '14,18:fadeout:1'      # 3s passthrough + 1s re-encode
-        ], capture_output=True, text=True)
+        ], capture_output=True, text=True, check=False)
 
         if result.returncode != 0:
             print(f"✗ Smartcut failed: {result.stderr}")
@@ -245,7 +247,6 @@ def test_multi_segment_consistency():
 
         # Open container and check all frames
         container = av.open(output_file)
-        audio_stream = next(s for s in container.streams if s.type == 'audio')
 
         sample_rates = set()
         layouts = set()
@@ -289,7 +290,7 @@ def test_keyword_segments():
             sys.executable, '-m', 'smartcut', input_file, output_file,
             '--keep', 'start:fadein:1,8',
             '--keep', '12,end:fadeout:1'
-        ], capture_output=True, text=True)
+        ], capture_output=True, text=True, check=False)
 
         if result.returncode != 0:
             print(f"✗ Smartcut failed: {result.stderr}")
@@ -339,7 +340,6 @@ if __name__ == '__main__':
             results.append((name, passed))
         except Exception as e:
             print(f"\n✗ Test '{name}' raised exception: {e}")
-            import traceback
             traceback.print_exc()
             results.append((name, False))
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Test fade feature with keyword time specifications (start, end, -N)."""
 
-import subprocess
-import tempfile
 import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 # Make the repo root importable (tests live in smartcut/tests/)
@@ -19,10 +19,10 @@ def run_test(name, input_file, output_file, keep_args):
     print(f"TEST: {name}")
     print(f"{'='*60}")
 
-    cmd = [sys.executable, '-m', 'smartcut', input_file, output_file] + keep_args
+    cmd = [sys.executable, '-m', 'smartcut', input_file, output_file, *keep_args]
     print(f"Running: {' '.join(cmd)}")
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
 
     if result.returncode != 0:
         print(f"✗ FAILED: {name}")
@@ -30,11 +30,11 @@ def run_test(name, input_file, output_file, keep_args):
         return False
 
     if not os.path.exists(output_file):
-        print(f"✗ FAILED: Output file not created")
+        print("✗ FAILED: Output file not created")
         return False
 
     file_size = os.path.getsize(output_file)
-    print(f"✓ Smartcut completed successfully")
+    print("✓ Smartcut completed successfully")
     print(f"✓ Output file exists ({file_size} bytes)")
     print(f"✓ TEST PASSED: {name}")
 

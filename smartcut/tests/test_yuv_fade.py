@@ -16,9 +16,9 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (tests live in smartcut/tests/)
-from av import VideoFrame  # noqa: E402
+from av import VideoFrame
 
-from smartcut.video_cutter import _fade_yuv_frame  # noqa: E402
+from smartcut.video_cutter import _fade_yuv_frame
 
 W, H = 642, 362  # sizes that give the planes line padding
 
