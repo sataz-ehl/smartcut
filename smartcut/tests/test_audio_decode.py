@@ -7,6 +7,9 @@ Tests how re-encoded audio is decoded (RecodeAudioCutter) and how a copy's pre-r
   kept audio differed from a continuous decode by ~12 %. Checked: within 1 % for 10 and 20 ms packets.
 - A copy's pre-roll packets are chosen by their timestamps: with packet durations missing (0), walking back by them
   took the whole stream.
+- A backwards timestamp jump longer than a frame (three AAC frames, 64 ms): only the first frame's overlap was
+  dropped, and the audio after it came two frames (42.7 ms) late. Checked: the overlap dropped, the audio after it
+  where its timestamps say.
 - A gap of exactly one tick of the time base was taken for timestamp rounding, and the audio after it came a tick
   early: where a tick is a whole packet (here PCM in 1 ms Matroska packets). Checked: in sync after the gap, silence
   in it.
@@ -130,6 +133,46 @@ def check_restart(src: Path) -> str | None:
     return None if worst < 0.01 else f"the first 20 ms after a jump differ from a continuous decode by {worst:.1%}"
 
 
+class Relabelled:
+    """A decoder whose frames from `at` seconds on come with timestamps `shift` samples earlier: a backwards timestamp
+    jump, as in a source whose timestamps restart or overlap."""
+
+    def __init__(self, decoder: av.AudioCodecContext, at: float, shift: int) -> None:
+        self.decoder, self.at, self.shift = decoder, at, shift
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.decoder, name)
+
+    def decode(self, packet: av.Packet | None = None) -> list[av.AudioFrame]:
+        frames = self.decoder.decode(packet)
+        for f in frames:
+            if f.pts is not None and f.time_base is not None and f.pts * f.time_base >= self.at:
+                f.pts -= round(Fraction(self.shift, f.sample_rate) / f.time_base)
+        return frames
+
+
+def check_overlap(src: Path) -> str | None:
+    """A backwards timestamp jump of three AAC frames (64 ms) at 3 s: the overlap is dropped, and the audio after it
+    is placed by its timestamps (it holds the source's audio from 64 ms later). Before, only the first frame of the
+    overlap was dropped, and everything after it came two frames (42.7 ms) late."""
+    reference, rate = by_pts(src)  # the source's audio at its real times
+    shift = 3 * 1024
+    media = MediaContainer(str(src))
+    try:
+        with closing(av.open(io.BytesIO(), "w", format="mp4")) as out:
+            cutter = RecodeAudioCutter(media, create_recode_audio_output_stream(media, out, 0), 0)
+            cutter.decoder = cast(av.AudioCodecContext, Relabelled(cutter.decoder, 3.0, shift))
+            cutter._restart_decoder(2 * rate)
+            got = cutter._take(2 * rate, 5 * rate)[0].astype(np.float64)  # by the timestamps, 2-5 s
+    finally:
+        media.close()
+    for at in (2.5, 3.3, 4.0, 4.6):  # by the timestamps; from 3 s on they are 64 ms early
+        late = lag(reference, got, rate, at - 2, at + (shift / rate if at >= 3 else 0), search=0.06)
+        if abs(late) > 0.0001:
+            return f"the audio timestamped {at} s is {late * 1000:+.1f} ms late"
+    return None
+
+
 def check_preroll_without_durations(src: Path) -> str | None:
     """The copy's pre-roll (80 ms for Opus) by timestamps, also with packet durations of 0."""
     media = MediaContainer(str(src))
@@ -224,6 +267,9 @@ def main() -> int:
             report(f"Opus, {ms} ms packets: after a jump, decoded as continuously", check_restart(src))
             if ms == 10:
                 report("Copy pre-roll by timestamps: packets without durations", check_preroll_without_durations(src))
+        aac = tmp / "aac48.mp4"
+        make_source(aac, "libx264", "aac", 48000, 30)
+        report("A backwards timestamp jump of three frames: the overlap dropped, the rest in place", check_overlap(aac))
         report("A gap of one tick (PCM in 1 ms Matroska packets): silence there, in sync after it", check_one_tick_gap(tmp))
         report("Resampled re-encode (44.1 kHz AAC into WebM Opus): in sync, no silence after restarts", check_resampled(tmp))
     print(f"\n{total - failed}/{total} tests passed")

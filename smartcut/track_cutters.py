@@ -678,9 +678,11 @@ class RecodeAudioCutter:
         from where that one ended: Matroska rounds timestamps to 1 ms, and AAC frames of 21.33 ms came at 0, 21, 43
         ms, ..., whose 16-32 sample "gaps" and "overlaps" clicked (fork fix). Strictly less: where a tick is a whole
         frame (AVI audio), one tick off is a missing frame. Further off, a gap is filled with silence and an overlap
-        dropped. This is judged on the decoded frames, before resampling: a new resampler's first output is short
-        by its delay, and judged after it, the next frame looked like a gap (silence inserted after every restart,
-        e.g. 44.1 kHz AAC into a WebM's 48 kHz Opus: a step x5.6 a tone's own at 23 ms, fork fix)."""
+        dropped: the samples of a frame that come before where the audio so far ends, up to the whole frame, and
+        frames after it until the timestamps pass that end (a backwards jump of three frames placed everything after
+        it two frames late, fork fix). This is judged on the decoded frames, before resampling: a new resampler's first
+        output is short by its delay, and judged after it, the next frame looked like a gap (silence inserted after
+        every restart, e.g. 44.1 kHz AAC into a WebM's 48 kHz Opus: a step x5.6 a tone's own at 23 ms, fork fix)."""
         for frame in self.decoder.decode(packet):
             if frame.pts is None:
                 continue
@@ -699,10 +701,13 @@ class RecodeAudioCutter:
                 gap = round(off)
                 pending.append(np.zeros((self.channels, gap), self.dtype))
                 buf_end += gap
-            self.in_end += off + length
             samples = self._samples(frame)
-            if samples is not None and off < 0:  # an overlap: skip what we already have
-                samples = samples[:, round(-off):]
+            if off < 0:  # an overlap: skip what we already have, up to the whole frame; the end stays where it was
+                if samples is not None:
+                    samples = samples[:, min(round(-off), samples.shape[1]):]
+                self.in_end = max(self.in_end, frame_start + length)
+            else:
+                self.in_end += off + length
             if samples is not None and samples.shape[1]:
                 pending.append(samples)
                 buf_end += samples.shape[1]
