@@ -58,7 +58,7 @@ SmartCut supports all major video container formats:
 - **Vorbis** (libvorbis) - passthrough or re-encoding
 - **FLAC** - lossless passthrough
 - **PCM** - 16-bit and 32-bit float
-- **Passthrough** - No re-encoding, when the copy is exact: no audio fade, no join, and a start a copy can match (see `FADE_FEATURE_SUMMARY.md`, Audio)
+- **Passthrough** - No re-encoding, unless the output has a join, an audio fade, or a lossless track starting mid-stream; re-encodes are faithful only (same codec, bit depth, layout, rate), else the track is copied with a warning (see `FADE_FEATURE_SUMMARY.md`, Audio)
 
 ## Minimal Re-encoding Strategy
 

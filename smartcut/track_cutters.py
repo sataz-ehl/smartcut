@@ -195,7 +195,7 @@ class OpusPassthruAudioCutter(PrerollPassthruAudioCutter):
     A copy that starts mid-stream rose from ~40 % of the level over its first 80 ms, and the source's pre-skip
     (meant for the stream start) also dropped ~6.5 ms of real audio. The pre-roll packets cover the 80 ms Opus
     decoders need, and the stream's pre-skip is set to their length, so decoders discard them. Used for MP4-family
-    outputs only (see audio_needs_recode): in Matroska / WebM the muxer shifted all streams by ~73 ms. It allows
+    outputs only (see passthru_audio_cutter): in Matroska / WebM the muxer shifted all streams by ~72 ms. It allows
     Opus timestamps only down to minus the stream's CodecDelay, which it takes from the source's initial padding
     (6.5 ms; PyAV can't set it), and the pre-roll starts 80 ms before the cut.
     """
@@ -215,7 +215,9 @@ class OpusPassthruAudioCutter(PrerollPassthruAudioCutter):
 def passthru_audio_cutter(media_container: MediaContainer, out_stream: AudioStream, track_index: int,
                           first_segment: CutSegment, output_av_container: OutputContainer | None = None) -> PassthruAudioCutter:
     """The cutter that copies this track (fork addition). MP4-family outputs get PrerollPassthruAudioCutter: its end
-    follows the cut, and Opus, AAC and AC-3 get pre-roll packets when the output starts mid-stream."""
+    follows the cut, and Opus, AAC and AC-3 get pre-roll packets when the output starts mid-stream. Other outputs
+    (Matroska / WebM) get the plain copy, from the first whole packet after the cut (decided): with Opus pre-roll the
+    muxer shifted every stream by ~72 ms, and Matroska has no edit list to skip AAC's."""
     track = media_container.audio_tracks[track_index]
     format_name = (output_av_container.format.name or '') if output_av_container is not None else ''
     if format_name not in EDIT_LIST_FORMATS:

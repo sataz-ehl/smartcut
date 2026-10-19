@@ -144,14 +144,15 @@ smartcut input.mp4 output.mp4 --keep 10:fadein,20:fadeout    # 1 second fades
 
 **How fades are applied**:
 - Video: only the GOPs that overlap a fade are re-encoded (in addition to the partial GOPs at cut points); fade timing is frame-exact. Frames are faded directly in YUV (8/10/12-bit planar formats), with an RGB fallback for other pixel formats.
-- Audio is copied only when the copy is exact: no audio fade, no join (segments contiguous in the source), and a start a copy can match (the source's start, or mid-stream into MP4 for AAC, AC-3 and Opus). Otherwise each audio track is decoded and re-encoded as a whole with one continuous encoder (AAC sources become AAC-LC at the source bitrate, at least 128 kbps), with 3 ms fades at each join. Copied joins drifted A/V by up to a frame each and changed the level for a few ms; mixing copied and re-encoded packets in one track clicks at the joins. Details and measurements: `FADE_FEATURE_SUMMARY.md`.
+- Audio is copied unless the output joins segments that aren't contiguous in the source, has an audio fade, or starts mid-stream with a lossless track (FLAC, ALAC, PCM); then each audio track is decoded and re-encoded as a whole with one continuous encoder, with 3 ms fades at each join. Copied joins drifted A/V by up to a frame each and changed the level for a few ms; mixing copied and re-encoded packets in one track clicks at the joins. A copy into MP4 starts and ends exactly at the cut for AAC, AC-3 and Opus (pre-roll packets the edit list skips); elsewhere (Matroska, WebM, MP3) it starts at the first whole frame after the cut. `KEYFRAMES` mode copies the audio.
+- A track is only re-encoded faithfully: the same codec, sample format (bit depth), channel layout and sample rate (lossless tracks come out bit-identical outside the fades). Otherwise it is copied, and the logger `smartcut` warns (e.g. DTS and TrueHD, which FFmpeg can't encode). Exceptions: HE-AAC becomes AAC-LC, since FFmpeg can't encode HE-AAC, and a `.webm` output re-encodes other codecs to Opus. The bitrate is the source's, at least 64 kb/s per channel (mono counted as two; MP3 256 kb/s), within the encoder's limits. Details and measurements: `FADE_FEATURE_SUMMARY.md`.
 - VP9 and AV1 re-encodes use faster encoder settings (`cpu-used` 5 / 8); on one CPU core VP9 takes ~1-2x and AV1 ~2.5-6x the H.264 time. 10/12-bit VP9 (profile 2/3) can't be re-encoded.
 - Re-encodes use a 10-frame encoder lookahead, which cuts peak memory at 1080p by about 40% for x264 and libaom and
   16% for x265 (libaom only from 720p up).
 
 ### Audio Export
 
-By default, all audio tracks are included with passthrough codec settings (re-encoded when audio fades are used, see above). This can be adjusted by modifying the `AudioExportInfo` in the script if needed.
+By default, all audio tracks are included with passthrough codec settings: copied, or re-encoded as a whole where a copy can't follow the cut (joins, audio fades, see above). This can be adjusted by modifying the `AudioExportInfo` in the script if needed.
 
 ### Progress and the machine's costs
 

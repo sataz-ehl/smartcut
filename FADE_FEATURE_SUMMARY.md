@@ -95,9 +95,9 @@ smartcut.process_segments("in.mp4", "out.mp4", [
 |---|---|
 | `misc_data.py` | `FadeInfo` (video/audio fade-in/out durations), `SegmentWithFade`; `CutSegment.fade_info`, `orig_segment_start/end`, `join_start/join_end` |
 | `progress_costs.py` | The progress estimate's costs: built-in, or a machine's own `progress_costs.json` (validated, with a fallback) |
-| `smart_cut.py` | `smart_cut()` accepts `SegmentWithFade` lists; attaches fade info and segment bounds to the cut pieces, marks the GOPs that overlap a video fade for re-encoding, finds each output's joins and picks `RecodeAudioCutter` for the audio tracks a copy wouldn't be exact for |
+| `smart_cut.py` | `smart_cut()` accepts `SegmentWithFade` lists; attaches fade info and segment bounds to the cut pieces, marks the GOPs that overlap a video fade for re-encoding, finds each output's joins and where its segments' pieces start and end there, picks `RecodeAudioCutter` for the audio tracks to re-encode (or warns and copies a track that can't be re-encoded faithfully) |
 | `video_cutter.py` | `VideoCutter._apply_fade_to_frame()` / `_fade_yuv_frame()`: per-frame video fade in the re-encode path; faster VP9/AV1 encoder settings |
-| `track_cutters.py` | `audio_needs_recode()`: copy or re-encode; `RecodeAudioCutter` + `create_recode_audio_output_stream()`: audio fades, join fades, bitrate (`_recode_audio_bitrate()`); `PrerollPassthruAudioCutter` / `OpusPassthruAudioCutter`: exact copies into MP4 |
+| `track_cutters.py` | `audio_needs_recode()`: copy or re-encode; `recode_setup()`: faithful re-encodes only, else a copy; `RecodeAudioCutter` + `create_recode_audio_output_stream()`: audio fades, join fades, bitrate (`_recode_audio_bitrate()`); `PrerollPassthruAudioCutter` / `OpusPassthruAudioCutter`: exact copies into MP4 |
 | `__main__.py` | CLI parsing of the fade keywords, multiple `--keep` |
 | `__init__.py` | High-level API above |
 
