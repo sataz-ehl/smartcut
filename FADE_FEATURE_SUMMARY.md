@@ -72,10 +72,10 @@ clip, and about twice as long for a faded frame. The costs are a desktop core's 
 own, measured there by `tests/regression/calibrate_progress.py`, come from the `progress_costs.json` that
 `SMARTCUT_PROGRESS_COSTS` names, else `~/.config/smartcut/` or `%APPDATA%\smartcut\`. A broken file falls back to the
 built-in costs with a warning. They honour `cancel_check()`: it is polled before every
-GOP and after every re-encoded frame (also without a progress callback), processing stops, the partial output is
-removed and the call returns `False`. Once it returned True it isn't polled again, so True once is enough, and the
-encoder's buffered frames are dropped rather than encoded into the removed file. The input file is always closed
-afterwards.
+GOP and after every re-encoded frame, also each frame an encoder flush outputs and the last flush at the end of the
+output (also without a progress callback). Processing stops within a frame, the partial output is removed and the
+call returns `False`. Once it returned True it isn't polled again, so True once is enough, and the encoder's
+buffered frames are dropped rather than encoded into the removed file. The input file is always closed afterwards.
 
 ```python
 import smartcut
@@ -319,7 +319,7 @@ Run from the repo root (tests live in `smartcut/tests/`):
 | `test_validation.py` | Reversed segments rejected, out-of-order segments sorted (CLI and API) |
 | `test_audio_parameters.py` | Re-encoded audio keeps sample rate / channels; mixed and multi-segment cases |
 | `verify_audio_fade.py` | Measured audio level ramps for fade-in, fade-out, both |
-| `test_cancel.py` | Cancelling (also midway through re-encoding, with and without progress), steady progress, input closed |
+| `test_cancel.py` | Cancelling (also midway through re-encoding, with and without progress, and in the encoder's last flush), steady progress, input closed |
 | `test_last_frame.py` | Cuts keep their last frame, also when they end with re-encoded frames (H.264, VP9, AV1, fades) |
 | `test_multitrack.py` | Every audio track is kept: copied when exact, each re-encoded as a whole with a join or audio fades |
 | `test_webm.py` | `.webm` outputs: AAC re-encoded to Opus (with and without fades), Opus copied from the start, re-encoded from mid-stream |

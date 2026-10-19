@@ -67,7 +67,7 @@ class CancelObject:
 # share of the estimated work done. Re-encoded frames count when the encoder outputs them, in the order they were
 # fed: encoders with lookahead (libaom, libvpx, x264, x265) take in their first frames instantly and finish the last
 # ones in a flush, which outputs them one by one. The same per-frame hook stops a re-encoded piece midway when
-# cancel_object is set, with or without progress.
+# cancel_object is set, with or without progress, and the encoder's last flush too (in finish()).
 # The costs the work is weighed with, and how they were measured: progress_costs.py (built-in, or a machine's own from
 # its progress_costs.json).
 
@@ -210,15 +210,15 @@ class _WorkProgress:
         self.queued: deque[float] = deque()  # the costs of the frames fed to the encoder and not output yet
         self.video_done = 0.0
         self.pieces_done = 0.0
-        self.finishing = False  # no cancelling inside the generators' finish()
 
     def piece_started(self, index: int) -> None:
         self.feeding = iter(self.frame_costs[index].tolist())
 
     def frames_encoded(self, fed: int, out: int) -> None:
         """VideoCutter calls this after every frame it feeds to its encoder (fed 1) and after every frame an encoder
-        flush outputs (fed 0, out 1), with the number of frames the encoder output."""
-        if not self.finishing and self.cancel_object is not None and self.cancel_object.cancelled:
+        flush outputs (fed 0, out 1), with the number of frames the encoder output. Raises _Cancelled when the cancel
+        object is set, also in the last flush (VideoCutter.finish)."""
+        if self.cancel_object is not None and self.cancel_object.cancelled:
             raise _Cancelled()
         for _ in range(fed):
             self.queued.append(next(self.feeding, self.average_cost))
@@ -555,15 +555,19 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                 for g in generators:  # don't drain the encoder into a file that is removed (fork addition)
                     if isinstance(g, VideoCutter):
                         g.enc_codec = None
-            if work is not None:
-                work.finishing = True
             for g in generators:
-                for packet in g.finish():
+                try:
+                    packets = g.finish()
+                except _Cancelled:
+                    # Cancelled during the video encoder's last flush (fork fix): its other frames are dropped, as above,
+                    # and the output is removed below. The input container is closed by cleanup.
+                    if isinstance(g, VideoCutter):
+                        g.enc_codec = None
+                    continue
+                for packet in packets:
                     if packet.dts is not None and packet.dts > 1_000_000_000_000:
                         print(f"BAD DTS in finish: pts={packet.pts} dts={packet.dts}", flush=True)
                     output_av_container.mux(packet)
-            if work is not None:
-                work.finishing = False
             if progress is not None:
                 progress.emit(previously_done_segments)
 
