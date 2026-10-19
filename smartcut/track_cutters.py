@@ -228,15 +228,33 @@ def passthru_audio_cutter(media_container: MediaContainer, out_stream: AudioStre
     return PrerollPassthruAudioCutter(media_container, out_stream, track_index, first_segment, preroll or Fraction(0))
 
 
-# Encoder to use when re-encoding audio, keyed by FFmpeg decoder name (some decoders and encoders differ)
+# Encoder to use when re-encoding audio, keyed by FFmpeg decoder name (some decoders and encoders differ). MPEG audio
+# (MP1, MP2, MP3) goes by its layer instead: see mpeg_audio_layer
 _AUDIO_ENCODER_FOR_DECODER = {
     'aac': 'aac', 'aac_fixed': 'aac', 'aac_latm': 'aac',
     'opus': 'libopus',
-    'mp3': 'libmp3lame', 'mp3float': 'libmp3lame',
-    'mp2float': 'mp2',
     'ac3_fixed': 'ac3',
     'vorbis': 'libvorbis',
 }
+# MPEG-1/2 audio decoders with the layer their name says (fork addition). Each decodes every layer, and the name can be
+# wrong: FFmpeg's MP4 demuxer gives Layer II and Layer III one codec (MP4 doesn't tell them apart), so MP2 in MP4 is
+# read by the MP3 decoder (mp3float), and was re-encoded as MP3
+_MPEG_AUDIO_DECODER_LAYER = {'mp1': 1, 'mp1float': 1, 'mp2': 2, 'mp2float': 2, 'mp3': 3, 'mp3float': 3}
+_MPEG_AUDIO_ENCODER_FOR_LAYER = {2: 'mp2', 3: 'libmp3lame'}  # FFmpeg has no Layer I encoder
+
+
+def mpeg_audio_layer(track: AudioTrack) -> int | None:
+    """The layer (1, 2 or 3) of an MPEG-1/2 audio track, from its first frame header (fork addition); from its
+    decoder's name if no packet starts with one. None for other codecs."""
+    name = track.av_stream.codec_context.name or ''
+    if name not in _MPEG_AUDIO_DECODER_LAYER:
+        return None
+    for p in track.packets[:8]:
+        head = bytes(p)[:2]
+        layer_bits = (head[1] >> 1) & 3 if len(head) == 2 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0 else 0
+        if layer_bits:  # frame sync, then '11' Layer I, '10' Layer II, '01' Layer III ('00' is reserved)
+            return 4 - layer_bits
+    return _MPEG_AUDIO_DECODER_LAYER[name]
 _AAC_DECODERS = ('aac', 'aac_fixed', 'aac_latm')
 # FFmpeg's AAC encoder writes AAC-LC. HE-AAC (v1 and v2) sources become AAC-LC (decided: FFmpeg can't encode HE-AAC);
 # other AAC profiles (Main, LTP, LD, ELD, USAC, ...) are copied
@@ -373,10 +391,16 @@ def recode_setup(track: AudioTrack, format_name: str) -> AudioRecode | str:
     Exceptions (decided): HE-AAC becomes AAC-LC (FFmpeg can't encode HE-AAC), and a .webm output re-encodes codecs
     other than Opus and Vorbis to Opus (resampled to 48 kHz if needed), since WebM can't hold them.
 
+    MPEG audio is re-encoded as its own layer, read from its frames (mpeg_audio_layer): Layer II with FFmpeg's mp2
+    encoder, Layer III with LAME. The decoder's name can say another layer: MP2 in MP4 is read by mp3float, and was
+    re-encoded as MP3.
+
     Not faithful (the reason is returned):
-    - no encoder in this FFmpeg build, or only an experimental one (DTS, TrueHD, MLP, APE, ...);
+    - no encoder in this FFmpeg build, or only an experimental one (DTS, TrueHD, MLP, APE, MPEG audio Layer I, ...);
     - AAC profiles other than LC and HE-AAC (Main, LTP, LD, ELD, USAC): FFmpeg's encoder writes AAC-LC;
-    - an encoder that doesn't take the decoder's sample format (MP2: s16 only, its decoder gives float);
+    - an encoder that doesn't take the decoder's sample format. FFmpeg's mp2 encoder takes s16 only, so MP2 read by a
+      float decoder (mp2float, or mp3float for MP2 in MP4) is copied; its default decoder mp2 gives s16p, re-encoded
+      as MP2;
     - 64-bit integer samples, and 32-bit samples of a lossless codec other than PCM unless the stream says they hold
       at most 24 bits (FLAC, ALAC): FFmpeg's FLAC and ALAC encoders write 24 bits from 32-bit samples;
     - a lossy track whose channel layout has no channel order (e.g. AAC "6 channels": FFmpeg's AAC encoder refused to
@@ -388,7 +412,17 @@ def recode_setup(track: AudioTrack, format_name: str) -> AudioRecode | str:
     ctx = track.av_stream.codec_context
     name = ctx.name or ''
     webm = format_name == 'webm' and name not in _WEBM_AUDIO_DECODERS
-    encoder = 'libopus' if webm else _AUDIO_ENCODER_FOR_DECODER.get(name, name)
+    layer = mpeg_audio_layer(track)
+    # MPEG audio read by a decoder named for another layer (MP2 in MP4: mp3float), for the reasons below
+    read_as = f" (MPEG audio Layer {'I' * layer} read by FFmpeg's {name} decoder)" if layer and layer != _MPEG_AUDIO_DECODER_LAYER[name] else ""
+    if webm:
+        encoder = 'libopus'
+    elif layer is not None:
+        if layer not in _MPEG_AUDIO_ENCODER_FOR_LAYER:
+            return f"no MPEG audio Layer {'I' * layer} encoder in this FFmpeg"
+        encoder = _MPEG_AUDIO_ENCODER_FOR_LAYER[layer]
+    else:
+        encoder = _AUDIO_ENCODER_FOR_DECODER.get(name, name)
     try:
         codec = av.Codec(encoder, 'w')
     except Exception:
@@ -417,7 +451,7 @@ def recode_setup(track: AudioTrack, format_name: str) -> AudioRecode | str:
     if webm:  # a lossy target: take float if it can
         sample_format = sample_format or next((f for f in ('flt', 'fltp') if f in formats), formats[0] if formats else None)
     elif sample_format is None:
-        return f"{encoder} doesn't take {source.name if source is not None else 'its'} samples"
+        return f"{encoder} doesn't take {source.name if source is not None else 'its'} samples{read_as}"
     elif sample_format in ('s64', 's64p'):
         return "it has 64-bit integer samples"
     elif sample_format in ('s32', 's32p') and _is_lossless(name) and not name.startswith('pcm_'):
@@ -431,9 +465,6 @@ def recode_setup(track: AudioTrack, format_name: str) -> AudioRecode | str:
         return f"{encoder} won't open with {layout.name} at {rate} Hz ({e})"
     bit_rate = 0 if _is_lossless(encoder) else _recode_audio_bitrate(track, encoder, rate, layout, sample_format)
     return AudioRecode(encoder, rate, layout.name, sample_format or '', bit_rate)
-
-
-_MP3_DECODERS = ('mp3', 'mp3float')
 
 
 def audio_needs_recode(media_container: MediaContainer, format_name: str, track_index: int, first_piece: CutSegment,
@@ -458,14 +489,15 @@ def audio_needs_recode(media_container: MediaContainer, format_name: str, track_
       exactly at the cut (pre-roll packets the edit list skips, see passthru_audio_cutter). Others, and every lossy
       track into Matroska / WebM, start at the first whole frame after the cut: up to a frame late with a softened
       first frame, then exact (MP3: the first frame may decode silent, its bit reservoir);
-    - in KEYFRAMES mode, which promises a lossless, fast cut (as main): every track but MP3 at a join.
+    - in KEYFRAMES mode, which promises a lossless, fast cut (as main): every track but MP3 (MPEG audio Layer III, by
+      its frames) at a join.
     """
     track = media_container.audio_tracks[track_index]
     name = track.av_stream.codec_context.name
     if format_name == 'webm' and not webm_holds(track):
         return True
     if keyframes:
-        return has_joins and name in _MP3_DECODERS
+        return has_joins and mpeg_audio_layer(track) == 3
     if has_joins:
         return True
     return _is_lossless(name) and _first_copied_packet(track, first_piece.start_time) > 0

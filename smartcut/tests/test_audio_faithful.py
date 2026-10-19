@@ -12,7 +12,11 @@ Cases, each cut into three segments (two joins) or one mid-stream segment:
   fades is bit-identical to the source: FLAC 16 and 24 bits, ALAC 16 and 24 bits, PCM s16 / s24 / s32 / f32 / f64 /
   u8. Before, 24-bit FLAC came out as 16 bits, 16-bit ALAC as 24 bits, and PCM went through 32-bit float. PCM in
   Matroska has no channel layout ("2 channels"): kept, as lossless encoders store channels as they are.
-- Lossy codecs with an encoder are re-encoded as themselves: MP2, and AAC 5.1 (keeping its layout).
+- Lossy codecs with an encoder are re-encoded as themselves: MP2 (in MKV, read by FFmpeg's mp2 decoder), and AAC 5.1
+  (keeping its layout).
+- MP2 in MP4, which FFmpeg reads with its MP3 decoder (mp3float): never re-encoded as MP3 (it was). With joins it is
+  copied, with a warning (FFmpeg's mp2 encoder takes s16 only, the decoder gives float); in KEYFRAMES mode copied
+  silently.
 - A re-encoded stream keeps the source's tags, but not its encoder's name (a DTS source became AAC tagged dca).
 - Copied, with a warning naming the track, and the cut succeeds:
   - AAC "6 channels" (5.1(side) written into MP4 has no channel order): FFmpeg's AAC encoder refused to open, and
@@ -217,6 +221,45 @@ def check_segment_warnings(src: Path, out: Path) -> str | None:
     return None if len(got) == 2 and all(any(w in m for m in got) for w in want) else f"warnings {got}, expected one each: {want}"
 
 
+def mpeg_layer(path: Path) -> int | None:
+    """The MPEG audio layer in the first audio packet's frame header, or None."""
+    with contextlib.closing(av.open(str(path))) as c:
+        head = next((bytes(p)[:2] for p in c.demux(audio=0) if p.size), b"")
+    return 4 - ((head[1] >> 1) & 3) if len(head) == 2 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0 else None
+
+
+def check_mp2_in_mp4(src: Path, tmp: Path) -> str | None:
+    """MP2 in MP4, which FFmpeg reads with its MP3 decoder (mp3float, float samples): never re-encoded as MP3. With
+    joins it is copied, with a warning, as FFmpeg's mp2 encoder takes s16 only; in KEYFRAMES mode copied silently,
+    as other codecs but MP3 (it was re-encoded as MP3 there too)."""
+    from smartcut.media_container import MediaContainer  # noqa: PLC0415
+    from smartcut.media_utils import VideoExportMode, VideoExportQuality  # noqa: PLC0415
+    from smartcut.misc_data import AudioExportInfo, AudioExportSettings  # noqa: PLC0415
+    from smartcut.smart_cut import smart_cut  # noqa: PLC0415
+    from smartcut.video_cutter import VideoSettings  # noqa: PLC0415
+    if decoded(src)[0] != "mp3float" or mpeg_layer(src) != 2:
+        return f"the source isn't MP2 read by mp3float: {decoded(src)[0]}, layer {mpeg_layer(src)}"
+    problem = check_copied(src, tmp / "out_mp2_joins.mp4", JOINS, "Layer II read by FFmpeg's mp3float decoder")
+    if problem or mpeg_layer(tmp / "out_mp2_joins.mp4") != 2:
+        return f"joins: {problem or 'not Layer II'}"
+    handler = Warnings()
+    log = logging.getLogger("smartcut")
+    log.addHandler(handler)
+    media = MediaContainer(str(src))
+    out = tmp / "out_mp2_keyframes.mp4"
+    try:
+        error = smart_cut(media, [(Fraction("0.9"), Fraction("2.37")), (Fraction("4.6"), Fraction("6.3"))], str(out),
+                          audio_export_info=AudioExportInfo([AudioExportSettings("passthru")]),
+                          video_settings=VideoSettings(VideoExportMode.KEYFRAMES, VideoExportQuality.NORMAL))
+    finally:
+        media.close()
+        log.removeHandler(handler)
+    copied = len(decoded(out)[5] - decoded(src)[5]) == 0 if error is None else False
+    if error is not None or not copied or handler.messages or mpeg_layer(out) != 2:
+        return f"KEYFRAMES: error {error}, copied {copied}, layer {mpeg_layer(out)}, warnings {handler.messages}"
+    return None
+
+
 def ffmpeg_source(tmp: Path, name: str, codec_args: list[str]) -> Path | None:
     """A source made with the ffmpeg command (what PyAV's FFmpeg can't encode), or None without it."""
     ffmpeg = os.environ.get("SMARTCUT_TEST_FFMPEG") or shutil.which("ffmpeg")
@@ -260,7 +303,11 @@ def main() -> int:
         ok, warnings = cut(mp2, tmp / "out_mp2.mkv", JOINS)
         name, *_, packets = decoded(tmp / "out_mp2.mkv") if ok else ("", "", "", None, np.zeros((0, 0)), set())
         report("MP2, joins: re-encoded as MP2", None if ok and name == "mp2" and not warnings and len(packets & decoded(mp2)[5]) <= 2
-               else f"ok={ok} {name}, warnings {warnings}")
+               and mpeg_layer(tmp / "out_mp2.mkv") == 2 else f"ok={ok} {name}, warnings {warnings}")
+        mp2_mp4 = tmp / "mp2.mp4"
+        make_source(mp2_mp4, "mp2", "stereo", "s16", 16, 192_000)
+        report("MP2 in MP4 (read by mp3float), joins and KEYFRAMES: copied, never re-encoded as MP3",
+               check_mp2_in_mp4(mp2_mp4, tmp))
         src, out = tmp / "aac51.mp4", tmp / "out_aac51.mp4"
         make_source(src, "aac", "5.1", "fltp", 0, 384_000)
         ok, warnings = cut(src, out, JOINS)
