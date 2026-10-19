@@ -95,6 +95,32 @@ def by_pts(path: Path, rate: int | None = None) -> tuple[np.ndarray, int]:
     return out, rate
 
 
+def by_pts_resampled(path: Path, rate: int) -> np.ndarray:
+    """The first audio track at rate, each run of contiguous frames (a gap: a tick or more between them) resampled on
+    its own and placed at its first timestamp: what a re-encode resampling to rate should give, gaps silent."""
+    with closing(av.open(str(path))) as c:
+        frames = list(c.decode(c.streams.audio[0]))
+    runs: list[tuple[Fraction, list[av.AudioFrame]]] = []
+    end = None
+    for f in frames:
+        tb = cast(Fraction, f.time_base)
+        t = cast(int, f.pts) * tb
+        if end is None or abs(t - end) >= tb:
+            runs.append((t, []))
+        runs[-1][1].append(f)
+        end = t + Fraction(f.samples, f.sample_rate)
+    placed = []
+    for t, run in runs:
+        resampler = av.AudioResampler(format="fltp", layout="mono", rate=rate)
+        placed.append((round(t * rate), np.concatenate([g.to_ndarray()[0].astype(np.float64)
+                                                         for f in [*run, None] for g in resampler.resample(f)])))
+    placed = [(max(i, 0), x[max(-i, 0):]) for i, x in placed]  # before 0 (encoder priming): left out
+    out = np.zeros(max(i + len(x) for i, x in placed))
+    for i, x in placed:
+        out[i:i + len(x)] = x
+    return out
+
+
 def lag(ref: np.ndarray, out: np.ndarray, rate: int, out_t: float, ref_t: float, *, search: float = 0.04) -> float:
     """Seconds by which the output at out_t is late against the reference at ref_t (normalised correlation)."""
     w = out[round(out_t * rate):round((out_t + 0.25) * rate)]
@@ -250,6 +276,64 @@ def check_resampled(tmp: Path) -> str | None:
     return None
 
 
+def check_resampled_gap(tmp: Path) -> str | None:
+    """44.1 kHz AAC with a packet left out at 1.5 s (a 23 ms gap), resampled for .webm (Opus at 48 kHz): the samples
+    RecodeAudioCutter encodes, from the start, are the source's resampled on each side of the gap, with silence in
+    it. The audio after the gap may be placed a sample off (the resampler's output length is rounded). Without the
+    resampler's flush at the gap, the 16-17 samples it held back came after the silence, and the audio after the gap
+    was resampled as if it followed on."""
+    rate = 48000
+    src = tmp / "aac441_gap.mp4"
+    make_source(src, "libvpx-vp9", "aac", 44100, 30, drop=1.5)
+    ref = by_pts_resampled(src, rate)
+    media = MediaContainer(str(src))
+    try:
+        with closing(av.open(io.BytesIO(), "w", format="webm")) as out:
+            cutter = RecodeAudioCutter(media, create_recode_audio_output_stream(media, out, 0), 0)
+            cutter._restart_decoder(0)
+            got = cutter._take(0, 3 * rate)[0].astype(np.float64)
+    finally:
+        media.close()
+    silent = np.flatnonzero(ref[rate:3 * rate] == 0) + rate  # the gap (low-passed noise is never exactly 0)
+    if len(silent) < 1000 or silent[-1] - silent[0] != len(silent) - 1:
+        return f"expected one gap of ~23 ms in the source, found {len(silent)} silent samples"
+    g0, g1 = int(silent[0]), int(silent[-1]) + 1
+    before = np.abs(got[:g0] - ref[:g0]).max()
+    if before > 1e-4:
+        return f"before the gap the samples differ from the source's resampled by up to {before:.3f}"
+    inside = np.abs(got[g0 + 1:g1 - 1]).max()
+    if inside > 0:
+        return f"sound in the gap (peak {inside:.3f})"
+    n = len(got) - g1 - 2
+    after = min(np.abs(got[g1 + k:g1 + k + n] - ref[g1:g1 + n]).max() for k in (-1, 0, 1))
+    return None if after <= 1e-4 else f"after the gap the samples differ from the source's resampled by up to {after:.3f}"
+
+
+def check_drain(tmp: Path) -> str | None:
+    """FLAC with frame threads (4, also on one core): a jump to 5.5 s, then to the source's end, gets every sample up
+    to the end. A frame-threaded decoder holds frames back until it is drained (thread count - 1 frames), and the
+    output's end lost them: the last 0.3 s of a FLAC cut on 12 threads."""
+    src = tmp / "flac_threads.mkv"
+    rate = 48000
+    make_source(src, "libx264", "flac", rate, 30)
+    reference, _ = by_pts(src)
+    media = MediaContainer(str(src))
+    try:
+        decoder = media.audio_tracks[0].av_stream.codec_context
+        decoder.thread_type, decoder.thread_count = "FRAME", 4  # as on a 4-CPU machine, whatever the CPUs here
+        with closing(av.open(io.BytesIO(), "w", format="matroska")) as out:
+            cutter = RecodeAudioCutter(media, create_recode_audio_output_stream(media, out, 0), 0)
+            start = round(5.5 * rate)
+            cutter._restart_decoder(start)
+            got = cutter._take(start, (SECONDS + 1) * rate)[0].astype(np.float64)
+    finally:
+        media.close()
+    want = reference[start:SECONDS * rate]
+    if len(got) != len(want):
+        return f"{len(got) / rate:.3f} s of audio from 5.5 s, the source has {len(want) / rate:.3f} s"
+    return None if np.array_equal(got, want) else "the samples differ from the source's"  # both in FLAC's s16 scale
+
+
 def main() -> int:
     failed = total = 0
 
@@ -272,6 +356,9 @@ def main() -> int:
         report("A backwards timestamp jump of three frames: the overlap dropped, the rest in place", check_overlap(aac))
         report("A gap of one tick (PCM in 1 ms Matroska packets): silence there, in sync after it", check_one_tick_gap(tmp))
         report("Resampled re-encode (44.1 kHz AAC into WebM Opus): in sync, no silence after restarts", check_resampled(tmp))
+        report("Resampled re-encode across a gap in the source: each side resampled on its own, silence between",
+               check_resampled_gap(tmp))
+        report("Frame-threaded decoder (FLAC, 4 threads): drained at the source's end", check_drain(tmp))
     print(f"\n{total - failed}/{total} tests passed")
     return 1 if failed else 0
 

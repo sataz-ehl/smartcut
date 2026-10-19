@@ -13,6 +13,7 @@ Cases, each cut into three segments (two joins) or one mid-stream segment:
   u8. Before, 24-bit FLAC came out as 16 bits, 16-bit ALAC as 24 bits, and PCM went through 32-bit float. PCM in
   Matroska has no channel layout ("2 channels"): kept, as lossless encoders store channels as they are.
 - Lossy codecs with an encoder are re-encoded as themselves: MP2, and AAC 5.1 (keeping its layout).
+- A re-encoded stream keeps the source's tags, but not its encoder's name (a DTS source became AAC tagged dca).
 - Copied, with a warning naming the track, and the cut succeeds:
   - AAC "6 channels" (5.1(side) written into MP4 has no channel order): FFmpeg's AAC encoder refused to open, and
     the cut failed;
@@ -62,8 +63,9 @@ def noise(channels: int, n: int, sample_format: str, bits: int) -> np.ndarray:
     return (np.rint(x * 2 ** (bits - 1)).astype(np.int64) << (full - bits)).astype(DTYPES[kind])
 
 
-def make_source(path: Path, codec: str, layout: str, sample_format: str, bits: int, bit_rate: int = 0) -> np.ndarray:  # noqa: PLR0917
-    """H.264 video and one audio track; returns the audio fed to the encoder, channels first."""
+def make_source(path: Path, codec: str, layout: str, sample_format: str, bits: int, bit_rate: int = 0,  # noqa: PLR0917
+                tags: dict[str, str] | None = None) -> np.ndarray:
+    """H.264 video and one audio track (tags: its stream tags); returns the audio fed to the encoder, channels first."""
     channels = len(av.AudioLayout(layout).channels)
     x = noise(channels, SECONDS * RATE, sample_format, bits)
     fmt = av.AudioFormat(sample_format)
@@ -73,6 +75,7 @@ def make_source(path: Path, codec: str, layout: str, sample_format: str, bits: i
         video.codec_context.options = {"g": "30", "keyint_min": "30", "sc_threshold": "0"}
         audio = cast(AudioStream, out.add_stream(codec, rate=RATE))
         audio.codec_context.layout, audio.codec_context.format = layout, sample_format
+        audio.metadata.update(tags or {})
         if bit_rate:
             audio.codec_context.bit_rate = bit_rate
         n = RATE // FPS
@@ -236,6 +239,18 @@ def main() -> int:
         report("AAC 5.1, joins: re-encoded as 5.1",
                None if ok and name == "aac" and layout == "5.1" and not warnings and len(packets & decoded(src)[5]) <= 2
                else f"ok={ok} {name} {layout}, warnings {warnings}")
+
+        # A re-encoded stream keeps the source's tags, but not its encoder's name (a DTS source became AAC tagged dca)
+        tagged = tmp / "tagged.mkv"
+        make_source(tagged, "aac", "stereo", "fltp", 0, 192_000, tags={"ENCODER": "Lavc61 dca", "COMMENT": "kept"})
+        ok, warnings = cut(tagged, tmp / "out_tagged.mkv", JOINS)
+        tags: dict[str, str] = {}
+        if ok:
+            with contextlib.closing(av.open(str(tmp / "out_tagged.mkv"))) as c:
+                tags = dict(c.streams.audio[0].metadata)
+        report("Re-encoded: the source's tags kept, not its encoder's name",
+               None if ok and tags.get("COMMENT") == "kept" and "Lavc61 dca" not in tags.values() and len(decoded(tagged)[5]
+               & decoded(tmp / "out_tagged.mkv")[5]) <= 2 else f"ok={ok} tags {tags}, warnings {warnings}")
 
         # Copied, with a warning
         unordered = tmp / "aac_6ch.mp4"
