@@ -21,8 +21,10 @@ python smartcut/tests/regression/run_cases.py --list
 `--one-core` (`run_cases.pin_to_one_core()`) also holds x265's threads, which set their own affinity: on Windows
 through a job object (x265 then logs "unable to set thread affinity for NUMA node mask", expected). x265 sizes its
 pool from all the machine's CPUs, so its re-encodes get a 1-CPU machine's threads (a 1-thread pool, 1 frame thread)
-unless their options set them. With that pool, HEVC times on one Windows core vary up to 2x from run to run:
-compare them over several interleaved runs.
+unless their options set them. On Windows the calling thread also runs below normal priority, as x265's pool
+threads do: at normal priority, every x265 encoder close stalled 0.5-10 s on one core (x265 waits for its pool with
+`Sleep(0)`, which doesn't let a lower-priority thread run), so HEVC edits seemed 2-3x slower and varied 2x from run
+to run. Call `pin_to_one_core()` from the thread that cuts.
 
 `make_test_media.py` also makes the HEVC clips (`synth_hevc*.mp4`; with `--real`, `real_hevc*.mp4`). For the
 HEVC calibration case `RE10_hevc_1080p` in `progress_timeline.py`, transcode a 1080p clip with `--real`'s HEVC settings.

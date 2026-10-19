@@ -125,7 +125,8 @@ _ONE_CORE_JOB = []  # keeps the Windows job object open
 
 
 def pin_to_one_core() -> None:
-    """Run on one CPU core, like the 1-CPU server. Call it after importing smartcut (see x265 below).
+    """Run on one CPU core, like the 1-CPU server. Call it after importing smartcut, from the thread that cuts (see
+    x265 below).
 
     FFmpeg sizes its codec thread pools from the CPUs the process may use. x265 doesn't:
     - On Windows it sets its pool threads' affinity to the whole NUMA node itself, which escaped
@@ -135,8 +136,13 @@ def pin_to_one_core() -> None:
     - It sizes its thread pool and frame threads from all the machine's CPUs (Windows: 12 pool threads and 3 frame
       threads on a 6-core / 12-thread desktop). x265_one_cpu() gives smartcut's x265 re-encodes what x265 picks on a
       1-CPU machine.
-    x265 times on one Windows core vary by up to 2x from run to run (its 1-thread pool hands work between threads;
-    without a pool they vary by 1-2 %): compare HEVC speeds over several interleaved runs.
+    - Its pool threads run below normal priority (Linux: nice 10), and closing an encoder waits for them in a loop
+      that gives up the CPU with Sleep(0) (Linux: usleep(0)). On one Windows core Sleep(0) only lets threads of the
+      same or higher priority run, so each close stalled for 0.5-10 s, until Windows boosted the starved pool thread:
+      that was why x265 with its 1-thread pool seemed 2-3x slower here and varied 2x from run to run. On Windows this
+      thread runs at the pool's priority too, so the close takes 0.01-0.04 s and feeding and flushing take as long as
+      before. Linux's usleep(0) sleeps for the timer slack (~50 us), during which the pool thread runs (not measured
+      on the VPS).
     """
     if hasattr(os, "sched_setaffinity"):  # Linux: threads created later inherit it
         os.sched_setaffinity(0, {sorted(os.sched_getaffinity(0))[0]})
@@ -163,6 +169,10 @@ def pin_to_one_core() -> None:
                 and kernel32.AssignProcessToJobObject(job, kernel32.GetCurrentProcess())):
             raise OSError(ctypes.get_last_error(), "pinning to one CPU through a job object failed")
         _ONE_CORE_JOB.append(job)
+        kernel32.GetCurrentThread.restype = wintypes.HANDLE
+        kernel32.SetThreadPriority.argtypes = [wintypes.HANDLE, ctypes.c_int]
+        if not kernel32.SetThreadPriority(kernel32.GetCurrentThread(), -1):  # THREAD_PRIORITY_BELOW_NORMAL, as x265's pool
+            raise OSError(ctypes.get_last_error(), "lowering this thread's priority failed")
     x265_one_cpu()
 
 
