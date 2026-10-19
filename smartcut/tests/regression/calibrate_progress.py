@@ -44,9 +44,10 @@ What it does:
      Facebook clip's), on those edits' calibration runs;
    - real runs: fresh runs of the app's typical edits, interleaved (--repeat), under the costs fitted on all edits.
 6. The adoption rule (the regression README, "The adoption rule"): adopts the costs fitted on all the edits only if
-   both comparisons are more even by at least ADOPT_MARGIN (0.5) points, and not with --quick, when the pinning
-   didn't hold, when the CPU check warned, without the Facebook clip (the only footage other than the source clip's),
-   or without a held-out check (one resolution). It writes them to the file
+   both comparisons are more even by at least ADOPT_MARGIN (0.5) points and no edit is worse by more than EDIT_GUARD
+   (1.5) points in either, and not with --quick, when the pinning didn't hold, when the CPU check warned, without the
+   Facebook clip (the only footage other than the source clip's), when one of the app's codecs (H.264, VP9, AV1) isn't
+   calibrated (see --codecs), or without a held-out check (one resolution). It writes them to the file
    smartcut reads (SMARTCUT_PROGRESS_COSTS, else ~/.config/smartcut/progress_costs.json or %APPDATA%\\smartcut\\, or
    --out), keeping the previous file as progress_costs.previous.json. Otherwise it writes
    progress_costs.candidate.json next to it and leaves the file alone. Either way it prints the comparison and
@@ -112,6 +113,12 @@ FADES = {"fadein": 2, "fadeout": 2}
 # use by at least ADOPT_MARGIN points on average, in both checks. Between two timing samples of the same edits, the
 # mean paired difference over the held-out edits varied by 0.08-0.18 points (sigma); a smaller gain isn't visible.
 ADOPT_MARGIN = 0.5
+# ...and no single edit may get worse by more than EDIT_GUARD points in either check (decided). One edit's paired
+# difference varied between two runs by sigma 0.26-0.48 points, at most 1.55
+EDIT_GUARD = 1.5
+# The app's codecs (Smart Edit offers H.264, VP9 and AV1): each must be calibrated for an adoption. A codec left out
+# would get the costs in use, scaled by the others' speed, written without any check
+APP_CODECS = DEFAULT_CODECS
 LOW_CPU = 0.85  # on one core, CPU time / wall time below this: something else used the CPU
 # For the estimates, measured on one desktop core (Oct 2026): ms per frame to make the clips at 360/720/1080p, and
 # seconds per edit of a 90 s excerpt (FB2: Facebook's 360p H.264 + HE-AAC)
@@ -583,11 +590,14 @@ def real_core_check(result: dict) -> tuple[list[str], list[str]]:
     return escaped, loaded
 
 
-def decide(*, quick: bool, pinned: bool, quiet: bool, facebook: bool, no_split: str | None,
-           held_out: tuple[float, float], real: tuple[float, float]) -> tuple[bool, list[str]]:
+def decide(*, quick: bool, pinned: bool, quiet: bool, facebook: bool, uncalibrated: list[str], no_split: str | None,
+           held_out: tuple[float, float], real: tuple[float, float],
+           held_out_edits: dict[str, tuple[float, float]], real_edits: dict[str, tuple[float, float]]) -> tuple[bool, list[str]]:
     """The adoption rule: whether to adopt the new costs, and the reasons not to. facebook: the plan has the Facebook
-    clip's edits, the only footage other than the source clip's (decided: required). held_out and real are the mean
-    evenness (%, in use and new) of the held-out check and of the real runs; both must improve by ADOPT_MARGIN."""
+    clip's edits, the only footage other than the source clip's (decided: required). uncalibrated: the APP_CODECS the
+    plan has no edits of. held_out and real are the mean evenness (%, in use and new) of the held-out check and of the
+    real runs; both must improve by ADOPT_MARGIN. held_out_edits and real_edits: the same per edit (the real runs: the
+    mean of its paired runs); none may get worse by more than EDIT_GUARD (decided)."""
     reasons = []
     if quick:
         reasons.append("--quick is a smoke check, not a calibration")
@@ -597,11 +607,18 @@ def decide(*, quick: bool, pinned: bool, quiet: bool, facebook: bool, no_split: 
         reasons.append("the CPU check warned of other load")
     if not facebook:
         reasons.append("no Facebook clip: no held-out footage (make the media with --facebook)")
+    if uncalibrated:
+        reasons.append(f"{', '.join(uncalibrated)} not calibrated: {'their' if len(uncalibrated) > 1 else 'its'} costs would be "
+                       "the costs in use, scaled, unchecked (see --codecs)")
     if no_split:
         reasons.append(f"no held-out check: {no_split}")
     elif not (held_out[1] <= held_out[0] - ADOPT_MARGIN and real[1] <= real[0] - ADOPT_MARGIN):
         reasons.append(f"not more even by {ADOPT_MARGIN} points (held-out edits {held_out[0]:.1f} -> {held_out[1]:.1f} %, "
                        f"real runs {real[0]:.1f} -> {real[1]:.1f} %)")
+    for check, edits in (("held-out check", {} if no_split else held_out_edits), ("real runs", real_edits)):
+        for name, (before, after) in edits.items():
+            if after - before > EDIT_GUARD:
+                reasons.append(f"{name} worse by {after - before:.2f} points in the {check} ({before:.1f} -> {after:.1f} %)")
     return not reasons, reasons
 
 
@@ -717,6 +734,8 @@ def main() -> None:
     cases, app, held = plan_cases(manifest, codecs, resolutions, args.quick)
     no_split = split_problem(cases, held, manifest)
     facebook = any(manifest["files"][c["file"]]["facebook"] for c in cases)
+    calibrated = {manifest["files"][c["file"]]["codec"] for c in cases if not manifest["files"][c["file"]]["facebook"]}
+    uncalibrated = [c for c in APP_CODECS if c not in calibrated]
     fit_on = [c["name"] for c in cases if c["name"] not in held]
     target = args.out or progress_costs.progress_costs_path()
     old, messages = progress_costs.load(target)
@@ -733,6 +752,8 @@ def main() -> None:
         print("      --quick: a smoke check; it writes the candidate only, never the file smartcut reads")
     if not facebook:
         print("      no Facebook clip: no held-out footage (make the media with --facebook): it writes the candidate only")
+    if uncalibrated:
+        print(f"      not calibrated: {', '.join(uncalibrated)} (see --codecs): it writes the candidate only")
     print(f"estimated: ~{edits_s / 60:.1f} min of edits + ~{real_s / 60:.1f} min of real runs on one desktop core "
           "(one server core may be slower; more cores, faster)")
     if args.estimate:
@@ -826,11 +847,14 @@ def main() -> None:
     print(f"  Held-out check: the held-out edits' calibration runs, replayed under the costs in use and costs fitted\n"
           f"  without them. Real runs, paired: fresh runs of the app edits, each replayed under the costs in use and the\n"
           f"  new ones (fitted on all the edits), the same timings for both. Adopted if both are more even by at least\n"
-          f"  {ADOPT_MARGIN} points. As they went: each run with its own costs; noisy (the same short edit varies a few % from\n"
-          f"  run to run).")
+          f"  {ADOPT_MARGIN} points, and no edit is worse by more than {EDIT_GUARD} points in either. As they went: each run with\n"
+          f"  its own costs; noisy (the same short edit varies a few % from run to run).")
 
-    adopt, reasons = decide(quick=args.quick, pinned=not escaped, quiet=not loaded, facebook=facebook, no_split=no_split,
-                            held_out=(held_old, held_new), real=(real_old, real_new))
+    held_edits = {n: (replayed[n]["in use"], replayed[n]["held-out fit"]) for n in held if "held-out fit" in replayed[n]}
+    real_edits = {n: (mean(paired[n]["in use"]), mean(paired[n]["new"])) for n in app}
+    adopt, reasons = decide(quick=args.quick, pinned=not escaped, quiet=not loaded, facebook=facebook, uncalibrated=uncalibrated,
+                            no_split=no_split, held_out=(held_old, held_new), real=(real_old, real_new),
+                            held_out_edits=held_edits, real_edits=real_edits)
     import importlib  # noqa: PLC0415
 
     import av  # noqa: PLC0415
@@ -854,7 +878,7 @@ def main() -> None:
                                "calibration runs, all": [round(all_old, 2), round(all_new, 2)]}},
         "held_out": held, "fitted_without_them_on": fit_on, "held_out_fit": json.loads(progress_costs.to_json(held_fit))["recode_cost"]
         if held_fit is not None else None,
-        "margin": ADOPT_MARGIN, "not_adopted_because": reasons,
+        "margin": ADOPT_MARGIN, "edit_guard": EDIT_GUARD, "not_adopted_because": reasons,
         "costs_before": json.loads(progress_costs.to_json(old))}
     text = progress_costs.to_json(new, measured_info, {**comparison, "adopted": adopt})
     try:
@@ -866,7 +890,7 @@ def main() -> None:
     written = save_costs(target, text, adopt)
     if adopt:
         print(f"\nADOPTED: more even by at least {ADOPT_MARGIN} points (held-out edits {held_old:.1f} -> {held_new:.1f} %, "
-              f"real runs {real_old:.1f} -> {real_new:.1f} %). Wrote {written}")
+              f"real runs {real_old:.1f} -> {real_new:.1f} %), no edit worse by more than {EDIT_GUARD} points. Wrote {written}")
         print("smartcut reads it at the first edit of a process: restart the app (e.g. sudo systemctl restart gradio-apps).")
     else:
         print(f"\nNOT ADOPTED: {'; '.join(reasons)}. {target} unchanged; the candidate is in {written}")

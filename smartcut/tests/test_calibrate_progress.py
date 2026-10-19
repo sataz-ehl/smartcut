@@ -3,8 +3,9 @@
 Tests of tests/regression/calibrate_progress.py.
 
 Unit tests (no encoding):
-1. The adoption rule: adopted only if both checks are more even by ADOPT_MARGIN, never with --quick, when the
-   pinning didn't hold, when the CPU check warned, without the Facebook clip or without a held-out check
+1. The adoption rule: adopted only if both checks are more even by ADOPT_MARGIN and no edit is worse by more than
+   EDIT_GUARD in either, never with --quick, when the pinning didn't hold, when the CPU check warned, without the
+   Facebook clip, with one of the app's codecs not calibrated, or without a held-out check
 2. The held-out edits (the app's height and the Facebook clip's, always), and when there is no held-out check
 3. The costs fitted without the held-out edits use only the other edits' runs and copy / audio times
 4. The CPU checks: an encoder run or a real run on more cores than expected, or less than LOW_CPU of one core
@@ -58,7 +59,10 @@ M = cp.ADOPT_MARGIN
 # ------------------------------------------------------------------------------------------------------ unit tests
 
 def test_rule() -> None:
-    ok = {"quick": False, "pinned": True, "quiet": True, "facebook": True, "no_split": None}
+    G = cp.EDIT_GUARD
+    edits = {"A": (5.0, 4.0), "B": (3.0, 3.0 + G)}  # B worse by exactly the guard: allowed
+    ok = {"quick": False, "pinned": True, "quiet": True, "facebook": True, "uncalibrated": [], "no_split": None,
+          "held_out_edits": edits, "real_edits": edits}
     better, worse = (6.0, 6.0 - M), (5.0, 5.0 - M + 0.01)
     assert cp.decide(**ok, held_out=better, real=better) == (True, []), "both checks better by the margin: adopted"
     for held, real in ((better, worse), (worse, better), (worse, worse), ((4.0, 4.5), better)):
@@ -66,9 +70,19 @@ def test_rule() -> None:
         assert not adopt and len(reasons) == 1 and "not more even by" in reasons[0], (held, real, reasons)
     for change, words in (({"quick": True}, "--quick"), ({"pinned": False}, "pinning"), ({"quiet": False}, "CPU check"),
                           ({"facebook": False}, "no Facebook clip: no held-out footage"),
+                          ({"uncalibrated": ["vp9", "av1"]}, "vp9, av1 not calibrated: their costs would be the costs in use"),
+                          ({"uncalibrated": ["av1"]}, "av1 not calibrated: its costs"),
                           ({"no_split": "one resolution"}, "no held-out check: one resolution")):
         adopt, reasons = cp.decide(**{**ok, **change}, held_out=better, real=better)
         assert not adopt and reasons == [r for r in reasons if words in r] and reasons, (change, reasons)
+    # The per-edit guard: one edit worse by more than EDIT_GUARD in either check, however much better the means are
+    bad = {**edits, "P2_h264_720p": (3.68, 3.68 + G + 0.02)}
+    for check, change in (("held-out check", {"held_out_edits": bad}), ("real runs", {"real_edits": bad})):
+        adopt, reasons = cp.decide(**{**ok, **change}, held_out=(9.0, 2.0), real=(9.0, 2.0))
+        assert not adopt and reasons == [f"P2_h264_720p worse by {G + 0.02:.2f} points in the {check} (3.7 -> 5.2 %)"], (check, reasons)
+    adopt, reasons = cp.decide(**{**ok, "held_out_edits": bad, "real_edits": bad, "no_split": "one resolution"},
+                               held_out=better, real=better)
+    assert not adopt and len(reasons) == 2 and "in the real runs" in reasons[1], "no held-out check: its edits aren't judged"
 
 
 def manifest_for(heights: list[int], facebook: bool) -> dict:
