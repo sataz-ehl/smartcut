@@ -97,7 +97,7 @@ smartcut.process_segments("in.mp4", "out.mp4", [
 | `progress_costs.py` | The progress estimate's costs: built-in, or a machine's own `progress_costs.json` (validated, with a fallback) |
 | `smart_cut.py` | `smart_cut()` accepts `SegmentWithFade` lists; attaches fade info and segment bounds to the cut pieces, marks the GOPs that overlap a video fade for re-encoding, finds each output's joins and picks `RecodeAudioCutter` for the audio tracks a copy wouldn't be exact for; sets the MP4 movie timescale |
 | `video_cutter.py` | `VideoCutter._apply_fade_to_frame()` / `_fade_yuv_frame()`: per-frame video fade in the re-encode path; faster VP9/AV1 encoder settings |
-| `track_cutters.py` | `audio_needs_recode()`: copy or re-encode; `RecodeAudioCutter` + `create_recode_audio_output_stream()`: audio fades, join fades, lead-in, bitrate (`_recode_audio_bitrate()`); `PrerollPassthruAudioCutter` / `OpusPassthruAudioCutter`: exact copies into MP4 |
+| `track_cutters.py` | `audio_needs_recode()`: copy or re-encode; `RecodeAudioCutter` + `create_recode_audio_output_stream()`: audio fades, join fades, bitrate (`_recode_audio_bitrate()`); `PrerollPassthruAudioCutter` / `OpusPassthruAudioCutter`: exact copies into MP4 |
 | `__main__.py` | CLI parsing of the fade keywords, multiple `--keep` |
 | `__init__.py` | High-level API above |
 
@@ -160,24 +160,12 @@ smartcut.process_segments("in.mp4", "out.mp4", [
   - Edits with fades get them too: before, their re-encoded joins were hard cuts.
   - Measured on a steady 440 Hz tone, largest sample step near a join ÷ the tone's own largest step: hard cut
     5.0-11.0x (an audible click), with the fades 1.0x (copied joins: 1.3-1.4x).
-- **Start of a re-encoded track.** When the output starts mid-stream, MP4-family outputs feed the encoder 80 ms of
-  the source audio before the cut (`RecodeAudioCutter.LEAD_IN`).
-  - It goes in at negative timestamps, and the edit list skips it, the same mechanism as the copy's pre-roll. Its
-    `media_time` is the lead-in plus the encoder delay, e.g. 3528 + 1024 samples at 44.1 kHz.
-  - The encoder then starts with the signal already running. On a 440 Hz tone the first 20 ms came out at x1.00 of
-    the source (AAC, AC-3, MP3), A/V +0.05 ms. From a cold start the first 10 ms were x1.23 (encoder onset).
-  - The lead-in takes the first segment's gain, so it is silent before a fade-in.
-  - Real music re-encoded from a cold start was x0.94-1.09 in the first 40 ms, within the re-encoding's own range.
-  - Exceptions, which start cold at the cut:
-    - **Opus in MP4.** Its stream header's pre-skip (PreSkip in `dOps`), which some players may use instead of the
-      edit list, is written by the encoder when it opens, before any audio, and PyAV can't change it afterwards.
-      With a lead-in FFmpeg was exact (it follows the edit list), but a player that follows the pre-skip would play
-      80 ms of audio from before the cut, 80 ms late. Cold start, first 20 ms: x0.93-0.96 on a tone (a 2.7x step at
-      the onset), x0.91-0.96 on noise. The app never writes Opus into MP4.
-    - **Matroska / WebM.** There's no edit list, and players would play a lead-in at its negative time. Cold start,
-      first 20 ms in 2.5 ms windows: AAC into MKV x0.94-1.28 on noise (x0.94-1.61 on a tone); Opus into WebM
-      x0.76-1.10 on noise (x0.90-0.96 on a tone). Before, both were silent for the first 15-20 ms: copies started a
-      frame late, and Opus copies shifted all streams by 73 ms.
+- **Start of a re-encoded track.** The encoder starts cold at the cut, in every container (decided: an 80 ms
+  lead-in at negative timestamps, skipped by the MP4 edit list, was tried and dropped).
+  - On a 440 Hz tone the first 10 ms came out x1.23 of the source in MP4 (the encoder's onset). Real music was
+    x0.94-1.09 in the first 40 ms, within the re-encoding's own range.
+  - First 20 ms in 2.5 ms windows: AAC into MKV x0.94-1.28 on noise (x0.94-1.61 on a tone); Opus into WebM
+    x0.76-1.10 on noise (x0.90-0.96 on a tone); Opus into MP4 x0.91-0.96 on noise (x0.93-0.96 on a tone).
 - **Matroska / WebM timing.** FFmpeg 8 (PyAV 16) writes the encoder's delay as the track's CodecDelay (AAC 1024
   samples, Opus 312) and keeps those samples at negative timestamps, so nothing is shifted.
   - Re-encoded AAC into MKV: container start -23 ms, the video exactly where it belongs, audio content +0.5 ms.
@@ -202,7 +190,7 @@ smartcut.process_segments("in.mp4", "out.mp4", [
     Vorbis → Opus.
   - The sample rate and channels are kept, unless the encoder can't do the rate (Opus: 48 kHz; AC-3: 32/44.1/48).
 - **Bitrate of re-encoded audio** (`_recode_audio_bitrate()` in `track_cutters.py`, for each track separately; the
-  lead-in and the join fades go through the same encoder):
+  join fades go through the same encoder):
   1. **The source's average bitrate.**
      - As its stream reports it. MP4 always does, with the average, so VBR sources get their average.
      - Otherwise it is computed from the track's packets: total size × 8 ÷ the time those packets span. Matroska and

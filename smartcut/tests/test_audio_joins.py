@@ -16,9 +16,8 @@ Checks per case, against the source:
   audio; a steady tone is ambiguous), within 1 ms (1.5 ms in Matroska / WebM, whose timestamps are rounded to 1 ms);
   the video starts where it should (nothing shifted)
 - level: 10 ms RMS against the ideal output (the source with the expected fades), 0.85-1.2, from the start through
-  every join (copied MDCT joins had bursts up to x33). Re-encodes that start mid-stream get a lead-in in MP4, so
-  they start like a copy; Matroska / WebM have no edit list to skip one, and Opus in MP4 none either (its pre-skip),
-  so there the encoder starts cold and its first 20 ms may reach x1.3 on a pure tone: not checked
+  every join (copied MDCT joins had bursts up to x33). A re-encode that starts mid-stream starts the encoder cold at
+  the cut, and its first 20 ms may reach x1.3 on a pure tone: not checked
 - clicks, on a steady tone: the largest sample step within 10 ms of each join, against the tone's own largest step,
   at most 1.2 (a hard cut: 5-11x)
 
@@ -96,10 +95,12 @@ def read(path: Path) -> dict:
         rate, codec = c.streams.audio[0].sample_rate, c.streams.audio[0].codec_context.name
         frames = list(c.decode(audio=0))
     with av.open(str(path)) as c:
-        packets = [bytes(p) for p in c.demux(audio=0) if p.size]
+        demuxed = [p for p in c.demux(audio=0) if p.size]
+        packets = [bytes(p) for p in demuxed]
+        first_packet = min(float(p.pts * p.time_base) for p in demuxed if p.pts is not None)
     x = np.concatenate([f.to_ndarray().astype(np.float64).mean(axis=0) for f in frames])
     return {"start": start, "vt": vt, "rate": rate, "codec": codec, "a0": float(frames[0].pts * frames[0].time_base), "x": x,
-            "packets": packets}
+            "packets": packets, "first_packet": first_packet}
 
 
 def lag(src: dict, out: dict, out_t: float, src_t: float, *, win: float = 0.3, search: float = 0.03) -> float:
@@ -142,6 +143,8 @@ def check(src_path: Path, out_path: Path, segments: list[dict], copied: bool, si
         return f"{same}/{len(out['packets'])} audio packets copied, expected a re-encode"
     if src["rate"] != out["rate"]:
         return f"audio at {out['rate']} Hz, the source at {src['rate']} Hz"
+    if not copied and out["first_packet"] < -0.05:  # the encoder's priming is 6.5-26 ms; an 80 ms lead-in was dropped
+        return f"re-encoded audio starts at {out['first_packet'] * 1000:.1f} ms: more than the encoder's priming"
     rate = src["rate"]
     segs, seg_out = expected(segments, src)
     tolerance = 0.0015 if out_path.suffix in (".mkv", ".webm") else 0.001  # Matroska: timestamps in 1 ms
@@ -178,7 +181,7 @@ def check(src_path: Path, out_path: Path, segments: list[dict], copied: bool, si
     o = out["x"][-lead:] if lead < 0 else np.concatenate([np.zeros(lead), out["x"]])
     win = rate // 100
     bad = []
-    cold = not copied and segs[0][0] > src["vt"][0] and (out_path.suffix in (".mkv", ".webm") or "opus" in out["codec"])
+    cold = not copied and segs[0][0] > src["vt"][0]  # a re-encode starting mid-stream: the encoder starts cold
     for i in range(int(0.02 * rate) if cold else 0, min(len(o), total) - win, win):
         ri = np.sqrt((ideal[i:i + win] ** 2).mean())
         if ri > 0.05 * AMPLITUDE:
