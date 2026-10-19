@@ -27,7 +27,11 @@ import struct
 import sys
 import time
 import traceback
+from collections.abc import Iterator
+from contextlib import closing  # with closing(av.open()): PyAV types a container's __exit__ as maybe swallowing errors
+from fractions import Fraction
 from pathlib import Path
+from typing import Any, cast
 
 import av
 import numpy as np
@@ -144,7 +148,7 @@ def pick_cpus(n: int) -> list[int]:
     affinity mask, by the cores GetLogicalProcessorInformationEx lists (_windows_cores), the fastest kind first: on a
     hybrid Intel CPU (P-cores with hyperthreads, E-cores without) the P-cores. Hyperthreads are used only when there
     are fewer cores than n."""
-    if hasattr(os, "sched_getaffinity"):
+    if sys.platform != "win32" and hasattr(os, "sched_getaffinity"):  # sys.platform: for type checkers
         allowed = sorted(os.sched_getaffinity(0))
         seen, cores = set(), []
         for cpu in allowed:
@@ -226,7 +230,7 @@ def _windows_affinity() -> list[int]:
 
 def available_cpus() -> int:
     """How many CPUs this process may run on (its affinity, as FFmpeg sizes its threads)."""
-    return len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else len(_windows_affinity())
+    return len(os.sched_getaffinity(0)) if sys.platform != "win32" and hasattr(os, "sched_getaffinity") else len(_windows_affinity())
 
 
 def pin_to_cores(n: int) -> list[int]:
@@ -250,7 +254,7 @@ def pin_to_cores(n: int) -> list[int]:
       timer slack (~50 us), during which the pool thread runs (not measured on the VPS).
     """
     cpus = pick_cpus(n)
-    if hasattr(os, "sched_setaffinity"):  # Linux: threads created later inherit it
+    if sys.platform != "win32" and hasattr(os, "sched_setaffinity"):  # Linux: threads created later inherit it
         os.sched_setaffinity(0, set(cpus))
     elif sys.platform == "win32":
         import ctypes  # noqa: PLC0415
@@ -334,7 +338,7 @@ def x265_one_cpu() -> None:
     x265_threads_for(1)
 
 
-def fades_of(seg):
+def fades_of(seg: dict) -> tuple[float, float, float, float]:
     """(video_in, video_out, audio_in, audio_out) durations, with CutSegmentConfig's precedence."""
     vi = seg.get("fadein") if seg.get("fadein") is not None else seg.get("video_fadein")
     ai = seg.get("fadein") if seg.get("fadein") is not None else seg.get("audio_fadein")
@@ -343,7 +347,7 @@ def fades_of(seg):
     return vi or 0, vo or 0, ai or 0, ao or 0
 
 
-def ideal_gain(u, length, fin, fout):
+def ideal_gain(u: np.ndarray, length: float, fin: float, fout: float) -> np.ndarray:
     g = np.ones_like(u, dtype=float)
     if fin:
         g = np.minimum(g, np.clip(u / fin, 0, 1))
@@ -352,10 +356,10 @@ def ideal_gain(u, length, fin, fout):
     return g
 
 
-def read_media(path):
+def read_media(path: Path) -> tuple[dict, np.ndarray, np.ndarray, list[str], list[tuple]]:
     """Video luma means/hashes per frame, and per audio track: mono samples, sample rate, start time."""
     v_t, v_mean, v_hash = [], [], []
-    with av.open(str(path)) as c:
+    with closing(av.open(str(path))) as c:
         vs = c.streams.video[0] if c.streams.video else None
         audio_streams = list(c.streams.audio)
         as_ = audio_streams[0] if audio_streams else None
@@ -370,8 +374,9 @@ def read_media(path):
                 "v_stream_s": float(vs.duration * vs.time_base) if vs and vs.duration is not None and vs.time_base else None}
         # Decoding drops the frames outside an MP4 edit list, as FFmpeg and players do: the frame count is the same
         # as ffprobe -count_frames
-        decoded = ((packet.stream.index, frame) for packet in c.demux(*[s for s in (vs, *audio_streams) if s is not None])
-                   for frame in packet.decode())
+        decoded = cast(Iterator[tuple[int, av.VideoFrame | av.AudioFrame]],  # only video and audio streams are demuxed
+                       ((packet.stream.index, frame) for packet in c.demux(*[s for s in (vs, *audio_streams) if s is not None])
+                        for frame in packet.decode()))
         for i, frame in decoded:
             if isinstance(frame, av.VideoFrame):
                 p = frame.planes[0]
@@ -380,7 +385,7 @@ def read_media(path):
                     y = (np.frombuffer(p, "<u2").reshape(frame.height, p.line_size // 2)[:, :frame.width] >> shift).astype(np.uint8)
                 else:
                     y = np.frombuffer(p, np.uint8).reshape(frame.height, p.line_size)[:, :frame.width]
-                v_t.append(float(frame.pts * frame.time_base))
+                v_t.append(float(cast(int, frame.pts) * cast(Fraction, frame.time_base)))
                 v_mean.append(float(y.mean()))
                 v_hash.append(hashlib.md5(y.tobytes()).hexdigest())
             else:
@@ -388,9 +393,9 @@ def read_media(path):
                 mono = (arr.astype(np.float32).mean(axis=0) if frame.format.is_planar
                         else arr.reshape(-1, len(frame.layout.channels)).astype(np.float32).mean(axis=1))
                 if np.issubdtype(arr.dtype, np.integer):
-                    mono /= np.iinfo(arr.dtype).max
+                    mono /= np.iinfo(cast(np.dtype[np.integer[Any]], arr.dtype)).max
                 if i not in a_start:
-                    a_start[i] = float(frame.pts * frame.time_base) if frame.pts is not None else 0.0
+                    a_start[i] = float(frame.pts * cast(Fraction, frame.time_base)) if frame.pts is not None else 0.0
                 a_rate[i] = frame.sample_rate
                 a_chunks[i].append(mono)
     audios = [(np.concatenate(a_chunks[s.index]) if a_chunks[s.index] else np.zeros(0, np.float32),
@@ -398,13 +403,15 @@ def read_media(path):
     return info, np.array(v_t), np.array(v_mean), v_hash, audios
 
 
-def rms_windows(x, rate, win):
+def rms_windows(x: np.ndarray, rate: int, win: float) -> np.ndarray:
     n = int(rate * win)
     k = len(x) // n
     return np.sqrt((x[: k * n].reshape(k, n).astype(np.float64) ** 2).mean(axis=1))
 
 
-def measure_audio(o_track, s_track, o_offset, tone, segs, starts, lengths, v_duration, src_start: float = 0.0):
+def measure_audio(o_track: tuple, s_track: tuple, o_offset: float, tone: bool, segs: list[dict],  # noqa: PLR0917
+                  starts: np.ndarray, lengths: list[float], v_duration: float, src_start: float = 0.0
+                  ) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray]:
     """One audio track vs the same source track: length vs the video, fade curve error, gain outside fades, dips.
     src_start: the source's container start, which segment times count from."""
     (o_audio, o_rate, _), (s_audio, s_rate, s_astart) = o_track, s_track
@@ -444,7 +451,7 @@ def measure_audio(o_track, s_track, o_offset, tone, segs, starts, lengths, v_dur
 _sources = {}
 
 
-def analyse(media, out_dir, case, src_name, segs, out_path):
+def analyse(media: Path, out_dir: Path, case: str, src_name: str, segs: list[dict], out_path: Path) -> dict:  # noqa: PLR0917
     if src_name not in _sources:
         _sources[src_name] = read_media(media / src_name)
     s_info, s_vt, s_vmean, _, s_audios = _sources[src_name]
@@ -553,7 +560,7 @@ def analyse(media, out_dir, case, src_name, segs, out_path):
     return res
 
 
-def other_tracks(r):
+def other_tracks(r: dict) -> list[str]:
     """Table notes for the audio tracks after the first: A-V ms and fade error."""
     notes = []
     for t, tr in enumerate(r.get("tracks", [])[1:], start=2):
@@ -562,7 +569,7 @@ def other_tracks(r):
     return notes
 
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("media_dir", nargs="?")
     ap.add_argument("out_dir", nargs="?")
@@ -577,7 +584,7 @@ def main():
         return 0
 
     sys.path.insert(0, args.repo)
-    import smartcut  # noqa: E402
+    import smartcut  # noqa: PLC0415
 
     if args.one_core:
         pin_to_one_core()
@@ -596,7 +603,7 @@ def main():
         t = time.perf_counter()
         try:
             ok = smartcut.process_segments(str(media / src), str(out_path), segments=[dict(s) for s in segs],
-                                           progress_callback=lambda c, n: calls.append((c, n)))
+                                           progress_callback=lambda c, n, calls=calls: calls.append((c, n)))
             err = None
         except Exception as e:
             ok, err = False, f"{type(e).__name__}: {e}"
@@ -612,7 +619,7 @@ def main():
         print(f"done {case}: ok={ok} {r['seconds']:.1f}s", flush=True)
     (out_dir / "results.json").write_text(json.dumps(results, indent=2, default=str))
 
-    def f(x, nd=2):
+    def f(x: object, nd: int = 2) -> str:
         return "-" if x is None else (f"{x:.{nd}f}" if isinstance(x, float) else str(x))
 
     print(f"\n{'case':<20}{'verdict':<9}{'sec':>7}{'dur/exp':>13}{'stream':>7}{'frames/exp':>12}{'gap':>5}{'same':>5}{'A-V ms':>8}"

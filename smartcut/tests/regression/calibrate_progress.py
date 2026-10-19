@@ -68,6 +68,7 @@ import contextlib
 import ctypes
 import gc
 import hashlib
+import io
 import json
 import os
 import platform
@@ -79,9 +80,10 @@ import sys
 import tempfile
 import time
 from collections import defaultdict
+from contextlib import closing  # with closing(av.open()): PyAV types a container's __exit__ as maybe swallowing errors
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from smartcut.progress_costs import ProgressCosts
@@ -136,7 +138,7 @@ def sha256(path: Path) -> str:
 def probe(path: Path) -> dict:
     """Codec family, size, frame rate, duration and audio of a clip; whether HEVC carries x265 options."""
     import av  # noqa: PLC0415
-    with av.open(str(path)) as c:
+    with closing(av.open(str(path))) as c:
         v = c.streams.video[0]
         name = v.codec_context.name or ""
         info = {"codec": "av1" if "av1" in name else name, "width": v.codec_context.width, "height": v.codec_context.height,
@@ -327,8 +329,8 @@ def child_setup(cores: int | None) -> dict:
     sys.path.insert(1, str(HERE))
     import run_cases  # noqa: PLC0415
 
-    import smartcut  # noqa: F401, PLC0415 (this repo's, as sys.path now says)
-    info = {"available_cpus": run_cases.available_cpus()}
+    import smartcut  # noqa: F401, PLC0415 (this repo's, as sys.path now says)  # pyright: ignore[reportUnusedImport]
+    info: dict[str, int | list[int]] = {"available_cpus": run_cases.available_cpus()}
     if cores:
         info["cpus"] = run_cases.pin_to_cores(cores)
     info["expected_cores"] = cores or info["available_cpus"]
@@ -338,7 +340,7 @@ def child_setup(cores: int | None) -> dict:
 def install_recorder(record: dict) -> None:
     """Record each edit's work plan and every call smart_cut makes on its _WorkProgress, with its time."""
     import importlib  # noqa: PLC0415
-    sc = importlib.import_module("smartcut.smart_cut")
+    sc: Any = importlib.import_module("smartcut.smart_cut")  # smartcut.smart_cut is the function
     work = sc._WorkProgress
     orig_plan = sc._work_plan
 
@@ -671,7 +673,7 @@ def main() -> None:
         result = (child_measure if sys.argv[1] == "--_measure" else child_real)(spec)
         Path(sys.argv[3]).write_text(json.dumps(result))
         return
-    sys.stdout.reconfigure(line_buffering=True)  # in order with the measuring processes' output
+    cast(io.TextIOWrapper, sys.stdout).reconfigure(line_buffering=True)  # in order with the measuring processes' output
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("clip", nargs="?", type=Path, help="a real H.264 + AAC clip to make the test clips from")
     ap.add_argument("--facebook", type=Path, help="a Facebook clip (H.264 + HE-AAC), copied as it is")

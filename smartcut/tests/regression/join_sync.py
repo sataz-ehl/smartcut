@@ -28,7 +28,10 @@ import argparse
 import math
 import sys
 import time
+from contextlib import closing  # with closing(av.open()): PyAV types a container's __exit__ as maybe swallowing errors
+from fractions import Fraction
 from pathlib import Path
+from typing import cast
 
 import av
 import numpy as np
@@ -48,19 +51,19 @@ def pin_to_one_core() -> None:
 def read(path: Path) -> dict:
     """Video frame times and frame duration; first audio track: mono samples by count and by pts, rate, first pts,
     overlapping and missing samples by pts; stream start times."""
-    with av.open(str(path)) as c:
+    with closing(av.open(str(path))) as c:
         vs = c.streams.video[0]
         vs.thread_type = "AUTO"
-        starts = {s.type: (float(s.start_time * s.time_base) if s.start_time is not None else None) for s in c.streams}
+        starts = {s.type: (float(s.start_time * cast(Fraction, s.time_base)) if s.start_time is not None else None) for s in c.streams}
         starts["container"] = c.start_time / av.time_base if c.start_time is not None else None
         rate_v = vs.average_rate
-        vt = sorted(float(f.pts * f.time_base) for f in c.decode(video=0))
+        vt = sorted(float(cast(int, f.pts) * cast(Fraction, f.time_base)) for f in c.decode(video=0))
     chunks, pts = [], []
-    with av.open(str(path)) as c:
+    with closing(av.open(str(path))) as c:
         rate = c.streams.audio[0].sample_rate
         for f in c.decode(audio=0):
             chunks.append(f.to_ndarray().astype(np.float64).mean(axis=0))
-            pts.append(float(f.pts * f.time_base))
+            pts.append(float(cast(int, f.pts) * cast(Fraction, f.time_base)))
     by_count = np.concatenate(chunks)
     a0 = pts[0]
     end = max(round((s - a0) * rate) + len(ch) for s, ch in zip(pts, chunks))
@@ -174,7 +177,8 @@ def main() -> None:
     ap.add_argument("--one-core", action="store_true", help="cut on one CPU core")
     ap.add_argument("--measure", type=Path, help="measure this existing output instead of cutting")
     args = ap.parse_args()
-    segments = ([tuple(float(x) for x in s.split("-")) for s in args.segments.split(",")] if args.segments else SEGMENTS)
+    segments = (cast(list[tuple[float, float]], [tuple(float(x) for x in s.split("-")) for s in args.segments.split(",")])
+                if args.segments else SEGMENTS)
     out = args.measure
     if out is None:
         sys.path.insert(0, args.repo)

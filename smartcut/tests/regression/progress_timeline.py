@@ -31,11 +31,12 @@ import sys
 import time
 from collections import defaultdict
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from run_cases import CASES, TWO_SEGMENTS_REAL, pin_to_one_core  # noqa: E402
+from run_cases import CASES, TWO_SEGMENTS_REAL, pin_to_one_core
 
 # More resolutions for --calibrate (run by name; not in run_cases.py, they're slow). real_*_1080p.mp4: any 1080p
 # H.264 clip and its VP9/AV1/HEVC transcodes (make_test_media.py's --real settings without the scaling)
@@ -67,7 +68,7 @@ CALIBRATION_CASES.update({
 })
 
 
-def install_timers(stats: dict[str, float], runs: list[dict]) -> None:
+def install_timers(stats: dict[str, Any], runs: list[dict]) -> None:
     """Wrap the cutters to time every piece: the whole loop iteration in smart_cut (video, audio passthrough,
     subtitles, muxing), from the video cutter's start to _WorkProgress.piece_done. Encoder flushes (the frames
     still inside the encoder when a re-encoded run ends) are counted as re-encoding, not as the copy that triggers
@@ -79,9 +80,9 @@ def install_timers(stats: dict[str, float], runs: list[dict]) -> None:
     runs gets one entry per encoder run (fed frames to the end of their flush): codec, megapixels, seconds, the
     process's CPU seconds over the same time (all its threads: CPU / wall time is the cores the run used), and the
     sums over its frames of 1, busyness and faded."""
-    from smartcut import track_cutters, video_cutter
+    from smartcut import track_cutters, video_cutter  # noqa: PLC0415
 
-    sc = importlib.import_module("smartcut.smart_cut")
+    sc: Any = importlib.import_module("smartcut.smart_cut")  # smartcut.smart_cut is the function
     work_progress = sc._WorkProgress
     vc = video_cutter.VideoCutter
     orig_segment, orig_flush, orig_piece_done, orig_plan = vc.segment, vc.flush_encoder, work_progress.piece_done, sc._work_plan
@@ -101,7 +102,7 @@ def install_timers(stats: dict[str, float], runs: list[dict]) -> None:
                      **{k: v for k, v in run.items() if k != "ending"}})
         run.clear()
 
-    def flush_encoder(self):
+    def flush_encoder(self):  # noqa: ANN001, ANN202
         had = self.enc_codec is not None
         t, c = time.perf_counter(), time.process_time()
         packets = orig_flush(self)
@@ -117,7 +118,7 @@ def install_timers(stats: dict[str, float], runs: list[dict]) -> None:
                 end_run(self)
         return packets
 
-    def segment(self, s):
+    def segment(self, cut_segment):  # noqa: ANN001, ANN202
         fed = [0]
         hook = self.on_frames_encoded
 
@@ -127,23 +128,23 @@ def install_timers(stats: dict[str, float], runs: list[dict]) -> None:
                 hook(n_fed, n_out)
 
         self.on_frames_encoded = counting_hook
-        hybrid = not s.require_recode and self._should_hybrid_recode_cra(s)
+        hybrid = not cut_segment.require_recode and self._should_hybrid_recode_cra(cut_segment)
         t, c = time.perf_counter(), time.process_time()
         piece.update(t=t, flush_s=stats["flush_s"], flush_cpu=stats["flush_cpu"], audio_s=stats["audio_s"])
         flushed_before = stats["flush_packets"]
-        if s.require_recode or hybrid:
-            busy, faded = features.get(id(s), (np.zeros(0), np.zeros(0, bool)))
+        if cut_segment.require_recode or hybrid:
+            busy, faded = features.get(id(cut_segment), (np.zeros(0), np.zeros(0, bool)))
             if not run:
                 run.update(s=0.0, cpu=0.0, n=0, busy=0.0, faded=0)
             run.update(n=run["n"] + len(busy), busy=run["busy"] + float(busy.sum()), faded=run["faded"] + int(faded.sum()))
         try:
-            packets = orig_segment(self, s)
+            packets = orig_segment(self, cut_segment)
         finally:
             self.on_frames_encoded = hook
         ctx = self.in_stream.codec_context
         stats["megapixels"] = ctx.width * ctx.height / 1e6
         stats["codec"] = "av1" if "av1" in (ctx.name or "") else ctx.name  # as in smart_cut._WorkProgress
-        if s.require_recode or hybrid:
+        if cut_segment.require_recode or hybrid:
             piece.update(recode=True, frames=fed[0])
             run["s"] += time.perf_counter() - t - (stats["flush_s"] - piece["flush_s"])  # its flush is counted above
             run["cpu"] += time.process_time() - c - (stats["flush_cpu"] - piece["flush_cpu"])
@@ -153,7 +154,7 @@ def install_timers(stats: dict[str, float], runs: list[dict]) -> None:
             end_run(self)
         return packets
 
-    def piece_done(self, index):
+    def piece_done(self, index):  # noqa: ANN001, ANN202
         if piece:
             spent = (time.perf_counter() - piece["t"] - (stats["flush_s"] - piece["flush_s"])
                      - (stats["audio_s"] - piece["audio_s"]))
@@ -168,9 +169,9 @@ def install_timers(stats: dict[str, float], runs: list[dict]) -> None:
     ac = track_cutters.RecodeAudioCutter
     orig_audio = ac.segment
 
-    def audio_segment(self, s):
+    def audio_segment(self, cut_segment):  # noqa: ANN001, ANN202
         t = time.perf_counter()
-        packets = orig_audio(self, s)
+        packets = orig_audio(self, cut_segment)
         stats["audio_s"] += time.perf_counter() - t
         stats["audio_media_s"] += sum(p.duration * p.time_base for p in packets if p.duration and p.time_base)
         return packets
@@ -226,7 +227,8 @@ def fit_recode_cost(runs: list[dict], shape: tuple[float, float] | None = None
         residual = float(((X @ coef - y) ** 2).sum())
         cost = (coef[0] * shape[0], coef[0] * shape[1], busy, coef[1]) if shape else (coef[0], coef[1], busy, coef[2])
         if best is None or residual < best[0]:
-            best = (residual, tuple(float(v) for v in cost), (X @ coef - y) / y)
+            best = (residual, cast(tuple[float, float, float, float], tuple(float(v) for v in cost)), (X @ coef - y) / y)
+    assert best is not None  # the loop above always runs
     return best[1], best[2]
 
 
@@ -252,16 +254,16 @@ def install_start_timer() -> list[float]:
     vc = video_cutter.VideoCutter
     orig, started = vc.segment, []
 
-    def segment(self, s):  # noqa: ANN001, ANN202
+    def segment(self, cut_segment):  # noqa: ANN001, ANN202
         if not started:
             started.append(time.perf_counter())
-        return orig(self, s)
+        return orig(self, cut_segment)
 
     vc.segment = segment
     return started
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("media_dir", type=Path)
     ap.add_argument("out_dir", type=Path)
@@ -272,7 +274,7 @@ def main():
     ap.add_argument("--timeline", action="store_true", help="also print the progress at every 5%% of the time")
     args = ap.parse_args()
     sys.path.insert(0, args.repo)
-    import smartcut
+    import smartcut  # noqa: PLC0415
     if args.one_core:
         pin_to_one_core()
 

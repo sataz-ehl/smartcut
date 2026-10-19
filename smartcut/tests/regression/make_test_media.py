@@ -51,16 +51,17 @@ FONT_CANDIDATES = [
 ]
 
 
-def run(ffmpeg, args, cwd):
+def run(ffmpeg: str, args: list[str], cwd: Path) -> bool:
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", *args]
-    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         print(f"FAILED: {' '.join(cmd)}\n{result.stderr}", file=sys.stderr)
         return False
     return True
 
 
-def counter_clip(ffmpeg, out_dir, name, size, rate, gop, fontsize, extra_video_args=()):
+def counter_clip(ffmpeg: str, out_dir: Path, name: str, size: tuple[int, int], rate: int, gop: int,  # noqa: PLR0917
+                 fontsize: int, extra_video_args: tuple[str, ...] = ()) -> bool:
     """Grey clip with a frame counter (+ timestamp) and a 440 Hz tone."""
     text = "%{frame_num}  %{pts\\:hms}" if size[0] > size[1] else "%{frame_num}"
     graph = (f"[0:v]drawtext=fontfile=font.ttf:text='{text}':fontsize={fontsize}:fontcolor=white:"
@@ -74,18 +75,18 @@ def counter_clip(ffmpeg, out_dir, name, size, rate, gop, fontsize, extra_video_a
     ], out_dir)
 
 
-def transcode(ffmpeg, out_dir, src, name, video_args):
+def transcode(ffmpeg: str, out_dir: Path, src: str, name: str, video_args: list[str]) -> bool:
     return run(ffmpeg, ["-i", src, "-map", "0", *video_args, "-c:a", "copy", name], out_dir)
 
 
-def add_audio_track(ffmpeg, out_dir, src, name, audio_args):
+def add_audio_track(ffmpeg: str, out_dir: Path, src: str, name: str, audio_args: list[str]) -> bool:
     """src plus a second audio track: an 880 Hz mono tone at 44.1 kHz."""
     return run(ffmpeg, ["-i", src, "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=44100:duration=20",
                         "-map", "0:v", "-map", "0:a", "-map", "1:a", "-c:v", "copy", "-c:a:0", "copy", *audio_args,
                         "-shortest", name], out_dir)
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("media_dir")
     ap.add_argument("--ffmpeg", default=shutil.which("ffmpeg") or "ffmpeg")

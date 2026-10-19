@@ -4,18 +4,20 @@ Usage: python match_frames.py <source.mp4> <output.mp4> <first output frame> <la
 """
 import hashlib
 import sys
+from fractions import Fraction
+from typing import cast
 
 import av
 import numpy as np
 
 
-def frames(path):
+def frames(path: str) -> list[tuple[float, str, np.ndarray]]:
     out = []
     with av.open(path) as c:
         for f in c.decode(c.streams.video[0]):
             p = f.planes[0]
             y = np.frombuffer(p, np.uint8).reshape(f.height, p.line_size)[:, :f.width]
-            out.append((float(f.pts * f.time_base), hashlib.md5(y.tobytes()).hexdigest(), y[::8, ::8].astype(np.int16)))
+            out.append((float(cast(int, f.pts) * cast(Fraction, f.time_base)), hashlib.md5(y.tobytes()).hexdigest(), y[::8, ::8].astype(np.int16)))
     return out
 
 

@@ -9,19 +9,20 @@ Usage: python bench_audio.py <smartcut repo root> <video> <out dir>
 """
 import sys
 import time
+from contextlib import closing  # with closing(av.open()): PyAV types a container's __exit__ as maybe swallowing errors
 from fractions import Fraction
 from pathlib import Path
+from typing import cast
 
 import av
-import numpy as np
 
 sys.path.insert(0, sys.argv[1])
-import smartcut  # noqa: E402
+import smartcut
 
 src, out = Path(sys.argv[2]), Path(sys.argv[3])
 out.mkdir(parents=True, exist_ok=True)
-with av.open(str(src)) as c:
-    duration = c.duration / 1e6
+with closing(av.open(str(src))) as c:
+    duration = cast(int, c.duration) / 1e6
 print(f"source: {src.name}, {duration:.1f} s")
 
 for label, seg in (("video fades only (audio copied)", {"start": 0, "end": None, "video_fadein": 2, "video_fadeout": 2}),
@@ -31,8 +32,8 @@ for label, seg in (("video fades only (audio copied)", {"start": 0, "end": None,
     print(f"process_segments, {label:<40} {time.perf_counter() - t:6.2f} s  ok={ok}")
 
 
-def transcode(coder):
-    with av.open(str(src)) as c:
+def transcode(coder: str | None) -> tuple[float, float]:
+    with closing(av.open(str(src))) as c:
         a = c.streams.audio[0]
         enc = av.CodecContext.create("aac", "w")
         enc.sample_rate = a.codec_context.sample_rate
