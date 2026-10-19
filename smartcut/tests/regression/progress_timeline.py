@@ -9,12 +9,12 @@ value still shown just before each update, so a pause counts). The time before t
 indexing the input) is reported separately and not counted.
 
 --calibrate also times every cut piece (the whole loop iteration, muxing and audio passthrough included). It
-prints per case the re-encode cost per frame and the cost per copied frame. Per codec it fits smart_cut's
-progress_costs.RECODE_COST model (see fit_recode_cost) over the encoder runs of all the cases (the frames from the encoder's start
-to the end of its flush, with the flush; busyness and fades as smart_cut._recoded_frames gives them): run several
-resolutions (CALIBRATION_CASES adds 1080p) and content. It also
-prints the cost per copied frame and per second of re-encoded audio over all cases, to compare with the _*_COST_*
-constants in smart_cut.py. Calibrate with --one-core.
+prints per case the re-encode cost per frame and the cost per copied frame. Per codec it fits the
+progress_costs.RECODE_COST model (see fit_recode_cost) over the encoder runs of all the cases (the frames from the
+encoder's start to the end of its flush, with the flush; busyness and fades as smart_cut._recoded_frames gives them):
+run several resolutions (CALIBRATION_CASES adds 1080p) and content. It also prints the cost per copied frame and per
+second of re-encoded audio over all cases, to compare with progress_costs.COPY_COST_PER_FRAME and
+AUDIO_RECODE_COST_PER_SECOND. Calibrate with --one-core. (A machine's own costs: calibrate_progress.py.)
 
 CALIBRATION_CASES also has typical Smart Edit jobs of the app (P2*, P3*: H.264 720p, 2 or 3 segments, without fades
 and with 2 s fades on every segment), run by name.

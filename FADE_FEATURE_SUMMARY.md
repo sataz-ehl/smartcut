@@ -325,8 +325,10 @@ Run from the repo root (tests live in `smartcut/tests/`):
 | `test_webm.py` | `.webm` outputs: AAC re-encoded to Opus (with and without fades), Opus copied from the start, re-encoded from mid-stream |
 | `test_audio_bitrate.py` | Bitrate of re-encoded audio: from the packets when the source reports none, floors per channel, MP3, lossless sources, encoder limits; cuts at about the source's rate |
 | `test_audio_joins.py` | Copied or re-encoded as the rule says; A/V sync within 1 ms at the start and every join; level and clicks at the joins (AAC, AC-3, MP3, Opus; MP4, MKV, WebM; HE-AAC with a media dir) |
-| `test_progress_costs.py` | A machine's `progress_costs.json`: used when valid; missing, malformed, other versions, out of range fall back to the built-in costs; paths; logged once; edits with a broken file |
-| `test_calibrate_progress.py` | `calibrate_progress.py --quick` on a synthetic clip, and its refusal of changed or missing clips (needs ffmpeg) |
+| `test_progress_costs.py` | A machine's `progress_costs.json`: used when valid (an edit weighs its work with its costs); missing, malformed, other versions, out of range fall back to the built-in costs; paths, also without a home folder; logged once; edits with a broken file |
+| `test_work_progress.py` | `_WorkProgress`, the progress estimate: frame costs, frames counted as the encoder outputs them, beyond or short of the estimate, the cap, cancelling |
+| `test_x265_options.py` | x265 options of HEVC re-encodes: the source's without its machine's threads, the lookahead cap, sources without options |
+| `test_calibrate_progress.py` | `calibrate_progress.py`: the adoption rule, held-out edits, CPU checks, file writes, memory release; a `--quick` run on a synthetic clip that must not adopt, and its refusal of changed or missing clips (needs ffmpeg) |
 | `regression/` | Measurement-based regression harness, test media generator and diagnostic tools, e.g. `join_sync.py` for A/V sync at every join (see its README) |
 
 ## Usage Examples
