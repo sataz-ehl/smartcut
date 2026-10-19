@@ -182,12 +182,28 @@ smartcut.process_segments("in.mp4", "out.mp4", [
   place after the cut, and end the audio, are written in it, rounded down: the video can start up to 1 ms early
   (0.02897 s instead of 0.02995 s in one cut), so the audio plays up to ~1 ms late against the picture. Setting the
   video's timescale instead was tried and dropped.
-- **Output stream.** It is created from the encoder rather than copied from the source, so the stream header
-  matches the packets.
-  - Encoder: the source codec's own when FFmpeg has one (AAC and HE-AAC → FFmpeg's AAC, which writes AAC-LC since
-    it can't encode HE-AAC; MP3 → LAME; Opus; Vorbis; AC-3; FLAC, ...), else AAC. In WebM, anything but Opus or
-    Vorbis → Opus.
-  - The sample rate and channels are kept, unless the encoder can't do the rate (Opus: 48 kHz; AC-3: 32/44.1/48).
+- **Faithful re-encodes only** (decided; `recode_setup()` in `track_cutters.py`). A track is re-encoded only if the
+  result keeps the codec, the sample format (bit depth), the channel layout and the sample rate, and the encoder
+  opens with them. Otherwise it is copied as it is, and the logger `smartcut` warns, e.g. `smartcut: audio track 1
+  (dca, stereo) is copied, not re-encoded: no dca encoder in this FFmpeg. So A/V may shift by up to a frame at each
+  join.` (or "its audio fades are left out").
+  - Encoders: the source codec's own (AAC → FFmpeg's AAC; MP3 → LAME; Opus; Vorbis; AC-3; E-AC-3; MP2; FLAC; ALAC;
+    PCM; ...).
+  - Exceptions (decided): HE-AAC (v1, v2) → AAC-LC, since FFmpeg can't encode HE-AAC; and in WebM anything but Opus
+    or Vorbis → Opus (resampled to 48 kHz if needed), which WebM needs. If such a track can't be re-encoded to Opus,
+    the cut fails before writing anything: "WebM output needs Opus or Vorbis audio, and audio track 1 (aac) can't be
+    re-encoded to Opus: its channel layout (6 channels) has no channel order; use .mkv".
+  - Copied instead: codecs without an encoder in PyAV's FFmpeg, or with an experimental one only (DTS, TrueHD, MLP,
+    APE, ...: they became AAC before); AAC profiles other than LC and HE-AAC; an encoder that doesn't take the
+    decoder's sample format; 64-bit integer samples; 32-bit FLAC or ALAC (FFmpeg's encoders write 24 of the bits);
+    a lossy track whose layout has no channel order (AAC written from 5.1(side) into MP4 reads as "6 channels":
+    FFmpeg's AAC encoder refused it and the cut failed).
+  - Lossless tracks are worked on in their own sample format, through 64-bit floats, so every sample outside the
+    fades is bit-identical to the source: FLAC 16/24-bit, ALAC 16/24-bit, PCM s16/s24/s32/f32/f64/u8. Before, 24-bit
+    FLAC came out as 16-bit, 16-bit ALAC as 24-bit, and PCM went through 32-bit float. They keep a layout without a
+    channel order (PCM in Matroska has none: "2 channels"), since lossless encoders store the channels as they are.
+  - The stream is created from the encoder rather than copied from the source, so its header matches the packets.
+    The source's tags are kept, except its encoder's name.
 - **Bitrate of re-encoded audio** (`_recode_audio_bitrate()` in `track_cutters.py`, for each track separately; the
   join fades go through the same encoder):
   1. **The source's average bitrate.**
@@ -311,7 +327,8 @@ Run from the repo root (tests live in `smartcut/tests/`):
 | `test_multitrack.py` | Every audio track is kept: copied when exact, each re-encoded as a whole with a join or audio fades |
 | `test_webm.py` | `.webm` outputs: AAC re-encoded to Opus (with and without fades), Opus copied from the start, re-encoded from mid-stream |
 | `test_audio_bitrate.py` | Bitrate of re-encoded audio: from the packets when the source reports none, floors per channel, MP3, lossless sources, encoder limits; cuts at about the source's rate |
-| `test_audio_joins.py` | Copied or re-encoded as the rule says; A/V sync within 1 ms at the start and every join; level and clicks at the joins (AAC, AC-3, MP3, Opus; MP4, MKV, WebM; HE-AAC with a media dir) |
+| `test_audio_joins.py` | Copied or re-encoded as the rule says; A/V sync within 1.5 ms at the start and every join; level and clicks at the joins (AAC, AC-3, MP3, Opus; MP4, MKV, WebM; HE-AAC with a media dir) |
+| `test_audio_faithful.py` | Re-encodes keep the codec, sample format, bit depth and layout: lossless ones bit-identical outside the join fades (FLAC, ALAC, PCM); otherwise copied with a warning (AAC "6 channels"; DTS, TrueHD and 32-bit FLAC with the ffmpeg command); WebM's clear error |
 | `test_progress_costs.py` | A machine's `progress_costs.json`: used when valid; missing, malformed, other versions, out of range fall back to the built-in costs; paths; logged once; edits with a broken file |
 | `test_calibrate_progress.py` | `calibrate_progress.py --quick` on a synthetic clip, and its refusal of changed or missing clips (needs ffmpeg) |
 | `regression/` | Measurement-based regression harness, test media generator and diagnostic tools, e.g. `join_sync.py` for A/V sync at every join (see its README) |

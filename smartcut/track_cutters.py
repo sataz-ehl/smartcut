@@ -1,5 +1,6 @@
 import os
 import sys
+from dataclasses import dataclass
 from fractions import Fraction
 from typing import cast
 
@@ -228,9 +229,22 @@ _AUDIO_ENCODER_FOR_DECODER = {
     'aac': 'aac', 'aac_fixed': 'aac', 'aac_latm': 'aac',
     'opus': 'libopus',
     'mp3': 'libmp3lame', 'mp3float': 'libmp3lame',
+    'mp2float': 'mp2',
+    'ac3_fixed': 'ac3',
     'vorbis': 'libvorbis',
 }
-_LOSSLESS_AUDIO_PREFIXES = ('flac', 'alac', 'pcm_')
+_AAC_DECODERS = ('aac', 'aac_fixed', 'aac_latm')
+# FFmpeg's AAC encoder writes AAC-LC. HE-AAC (v1 and v2) sources become AAC-LC (decided: FFmpeg can't encode HE-AAC);
+# other AAC profiles (Main, LTP, LD, ELD, USAC, ...) are copied
+_AAC_PROFILES_RECODED = ('LC', 'HE-AAC', 'HE-AACv2')
+# Lossless codecs (FFmpeg decoder names; and every pcm_*): their bitrate says nothing about a lossy one's
+_LOSSLESS_AUDIO_DECODERS = ('flac', 'alac', 'wavpack', 'tta', 'ape', 'truehd', 'mlp', 'mp4als', 'tak', 'shorten')
+
+
+def _is_lossless(decoder_name: str) -> bool:
+    return decoder_name.startswith('pcm_') or decoder_name in _LOSSLESS_AUDIO_DECODERS
+
+
 # Re-encoded audio bitrate (fork addition): the source's, at least a floor, within what the encoder accepts (see
 # _recode_audio_bitrate). The floor is per channel, counting mono as two: 128 kb/s mono and stereo, 384 kb/s 5.1. HE-AAC
 # sources (~48-64 kb/s stereo) become AAC-LC, which needs more bits. Mono at 64 kb/s fared worse: re-encoding a 64 kb/s
@@ -248,7 +262,7 @@ def _source_audio_bitrate(track: AudioTrack) -> int:
     size x 8 / the time they span; Matroska / WebM usually report none, e.g. for Opus). 0 for lossless codecs: their
     rate says nothing about a lossy one (PCM into WebM asked libopus for 1536 kb/s, which it refuses)."""
     ctx = track.av_stream.codec_context
-    if (ctx.name or '').startswith(_LOSSLESS_AUDIO_PREFIXES):
+    if _is_lossless(ctx.name or ''):
         return 0
     reported = track.av_stream.bit_rate or ctx.bit_rate
     if reported:
@@ -260,23 +274,32 @@ def _source_audio_bitrate(track: AudioTrack) -> int:
     return round(sum(size for _, _, size in timed) * 8 / span) if span > 0 else 0
 
 
-def _accepted_audio_bitrate(codec_name: str, rate: int, layout: av.AudioLayout, wanted: int) -> int:
+def _open_encoder(codec_name: str, rate: int, layout: av.AudioLayout | str, sample_format: str | None,
+                  bit_rate: int = 0) -> av.AudioCodecContext:
+    """A throwaway encoder opened with these parameters (fork addition); raises if it refuses them."""
+    ctx = cast(av.AudioCodecContext, av.CodecContext.create(codec_name, 'w'))
+    ctx.sample_rate, ctx.layout = rate, layout
+    if bit_rate:
+        ctx.bit_rate = bit_rate
+    formats = list(av.Codec(codec_name, 'w').audio_formats or [])
+    if sample_format or formats:
+        ctx.format = sample_format or formats[0].name
+    ctx.time_base = Fraction(1, rate)
+    ctx.open()
+    return ctx
+
+
+def _accepted_audio_bitrate(codec_name: str, rate: int, layout: av.AudioLayout, wanted: int,
+                            sample_format: str | None = None) -> int:
     """The highest bitrate up to `wanted` the encoder opens with, as it reports it after opening (fork addition):
     aac and ac3 lower a too-high rate themselves (aac: 6144 bits per channel per frame, ac3: 640 kb/s), libopus
     (256 kb/s per channel) and libvorbis (~89-249 kb/s per channel, by sample rate) refuse it."""
 
     def opened(bit_rate: int) -> int | None:
-        ctx = cast(av.AudioCodecContext, av.CodecContext.create(codec_name, 'w'))
-        ctx.sample_rate, ctx.layout, ctx.bit_rate = rate, layout, bit_rate
-        formats = av.Codec(codec_name, 'w').audio_formats
-        if formats:
-            ctx.format = formats[0].name
-        ctx.time_base = Fraction(1, rate)
         try:
-            ctx.open()
+            return _open_encoder(codec_name, rate, layout, sample_format, bit_rate).bit_rate or bit_rate
         except Exception:
             return None
-        return ctx.bit_rate or bit_rate
 
     got = opened(wanted)
     if got is not None:
@@ -291,33 +314,119 @@ def _accepted_audio_bitrate(codec_name: str, rate: int, layout: av.AudioLayout, 
     return (opened(low) or low) if low else wanted
 
 
-def _recode_audio_bitrate(track: AudioTrack, codec_name: str, rate: int, layout: av.AudioLayout) -> int:
+def _recode_audio_bitrate(track: AudioTrack, codec_name: str, rate: int, layout: av.AudioLayout,
+                          sample_format: str | None = None) -> int:
     """Bitrate for re-encoding the track with this encoder (fork addition): the source's (_source_audio_bitrate), at
     least _RECODE_AUDIO_FLOOR_FOR or the floor per channel (mono counted as two), at most what the encoder accepts."""
     floor = _RECODE_AUDIO_FLOOR_FOR.get(codec_name, _RECODE_AUDIO_FLOOR_PER_CHANNEL * max(len(layout.channels), 2))
     wanted = max(_source_audio_bitrate(track), floor)
     wanted = min(wanted, _RECODE_AUDIO_MAX_FOR.get(codec_name, wanted))
-    return _accepted_audio_bitrate(codec_name, rate, layout, wanted)
-
-
-def _recode_audio_encoder_name(decoder_name: str, webm: bool = False) -> str:
-    name = _AUDIO_ENCODER_FOR_DECODER.get(decoder_name, decoder_name)
-    try:
-        av.Codec(name, 'w')
-    except Exception:  # no encoder for this codec in this FFmpeg build
-        name = 'aac'
-    if webm and name not in _WEBM_AUDIO_ENCODERS:
-        name = 'libopus'
-    return name
+    return _accepted_audio_bitrate(codec_name, rate, layout, wanted, sample_format)
 
 
 # WebM holds only Opus and Vorbis audio: other tracks are re-encoded to Opus for .webm outputs (fork addition)
 _WEBM_AUDIO_DECODERS = ('opus', 'libopus', 'vorbis', 'libvorbis')
-_WEBM_AUDIO_ENCODERS = ('libopus', 'libvorbis')
 
 
-def _is_webm(output_av_container: OutputContainer) -> bool:
-    return (output_av_container.format.name or '') == 'webm'
+def webm_holds(track: AudioTrack) -> bool:
+    """Whether a .webm output can hold the track as it is: Opus or Vorbis (fork addition)."""
+    return track.av_stream.codec_context.name in _WEBM_AUDIO_DECODERS
+
+
+def _lossless_bits(track: AudioTrack) -> int | None:
+    """Bits per sample of a FLAC or ALAC track, from its stream header (FLAC's STREAMINFO, ALAC's magic cookie), or
+    None (fork addition; PyAV doesn't expose bits_per_raw_sample). Their decoders output 24-bit audio as 32-bit
+    samples."""
+    ctx = track.av_stream.codec_context
+    data = bytes(ctx.extradata or b'')
+    if ctx.name == 'flac':
+        if data[:4] == b'fLaC':
+            data = data[8:]  # the stream marker and the STREAMINFO block header
+        return (((data[12] & 1) << 4) | (data[13] >> 4)) + 1 if len(data) >= 18 else None
+    if ctx.name == 'alac':  # FFmpeg's extradata is the 'alac' atom: size, tag, version, then the cookie
+        return data[17] if len(data) >= 36 and data[4:8] == b'alac' else None
+    return None
+
+
+@dataclass(frozen=True)
+class AudioRecode:
+    """How a track is re-encoded (fork addition, see recode_setup)."""
+    encoder: str
+    rate: int
+    layout: str
+    sample_format: str  # the encoder's input: the decoder's sample format or its planar / packed twin
+    bit_rate: int  # 0: none set (lossless encoders)
+
+
+def recode_setup(track: AudioTrack, format_name: str) -> AudioRecode | str:
+    """
+    How to re-encode the track into an output of this FFmpeg format name, or why it can't be (fork addition).
+
+    A track is re-encoded only faithfully: the result keeps the codec, its sample format (so a lossless track keeps
+    its bit depth and comes out bit-identical outside any fades), the channel layout and the sample rate, and the
+    encoder opens with them. Otherwise smart_cut copies it, with a warning.
+
+    Exceptions (decided): HE-AAC becomes AAC-LC (FFmpeg can't encode HE-AAC), and a .webm output re-encodes codecs
+    other than Opus and Vorbis to Opus (resampled to 48 kHz if needed), since WebM can't hold them.
+
+    Not faithful (the reason is returned):
+    - no encoder in this FFmpeg build, or only an experimental one (DTS, TrueHD, MLP, APE, ...);
+    - AAC profiles other than LC and HE-AAC (Main, LTP, LD, ELD, USAC): FFmpeg's encoder writes AAC-LC;
+    - an encoder that doesn't take the decoder's sample format (MP2: s16 only, its decoder gives float);
+    - 64-bit integer samples, and 32-bit samples of a lossless codec other than PCM unless the stream says they hold
+      at most 24 bits (FLAC, ALAC): FFmpeg's FLAC and ALAC encoders write 24 bits from 32-bit samples;
+    - a lossy track whose channel layout has no channel order (e.g. AAC "6 channels": FFmpeg's AAC encoder refused to
+      open, and libopus or libvorbis would impose their own order). Lossless encoders store the channels as they are,
+      so they keep such a layout (PCM in Matroska has none: "2 channels"). For WebM, 1 or 2 such channels become mono
+      or stereo;
+    - a sample rate the encoder can't take.
+    """
+    ctx = track.av_stream.codec_context
+    name = ctx.name or ''
+    webm = format_name == 'webm' and name not in _WEBM_AUDIO_DECODERS
+    encoder = 'libopus' if webm else _AUDIO_ENCODER_FOR_DECODER.get(name, name)
+    try:
+        codec = av.Codec(encoder, 'w')
+    except Exception:
+        return f"no {name} encoder in this FFmpeg"
+    if codec.experimental:
+        return f"FFmpeg's {encoder} encoder is experimental"
+    if name in _AAC_DECODERS and ctx.profile not in (*_AAC_PROFILES_RECODED, None):
+        return f"FFmpeg's AAC encoder writes AAC-LC, not {ctx.profile}"
+    layout = ctx.layout
+    if not layout.channels or any(c.name == 'NONE' for c in layout.channels):
+        if webm and len(layout.channels) in (1, 2):
+            layout = av.AudioLayout('mono' if len(layout.channels) == 1 else 'stereo')
+        elif webm or not _is_lossless(name):
+            return f"its channel layout ({layout.name}) has no channel order"
+
+    rate = ctx.sample_rate or 48000
+    if codec.audio_rates and rate not in codec.audio_rates:
+        if not webm:
+            return f"{encoder} can't encode {rate} Hz"
+        rate = 48000 if 48000 in codec.audio_rates else max(codec.audio_rates)
+
+    formats = [f.name for f in codec.audio_formats or ()]
+    source = ctx.format
+    twins = [source.name, source.packed.name, source.planar.name] if source is not None else []
+    sample_format = next((f for f in twins if f in formats), None) if formats else (twins[0] if twins else None)
+    if webm:  # a lossy target: take float if it can
+        sample_format = sample_format or next((f for f in ('flt', 'fltp') if f in formats), formats[0] if formats else None)
+    elif sample_format is None:
+        return f"{encoder} doesn't take {source.name if source is not None else 'its'} samples"
+    elif sample_format in ('s64', 's64p'):
+        return "it has 64-bit integer samples"
+    elif sample_format in ('s32', 's32p') and _is_lossless(name) and not name.startswith('pcm_'):
+        bits = _lossless_bits(track)
+        if bits is None or bits > 24:
+            return f"{encoder} would keep 24 of its {bits or 'unknown number of'} bits"
+
+    try:
+        _open_encoder(encoder, rate, layout, sample_format)
+    except Exception as e:
+        return f"{encoder} won't open with {layout.name} at {rate} Hz ({e})"
+    bit_rate = 0 if _is_lossless(encoder) else _recode_audio_bitrate(track, encoder, rate, layout, sample_format)
+    return AudioRecode(encoder, rate, layout.name, sample_format or '', bit_rate)
 
 
 def audio_needs_recode(media_container: MediaContainer, format_name: str, track_index: int, first_piece: CutSegment,
@@ -352,38 +461,43 @@ def create_recode_audio_output_stream(
     media_container: MediaContainer,
     output_av_container: OutputContainer,
     track_index: int,
+    setup: AudioRecode | None = None,
 ) -> AudioStream:
     """
-    Create the output stream for RecodeAudioCutter from its encoder.
+    Create the output stream for RecodeAudioCutter from its encoder, as recode_setup says (setup: its result, when
+    already known). Raises ValueError if the track can't be re-encoded faithfully.
 
     Unlike create_audio_output_stream this doesn't copy the source's codec parameters: an encoder writes
     what it supports (FFmpeg's AAC encoder writes AAC-LC, never HE-AAC), and the stream header has to
-    describe the packets that are actually written.
+    describe the packets that are actually written. The source's tags are kept, but not its encoder's name.
     """
     track = media_container.audio_tracks[track_index]
-    in_ctx = track.av_stream.codec_context
-    codec_name = _recode_audio_encoder_name(in_ctx.name, webm=_is_webm(output_av_container))
-
-    rate = in_ctx.sample_rate or 48000
-    supported_rates = av.Codec(codec_name, 'w').audio_rates
-    if supported_rates and rate not in supported_rates:
-        rate = 48000 if 48000 in supported_rates else max(supported_rates)
-
-    out_stream = cast(AudioStream, output_av_container.add_stream(codec_name, rate=rate))
-    out_stream.codec_context.layout = in_ctx.layout
-    if not codec_name.startswith(_LOSSLESS_AUDIO_PREFIXES):
-        out_stream.codec_context.bit_rate = _recode_audio_bitrate(track, codec_name, rate, in_ctx.layout)
-    out_stream.time_base = Fraction(1, rate)
-    out_stream.metadata.update(track.av_stream.metadata)
+    found = setup if setup is not None else recode_setup(track, output_av_container.format.name or '')
+    if isinstance(found, str):
+        raise ValueError(f"audio track {track_index + 1} can't be re-encoded: {found}")
+    out_stream = cast(AudioStream, output_av_container.add_stream(found.encoder, rate=found.rate))
+    ctx = out_stream.codec_context
+    ctx.layout = found.layout
+    if found.sample_format:
+        ctx.format = found.sample_format
+    if found.bit_rate:
+        ctx.bit_rate = found.bit_rate
+    out_stream.time_base = Fraction(1, found.rate)
+    out_stream.metadata.update({k: v for k, v in track.av_stream.metadata.items() if k.lower() != 'encoder'})
     out_stream.disposition = cast(Disposition, track.av_stream.disposition.value)
     return out_stream
+
+
+# numpy types of the sample formats a lossless re-encode works in (packed names; 64-bit integers aren't re-encoded)
+_SAMPLE_DTYPES = {'u8': np.uint8, 's16': np.int16, 's32': np.int32, 'flt': np.float32, 'dbl': np.float64}
 
 
 class RecodeAudioCutter:
     """
     Re-encodes a whole audio track with one continuous encoder, applying the segments' audio fades.
 
-    Used for a track when any segment has an audio fade, or when a copy wouldn't be exact (see audio_needs_recode).
+    Used for a track when any segment has an audio fade, or when a copy wouldn't be exact (see audio_needs_recode),
+    if it can be re-encoded faithfully (see recode_setup).
     Decoded audio is cut sample-accurately to each cut segment, faded per sample and fed to a single encoder, so A/V
     stay in sync at every join. Mixing re-encoded and copied packets in one stream instead leaves the encoder's
     buffered samples misplaced at segment joins (an audible tick) and flushed at the very end of the file.
@@ -391,6 +505,11 @@ class RecodeAudioCutter:
     At each join (fork addition) the earlier segment fades out over its last JOIN_FADE and the later one fades in over
     its first, unless the user's audio fade on that side is longer: a hard cut between unrelated audio clicks. Not at
     the very start or end of the output, and not between segments that are contiguous in the source.
+
+    The output stream is set up by recode_setup, which allows only faithful re-encodes (fork addition). Lossy tracks
+    are worked on as 32-bit float at the output rate, which their decoders output. Lossless tracks (FLAC, ALAC, PCM)
+    are worked on in their decoder's sample format and scale, through 64-bit floats, and encoded in that format: their
+    samples outside the fades come out bit-identical (24-bit FLAC was cut to 16 bits, PCM went through 32-bit float).
 
     Environment Variables:
         SMARTCUT_DEBUG_AUDIO_FADE: Set to '1' to print the gain range and peak reduction of each faded
@@ -413,15 +532,17 @@ class RecodeAudioCutter:
         self.rate: int = self.encoder.sample_rate
         self.layout_name = self.encoder.layout.name
         self.channels = len(self.encoder.layout.channels)
+        self.exact = _is_lossless(self.encoder.name)  # lossless: the samples in their own format (see above)
+        self.dtype = np.float64 if self.exact else np.float32
         self.debug = os.environ.get('SMARTCUT_DEBUG_AUDIO_FADE') == '1'
 
         # Output timeline position (seconds of video so far) and samples sent to the encoder
         self.segment_start_in_output = Fraction(0)
         self.samples_out = 0
 
-        # Decoded but not yet used audio, as float planar at the output rate.
+        # Decoded but not yet used audio, planar (channels first) in the work format (self.dtype, see _samples).
         # buf[:, 0] is absolute sample buf_start (source timeline, in output-rate samples).
-        self.buf = np.zeros((self.channels, 0), np.float32)
+        self.buf = np.zeros((self.channels, 0), self.dtype)
         self.buf_start = 0
         self.next_packet: int | None = None  # None: the decoder must be (re)started before decoding
         self.drained = False  # the decoder was flushed after the last packet
@@ -435,7 +556,7 @@ class RecodeAudioCutter:
         target = round(self.segment_start_in_output * self.rate)
         self.segment_start_in_output += cut_segment.end_time - cut_segment.start_time
         if self.samples_out < target:
-            packets.extend(self._encode(np.zeros((self.channels, target - self.samples_out), np.float32)))
+            packets.extend(self._encode(np.zeros((self.channels, target - self.samples_out), self.dtype)))
         drop = self.samples_out - target
 
         start = round(cut_segment.start_time * self.rate)
@@ -481,7 +602,7 @@ class RecodeAudioCutter:
             gain = np.minimum(gain, np.clip((seg_end - t) / float(fade_out), 0, 1))
         if gain.min() >= 1.0:  # a piece away from the segment's ends
             return chunk
-        result = chunk * gain.astype(np.float32)
+        result = chunk * gain.astype(chunk.dtype)
         if self.debug:
             orig_peak = float(np.abs(chunk).max())
             peak = float(np.abs(result).max())
@@ -511,11 +632,11 @@ class RecodeAudioCutter:
             self.buf = np.concatenate([self.buf, *pending], axis=1)
 
         if self.buf.shape[1] == 0:
-            return np.zeros((self.channels, 0), np.float32)
+            return np.zeros((self.channels, 0), self.dtype)
         lead = self.buf_start - start  # audio starts after the requested start: fill with silence
         out = self.buf[:, max(start - self.buf_start, 0): max(end - self.buf_start, 0)]
         if lead > 0:
-            out = np.concatenate([np.zeros((self.channels, min(lead, end - start)), np.float32), out], axis=1)
+            out = np.concatenate([np.zeros((self.channels, min(lead, end - start)), self.dtype), out], axis=1)
         consumed = min(max(end - self.buf_start, 0), self.buf.shape[1])
         self.buf = self.buf[:, consumed:]
         self.buf_start += consumed
@@ -528,8 +649,8 @@ class RecodeAudioCutter:
         self.next_packet = max(first - self.PREROLL_PACKETS, 0)
         self.decoder.flush_buffers()
         self.drained = False
-        self.resampler = av.AudioResampler(format='fltp', layout=self.layout_name, rate=self.rate)
-        self.buf = np.zeros((self.channels, 0), np.float32)
+        self.resampler = None if self.exact else av.AudioResampler(format='fltp', layout=self.layout_name, rate=self.rate)
+        self.buf = np.zeros((self.channels, 0), self.dtype)
         self.buf_start = start
 
     def _decode_packet(self, packet: Packet | None, pending: list[np.ndarray], buf_end: int) -> int:
@@ -540,14 +661,9 @@ class RecodeAudioCutter:
                 continue
             time_base = frame.time_base if frame.time_base is not None else self.in_time_base
             frame_start = round(frame.pts * time_base * self.rate)
-            if frame.format.name == 'fltp' and frame.sample_rate == self.rate and frame.layout.name == self.layout_name:
-                samples = frame.to_ndarray()  # already float planar at the output rate (always for AAC)
-            else:
-                assert self.resampler is not None
-                arrays = [f.to_ndarray() for f in self.resampler.resample(frame)]
-                if not arrays:
-                    continue
-                samples = np.concatenate(arrays, axis=1).astype(np.float32, copy=False)
+            samples = self._samples(frame)
+            if samples is None:
+                continue
 
             if self.buf.shape[1] == 0 and not pending:
                 self.buf_start = buf_end = frame_start  # first frame after a restart (may precede the requested start)
@@ -556,7 +672,7 @@ class RecodeAudioCutter:
                 # 0, 21, 43 ms, ..., and the 16-32 sample "gaps" and "overlaps" clicked, fork fix)
                 pass
             elif frame_start > buf_end:  # gap in the source audio: keep timing with silence
-                samples = np.concatenate([np.zeros((self.channels, frame_start - buf_end), np.float32), samples], axis=1)
+                samples = np.concatenate([np.zeros((self.channels, frame_start - buf_end), self.dtype), samples], axis=1)
             elif frame_start < buf_end:  # overlap (timestamp rounding): skip what we already have
                 samples = samples[:, buf_end - frame_start:]
             if samples.shape[1]:
@@ -564,10 +680,38 @@ class RecodeAudioCutter:
                 buf_end += samples.shape[1]
         return buf_end
 
+    def _samples(self, frame: av.AudioFrame) -> np.ndarray | None:
+        """The frame's samples in the work format, channels first. Lossless: as float64 in the decoder's own scale
+        (exact for 8- to 32-bit integers, float and double; unsigned 8-bit centred on 0), at the source rate, which
+        recode_setup keeps. Lossy: float32 at the output rate (None while the resampler holds them back)."""
+        if self.exact:
+            x = frame.to_ndarray()
+            if not frame.format.is_planar:  # packed: (1, samples x channels), interleaved
+                x = x.reshape(-1, self.channels).T
+            x = x.astype(np.float64)
+            if frame.format.name in ('u8', 'u8p'):
+                x -= 128
+            return x
+        if frame.format.name == 'fltp' and frame.sample_rate == self.rate and frame.layout.name == self.layout_name:
+            return frame.to_ndarray()  # already float planar at the output rate (always for AAC)
+        assert self.resampler is not None
+        arrays = [f.to_ndarray() for f in self.resampler.resample(frame)]
+        return np.concatenate(arrays, axis=1).astype(np.float32, copy=False) if arrays else None
+
     def _encode(self, samples: np.ndarray) -> list[Packet]:
         if samples.shape[1] == 0:
             return []
-        frame = av.AudioFrame.from_ndarray(np.ascontiguousarray(samples, np.float32), format='fltp', layout=self.layout_name)
+        if self.exact:  # back to the encoder's sample format (the decoder's), rounded and clipped for integers
+            fmt = self.encoder.format
+            dtype = _SAMPLE_DTYPES[fmt.packed.name]
+            x = samples + 128 if fmt.packed.name == 'u8' else samples
+            if np.issubdtype(dtype, np.integer):
+                x = np.clip(np.rint(x), np.iinfo(dtype).min, np.iinfo(dtype).max)
+            x = x.astype(dtype)
+            frame = av.AudioFrame.from_ndarray(np.ascontiguousarray(x if fmt.is_planar else x.T.reshape(1, -1)),
+                                               format=fmt.name, layout=self.layout_name)
+        else:
+            frame = av.AudioFrame.from_ndarray(np.ascontiguousarray(samples, np.float32), format='fltp', layout=self.layout_name)
         frame.sample_rate = self.rate
         frame.time_base = Fraction(1, self.rate)
         frame.pts = self.samples_out

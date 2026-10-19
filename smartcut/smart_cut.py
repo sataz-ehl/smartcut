@@ -1,10 +1,11 @@
+import logging
 import os
 from collections import deque
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Protocol, TypeAlias, runtime_checkable
+from typing import Protocol, TypeAlias, cast, runtime_checkable
 
 import av
 import numpy as np
@@ -16,6 +17,7 @@ from smartcut.media_container import MediaContainer
 from smartcut.media_utils import VideoExportMode
 from smartcut.misc_data import AudioExportInfo, CutSegment, FadeInfo, SegmentWithFade
 from smartcut.track_cutters import (
+    AudioRecode,
     RecodeAudioCutter,
     SubtitleCutter,
     audio_needs_recode,
@@ -23,6 +25,8 @@ from smartcut.track_cutters import (
     create_recode_audio_output_stream,
     create_subtitle_output_stream,
     passthru_audio_cutter,
+    recode_setup,
+    webm_holds,
 )
 from smartcut.video_cutter import (
     VideoCutter,
@@ -31,6 +35,8 @@ from smartcut.video_cutter import (
 )
 
 __version__ = "1.7"
+
+log = logging.getLogger("smartcut")
 
 
 class ProgressCallback(Protocol):
@@ -258,6 +264,20 @@ def _check_webm_video(media_container: MediaContainer, out_path: str, video_sett
                                 "use .mp4 or .mkv")
 
 
+def _check_webm_audio(media_container: MediaContainer, out_path: str, audio_export_info: AudioExportInfo | None) -> None:
+    """WebM holds only Opus and Vorbis audio, so other tracks are re-encoded to Opus (fork addition). Say so before
+    writing anything if one can't be (e.g. a channel layout without a channel order)."""
+    if os.path.splitext(out_path)[1].lower() != '.webm' or audio_export_info is None:
+        return
+    for i, t in enumerate(audio_export_info.output_tracks[:len(media_container.audio_tracks)]):
+        track = media_container.audio_tracks[i]
+        if t is not None and t.codec == 'passthru' and not webm_holds(track):
+            setup = recode_setup(track, 'webm')
+            if isinstance(setup, str):
+                raise OutputFormatError(f"WebM output needs Opus or Vorbis audio, and audio track {i + 1} "
+                                        f"({track.av_stream.codec_context.name}) can't be re-encoded to Opus: {setup}; use .mkv")
+
+
 def make_adjusted_segment_times(positive_segments: list[tuple[Fraction, Fraction]], media_container: MediaContainer) -> list[tuple[Fraction, Fraction]]:
     adjusted_segment_times = []
     EPSILON = Fraction(1, 1_000_000)
@@ -345,6 +365,7 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
     if video_settings is None:
         video_settings = VideoSettings(VideoExportMode.SMARTCUT, VideoExportQuality.NORMAL)
     _check_webm_video(media_container, out_path, video_settings)
+    _check_webm_audio(media_container, out_path, audio_export_info)
 
     # Handle both legacy tuple format and new SegmentWithFade format
     basic_segments, fade_infos = expand_segments_with_fades(positive_segments)
@@ -434,18 +455,38 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
             cut_segments[i].join_after = piece_segment[i] in ends_at_join
         file_has_joins.append(bool(starts_at_join))
 
+    setups: dict[tuple[int, str], AudioRecode | str] = {}  # recode_setup per (track, output format)
+    warned: set[int] = set()
+
     def recode_tracks_of(file_index: int, format_name: str) -> set[int]:
         """The audio tracks of output file file_index that are re-encoded as a whole (see RecodeAudioCutter): every one
-        if its pieces have audio fades, else those a copy wouldn't be exact for (fork addition)."""
+        if its pieces have audio fades, else those a copy wouldn't be exact for, as long as it can be re-encoded
+        faithfully (recode_setup); a track that can't is copied, with a warning (fork addition)."""
         pieces = [cut_segments[i] for i in file_pieces[file_index]]
         if audio_export_info is None or not pieces:
             return set()
         has_audio_fades = any(seg.fade_info is not None and
                               (seg.fade_info.audio_fadein_duration is not None or seg.fade_info.audio_fadeout_duration is not None)
                               for seg in pieces)
-        return {i for i, t in enumerate(audio_export_info.output_tracks[:len(media_container.audio_tracks)])
-                if t is not None and t.codec == 'passthru'
-                and (has_audio_fades or audio_needs_recode(media_container, format_name, i, pieces[0], file_has_joins[file_index]))}
+        tracks = set()
+        for i, t in enumerate(audio_export_info.output_tracks[:len(media_container.audio_tracks)]):
+            if t is None or t.codec != 'passthru' or not (
+                    has_audio_fades or audio_needs_recode(media_container, format_name, i, pieces[0], file_has_joins[file_index])):
+                continue
+            setup = setups.get((i, format_name))
+            if setup is None:
+                setup = setups[(i, format_name)] = recode_setup(media_container.audio_tracks[i], format_name)
+            if isinstance(setup, AudioRecode):
+                tracks.add(i)
+            elif i not in warned:
+                warned.add(i)
+                ctx = media_container.audio_tracks[i].av_stream.codec_context
+                result = ("its audio fades are left out" if has_audio_fades else
+                          "A/V may shift by up to a frame at each join" if file_has_joins[file_index] else
+                          "it starts at the first whole frame after the cut")
+                log.warning(f"smartcut: audio track {i + 1} ({ctx.name}, {ctx.layout.name}) is copied, not re-encoded: "
+                            f"{setup}. So {result}.")
+        return tracks
 
     work = None
     previously_done_segments = 0
@@ -504,7 +545,8 @@ def smart_cut(media_container: MediaContainer, positive_segments: list[tuple[Fra
                 for track_i, track_export_settings in enumerate(audio_export_info.output_tracks):
                     if track_export_settings is not None and track_export_settings.codec == 'passthru':
                         if track_i in recode_tracks:
-                            audio_out_stream = create_recode_audio_output_stream(media_container, output_av_container, track_i)
+                            audio_out_stream = create_recode_audio_output_stream(
+                                media_container, output_av_container, track_i, cast(AudioRecode, setups[(track_i, format_name)]))
                             generators.append(RecodeAudioCutter(media_container, audio_out_stream, track_i))
                         else:
                             audio_out_stream = create_audio_output_stream(media_container, output_av_container, track_i)
