@@ -23,6 +23,7 @@ import argparse
 import hashlib
 import json
 import os
+import struct
 import sys
 import time
 import traceback
@@ -127,8 +128,9 @@ _PIN_JOB = []  # keeps the Windows job object open
 def pick_cpus(n: int) -> list[int]:
     """n CPUs this process may run on, one per physical core where that is known: two hyperthreads of one core are not
     two cores. Linux: the affinity set, by /sys/devices/system/cpu/cpu*/topology (package, core). Windows: the process
-    affinity mask; with psutil installed and twice as many logical CPUs as cores, the even ones (Windows numbers a
-    core's hyperthreads next to each other). Hyperthreads are used only when there are fewer cores than n."""
+    affinity mask, by the cores GetLogicalProcessorInformationEx lists (_windows_cores), the fastest kind first: on a
+    hybrid Intel CPU (P-cores with hyperthreads, E-cores without) the P-cores. Hyperthreads are used only when there
+    are fewer cores than n."""
     if hasattr(os, "sched_getaffinity"):
         allowed = sorted(os.sched_getaffinity(0))
         seen, cores = set(), []
@@ -143,17 +145,56 @@ def pick_cpus(n: int) -> list[int]:
                 cores.append(cpu)
     else:
         allowed = _windows_affinity()
-        cores = allowed
         try:
-            import psutil  # noqa: PLC0415
-            physical, logical = psutil.cpu_count(logical=False), psutil.cpu_count()
-            if physical and logical == 2 * physical:
-                cores = [c for c in allowed if c % 2 == 0]
-        except ImportError:
-            pass
+            topology = _windows_cores()
+        except OSError:
+            topology = []  # unknown: every CPU counts as a core
+        cores = one_per_core(allowed, topology)
     if n > len(allowed):
         raise ValueError(f"{n} cores asked, this process may use {len(allowed)} CPUs")
     return (cores + [c for c in allowed if c not in cores])[:n]
+
+
+def one_per_core(allowed: list[int], topology: list[tuple[int, list[int]]]) -> list[int]:
+    """The first allowed CPU of each core in topology ((efficiency class, its CPUs) per core): the cores of the
+    highest class first (on hybrid CPUs the P-cores; 0 where all cores are alike), then by number. Allowed CPUs that
+    no core lists count as cores of class 0."""
+    listed = {c for _, cpus in topology for c in cpus}
+    firsts = [(-efficiency, mine[0]) for efficiency, cpus in topology if (mine := [c for c in cpus if c in allowed])]
+    firsts += [(0, c) for c in allowed if c not in listed]
+    return [c for _, c in sorted(firsts)]
+
+
+def _windows_cores() -> list[tuple[int, list[int]]]:
+    """Per physical core of processor group 0: its efficiency class (higher is faster; 0 on CPUs with one kind of core)
+    and its logical CPUs, from GetLogicalProcessorInformationEx(RelationProcessorCore). Raises OSError if it fails."""
+    import ctypes  # noqa: PLC0415
+    from ctypes import wintypes  # noqa: PLC0415
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get = kernel32.GetLogicalProcessorInformationEx
+    get.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
+    get.restype = wintypes.BOOL
+    size = wintypes.DWORD(0)
+    get(0, None, ctypes.byref(size))  # RelationProcessorCore: fails with ERROR_INSUFFICIENT_BUFFER and gives the size
+    buffer = ctypes.create_string_buffer(size.value)
+    if not size.value or not get(0, buffer, ctypes.byref(size)):
+        raise OSError(ctypes.get_last_error(), "GetLogicalProcessorInformationEx failed")
+    pointer = ctypes.sizeof(ctypes.c_void_p)
+    cores, offset = [], 0
+    while offset < size.value:
+        # SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX: Relationship, Size, then PROCESSOR_RELATIONSHIP (at +8): Flags,
+        # EfficiencyClass, Reserved[20], GroupCount, GroupMask[GroupCount] (GROUP_AFFINITY: Mask, Group, Reserved[3])
+        relationship, entry_size = struct.unpack_from("<iI", buffer, offset)
+        if relationship == 0:
+            efficiency = buffer.raw[offset + 9]
+            for g in range(struct.unpack_from("<H", buffer, offset + 30)[0]):
+                at = offset + 32 + g * (pointer + 8)
+                mask = struct.unpack_from("<Q" if pointer == 8 else "<I", buffer, at)[0]
+                if struct.unpack_from("<H", buffer, at + pointer)[0] == 0:
+                    cores.append((efficiency, [i for i in range(64) if mask >> i & 1]))
+        offset += entry_size
+    return cores
 
 
 def _windows_affinity() -> list[int]:
@@ -249,8 +290,9 @@ def x265_frame_threads(cpus: int, height: int) -> int:
 
 def x265_threads_for(cpus: int) -> None:
     """x265 re-encodes get the threads x265 picks by itself on a machine with this many CPUs: a pool of that many
-    threads and x265_frame_threads(). Threads set explicitly (e.g. reused from the source's x265 options) are kept,
-    as there."""
+    threads and x265_frame_threads(). smartcut drops the source's own threading options (video_cutter.
+    _X265_MACHINE_OPTIONS), so x265 sizes its threads for the machine it runs on there too; threads set in the x265
+    options anyway are kept."""
     from smartcut import video_cutter  # noqa: PLC0415
 
     cutter = video_cutter.VideoCutter

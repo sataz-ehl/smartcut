@@ -24,8 +24,11 @@ pool from all the machine's CPUs, so its re-encodes get a 1-CPU machine's thread
 unless their options set them. On Windows the calling thread also runs below normal priority, as x265's pool
 threads do: at normal priority, every x265 encoder close stalled 0.5-10 s on one core (x265 waits for its pool with
 `Sleep(0)`, which doesn't let a lower-priority thread run), so HEVC edits seemed 2-3x slower and varied 2x from run
-to run. Call `pin_to_one_core()` from the thread that cuts. `pin_to_cores(n)` does the same for n cores (one per
-physical core, x265 sized for n; the priority only for one core).
+to run. Call `pin_to_one_core()` from the thread that cuts. `pin_to_cores(n)` does the same for n cores (x265 sized
+for n; the priority only for one core). It takes one CPU per physical core, from the CPU topology (Linux: `/sys`;
+Windows: `GetLogicalProcessorInformationEx`), so two hyperthreads of one core are never two cores. On a hybrid Intel
+CPU the fastest cores (P-cores) come first; with more cores asked than it has of them, E-cores are added, which run
+slower.
 
 `make_test_media.py` also makes the HEVC clips (`synth_hevc*.mp4`; with `--real`, `real_hevc*.mp4`). For the
 HEVC calibration case `RE10_hevc_1080p` in `progress_timeline.py`, transcode a 1080p clip with `--real`'s HEVC settings.
@@ -77,7 +80,7 @@ join are easy to check by eye too.
 | `inspect_case.py <out dir> <case> [audio\|video\|gaps]` | Where a case deviates: time ranges with fade errors, or the frame timing gaps |
 | `match_frames.py <source> <output> <first> <last>` | Which source frame each output frame is: exact match = copied, otherwise nearest = re-encoded. Shows stray or missing frames at joins |
 | `psnr_frames.py <source> <output> <out first> <count> <src first> [<output> ...]` | PSNR of re-encoded frames vs their source frames, e.g. to compare encoder settings |
-| `psnr_reencoded.py <source> '<segments json>' <output> [<output> ...]` | PSNR of all of an edit's re-encoded frames against what the encoder was given (faded frames against the source faded by smartcut), copied frames checked bit-exact; several outputs compared frame by frame |
+| `psnr_reencoded.py <source> '<segments json>' <output> [<output> ...]` | PSNR of all of an edit's re-encoded frames against what the encoder was given (faded frames against the source faded by smartcut). Which frames are re-encoded comes from smartcut's own plan of the cut; every copied frame must be bit-exact, else it is reported and the exit status is 1. Several outputs compared frame by frame |
 | `exp_encoder.py <config.json> <media> <out> [cases] [--one-core]` | Run the cases with another encoder / encoder options for re-encoded GOPs, without changing smartcut |
 | `bench_audio.py <repo> <video> <out dir>` | Cost of re-encoding the whole audio track (audio fades) and of FFmpeg's AAC coders |
 | `progress_timeline.py <media> <out> [cases] [--one-core] [--timeline] [--calibrate]` | How steadily `progress_callback` moves: longest stretch without an update and the largest distance from an even pace, at the updates and as shown (a pause counts). `--calibrate` measures the costs that `smart_cut.py`'s work estimate uses: per case, and `progress_costs.RECODE_COST` per codec fitted over the encoder runs of all the cases (the built-in costs; a machine's own: `calibrate_progress.py`). Besides run_cases' cases it has 1080p calibration cases and typical app edits (`P2*`, `P3*`, `FB*`: 2 or 3 segments, without and with fades; H.264 720p, and 2 segments for 1080p, the other codecs and Facebook's H.264 + HE-AAC), run by name |
@@ -89,7 +92,8 @@ join are easy to check by eye too.
 These need no test media and run like the other test scripts (`python smartcut/tests/test_yuv_fade.py`):
 - `smartcut/tests/test_yuv_fade.py`: YUV fade values.
 - `smartcut/tests/test_cancel.py`: cancellation, also midway through a re-encoded piece (with and without a
-  progress callback; deterministic on any number of cores); steady progress; input file closed.
+  progress callback; deterministic on any number of cores) and in the encoder's last flush; steady progress; input
+  file closed.
 - `smartcut/tests/test_last_frame.py`: cuts keep their last frame (H.264 with and without B-frames, VP9, AV1,
   fades, MP4 and MKV), counted as FFmpeg decodes them; inputs without audio.
 - `smartcut/tests/test_multitrack.py`: every audio track is kept (AAC + AC-3), copied or re-encoded with fades.
@@ -98,9 +102,17 @@ These need no test media and run like the other test scripts (`python smartcut/t
 - `smartcut/tests/test_audio_joins.py`: copied or re-encoded as the rule says, A/V sync within 1 ms at the start and
   every join, level and clicks at the joins (AAC, AC-3, MP3, Opus; MP4, MKV, WebM; HE-AAC with a media dir).
 - `smartcut/tests/test_progress_costs.py`: progress_costs.json loading: valid, missing, malformed, other versions, out
-  of range (fallback to the built-in costs), the paths, logged once, edits with a broken file.
-- `smartcut/tests/test_calibrate_progress.py`: a `--quick` run of `calibrate_progress.py` on a synthetic clip, and its
-  refusal of changed or missing clips (needs the ffmpeg command: PATH or `SMARTCUT_TEST_FFMPEG`; ~40 s).
+  of range (fallback to the built-in costs), the paths (also without a home folder), logged once; edits with a broken
+  file, and an edit weighing its work with a valid file's costs.
+- `smartcut/tests/test_work_progress.py`: `_WorkProgress`, the estimate itself: a frame's cost, frames counted as the
+  encoder outputs them (first in, first out), frames beyond or short of the estimate, the cap, cancelling.
+- `smartcut/tests/test_x265_options.py`: the x265 options of HEVC re-encodes: the source's reused without its
+  machine's threading options, the lookahead cap (bframes + 1 when needed), sources without options, RECODE mode.
+- `smartcut/tests/test_calibrate_progress.py`: `calibrate_progress.py`'s adoption rule, held-out edits, CPU checks,
+  file writes, memory release and `--cores`' topology (unit tests); then, with the ffmpeg command (PATH or
+  `SMARTCUT_TEST_FFMPEG`), on a synthetic clip: a `--quick` run, which must leave the file `SMARTCUT_PROGRESS_COSTS`
+  names alone; `main()` with the verdict forced to adopt (what the rule is given, what an adoption writes); and the
+  refusal of changed or missing clips (~1 min).
 
 ## A machine's own progress costs (`calibrate_progress.py`)
 
@@ -117,7 +129,8 @@ The test clips come from one real H.264 + AAC clip: a YouTube download, landscap
 - Synthetic clips re-encode 2-3x cheaper, so they don't calibrate.
 - VP9, AV1 and (with `--codecs ...,hevc`) HEVC are derived from its first 90 s with `make_test_media.py`'s `--real`
   settings. HEVC carries no x265 options, so nothing of the machine that made it.
-- A Facebook download (H.264 + HE-AAC) is optional. It is copied, since FFmpeg can't make HE-AAC.
+- A Facebook download (H.264 + HE-AAC), copied since FFmpeg can't make HE-AAC. Media can be made without it, but
+  then a calibration adopts nothing: it is the only footage other than the source clip's (see the adoption rule).
 
 Making them needs CPU (~20 min on one desktop core, 6 min on a 6-core / 12-thread desktop; 74 MB), so make them
 where that is cheap and copy them over. The media folder's `manifest.json` records the recipe and every clip's size and SHA-256. The calibration refuses
@@ -141,26 +154,88 @@ The calibration itself:
   real runs below (4 cores: 7 min in all).
 - Uses the cores the process gets, as the app does. `--cores N` measures N cores, as on an N-CPU machine: one CPU per
   physical core, x265 sized for N.
-- Checks the cores used, as CPU time / wall time per encoder run. Above the cores expected, the pinning didn't hold
-  (as x265's threads once escaped it), and nothing is adopted. Below 0.85 of one core, something else used the CPU:
-  rerun at a quiet time.
-- Fits the costs per codec, the copy cost per frame and the audio cost per second (`progress_timeline.fit_recode_cost`;
-  `--quick` keeps the built-in proportions between frame sizes). Codecs left out get the costs in use, scaled by the
-  calibrated codecs' median speed ratio.
-- Compares the costs in use with the new ones on the app's typical edits (P2/P2F/P3/P3F H.264 at 720p, VP9 and AV1 P2,
-  FB2), replaying each edit's recorded progress calls through `smart_cut._WorkProgress`:
-  - on the calibration runs;
-  - on fresh real runs, ~4 min of one desktop core per `--repeat`. Each fresh run is replayed under both sets, so
-    both get the same timings. The runs' own evenness is printed too, but the same short edit varies a few % from
-    run to run.
-- Adopts the new costs only if both comparisons are more even, and reports both either way:
-  - adopted: the file is written, the one before kept as `progress_costs.previous.json`;
-  - not adopted: the candidate goes to `progress_costs.candidate.json` next to it, and the file is left alone.
+- Checks the cores used, as CPU time / wall time per encoder run and per real run. Above the cores expected, the
+  pinning didn't hold (as x265's threads once escaped it). Below 0.85 of one core, something else used the CPU: rerun
+  at a quiet time. Either way nothing is adopted.
+- Runs every edit in a measuring process that releases memory after each one, as the app does (`gc.collect()` and
+  glibc's `malloc_trim(0)`): on a 957 MB server, freed codec buffers left mapped could make the later edits swap. The
+  memory left after the edits is printed ("memory after each edit, released: ... MB").
+- Fits the costs per codec, the copy cost per frame and the audio cost per second (`progress_timeline.fit_recode_cost`).
+  With one frame size for a codec it fits one factor and keeps the proportions of the costs in use between frame
+  sizes. Codecs left out get the costs in use, scaled by the calibrated codecs' median speed ratio.
+- Compares the costs in use with the new ones, replaying each edit's recorded progress calls through
+  `smart_cut._WorkProgress` (see the adoption rule below), on held-out edits and on fresh real runs of the app's
+  typical edits (P2/P2F/P3/P3F H.264 at 720p, VP9 and AV1 P2, FB2; ~4 min of one desktop core per `--repeat`). The
+  real runs' own evenness ("as they went") is printed too, but the same short edit varies a few % from run to run.
+- Adopts the new costs only by the adoption rule below, and reports the comparison either way:
+  - adopted (`ADOPTED: more even by at least 0.5 points (held-out edits X -> Y %, real runs X -> Y %). Wrote ...`): the
+    file is written, the one before kept as `progress_costs.previous.json`;
+  - not adopted (`NOT ADOPTED: <reasons>. ... unchanged; the candidate is in ...`): the candidate goes to
+    `progress_costs.candidate.json` next to it, and the file is left alone.
+  - New costs outside the ranges smartcut accepts (`progress_costs.py`) stop the calibration with a message, and
+    nothing is written.
+  - Every file is written to a temporary file next to it and then renamed over it (`os.replace`), so smartcut never
+    reads half a file, also if the calibration is stopped midway.
 - Restart the app after an adoption. smartcut reads the file at a process's first edit, and logs which costs it uses
   (logger `smartcut`, INFO).
-- `--quick` takes ~2 min: the smallest resolution, 2-segment edits, a 45 s excerpt when it makes the media. It is
-  for a quick check, not a calibration: single short edits are noisy.
+- `--quick` takes ~2 min: the smallest resolution, 2-segment edits, a 45 s excerpt when it makes the media. It is a
+  smoke check, not a calibration: it never adopts and writes only the candidate.
 - To go back to the built-in costs, delete the file, or rename `progress_costs.previous.json` back.
+
+### The adoption rule
+
+The costs a calibration fits always describe its own runs better: replayed on the runs they were fitted on, they look
+more even even where they aren't. On one core the old rule's in-sample replay improved (5.46 -> 5.33 % over the 22
+edits) while fresh runs got less even (4.74 -> 5.05 %). So the rule judges on runs the costs weren't fitted on, and
+asks for a margin:
+
+1. **Held-out check.** The edits are split. Held out: every edit at the app edits' height (720p, or the largest
+   below) and the Facebook clip's edits (default: 10 of 22). Costs are fitted on the others (the 360p and 1080p
+   edits), and replayed on the held-out edits' calibration runs, against the costs in use.
+2. **Real runs.** Fresh runs of the app's typical edits (all of them held-out edits), each replayed under the costs in
+   use and the new costs (fitted on all the edits), so both get the same timings.
+3. **Adopted** (the costs fitted on all the edits) only if both are more even than the costs in use by at least
+   **0.5 points** (`ADOPT_MARGIN`; mean largest distance from an even pace at the updates), and:
+   - not `--quick`;
+   - the pinning held (no encoder run or real run on more cores than expected);
+   - the CPU check didn't warn: on one core, the median encoder run, or a real run of 1 s or more, got at least 0.85 of
+     the core (idle: 0.97-1.00);
+   - the media has the Facebook clip (decided). The 720p held-out edits are the same scenes as the edits fitted on;
+     the Facebook clip is the only other footage. Replayed without its edits, the 4-core calibration's held-out gain
+     fell from -1.51 to -0.53 points: it carried most of the evidence. Without it the calibration runs and reports,
+     and writes only the candidate;
+   - a held-out check could be made: the plan has at least two resolutions for every codec held out.
+
+Every reason that applies is printed after `NOT ADOPTED:`:
+- `--quick is a smoke check, not a calibration`;
+- `the pinning didn't hold`;
+- `the CPU check warned of other load`;
+- `no Facebook clip: no held-out footage (make the media with --facebook)`;
+- `no held-out check: ...`;
+- `not more even by 0.5 points (held-out edits X -> Y %, real runs X -> Y %)`.
+
+**The margin, from the noise measured.** The two checks compare two sets of costs on the same timings, so the
+timing noise largely cancels.
+- Each app edit of the two calibrations below ran twice: its calibration run and a fresh real run.
+- The paired difference (new minus in use) of one edit varied between its two runs by sigma 0.26-0.48 points.
+- The mean over the 7-10 edits of a check varied by sigma 0.10-0.17 points. The largest swing of one edit was 1.55
+  points (P2_h264_720p, one core).
+- 0.5 points is about 3 sigma of a check's mean, and about a tenth of a typical 4.5-5 % evenness.
+- A smaller gain isn't visible, while the built-in costs are the better tested ones (fitted on 29 edits, checked on
+  26 with 3 runs each).
+- For comparison, the same short edit's live evenness varies 2.4-6.7 % from run to run, and the replay of one set of
+  costs on two runs of an edit by sigma 0.6 points.
+
+**Replayed verdicts** of the recorded calibrations on this PC (no encoding: `measure_result.json` and the last
+`real_result.json` of each). Mean evenness, in use -> new:
+
+| Calibration | Held-out check (10 edits) | Real runs, paired (7 edits) | Verdict |
+|---|---|---|---|
+| 1 core (`--cores 1`) | 4.69 -> 4.76 % (+0.07) | 4.74 -> 5.05 % (+0.31) | not adopted (right: the built-in costs are this setup's) |
+| 4 cores (`--cores 4`) | 6.03 -> 4.52 % (-1.51) | 7.00 -> 4.52 % (-2.48) | adopted |
+| `--quick`, 1 core | none (one resolution) | 5.74 -> 5.70 % | not adopted (the old rule adopted it) |
+
+The verdicts are the same with any margin from 0 to 1.5 points.
 
 ### When the server gets more (or fewer) cores
 
