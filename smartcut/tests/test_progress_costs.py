@@ -7,17 +7,22 @@ Tests for progress_costs.py: a machine's progress_costs.json, and the fallback t
 3. Malformed JSON, another format or cost model, wrong types, values out of range: a warning and the built-in costs
 4. SMARTCUT_PROGRESS_COSTS names the file, else the per-user default (%APPDATA% / $XDG_CONFIG_HOME / ~/.config)
 5. The costs are loaded and logged once per process
-6. An edit with a broken file still succeeds (and logs a warning); one with a valid file uses it
+6. An edit with a broken file still succeeds (and logs a warning); one with a valid file weighs its work with the
+   file's costs
+7. Without a home folder for the default path: the built-in costs and a warning, no error
 
 Usage (from the repo root):
     python smartcut/tests/test_progress_costs.py
 """
+import importlib
 import json
 import logging
 import os
 import sys
 import tempfile
 from pathlib import Path
+
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (tests live in smartcut/tests/)
 
@@ -157,9 +162,49 @@ def test_edit_with_files(tmp: Path) -> None:
         assert updates and updates[-1] == 1000, "progress must still reach 1000"
         assert any(r.levelno == logging.WARNING and "broken.json" in r.getMessage() for r in log.records), "no warning logged"
         assert progress_costs.current() is progress_costs.BUILT_IN
-    with with_env(write(tmp, "used.json", VALID)):
-        assert smartcut.process_segments(str(src), str(tmp / "out2.mp4"), segments, progress_callback=lambda c, n: None)
-        assert progress_costs.current().source == str(tmp / "used.json")
+    # The file's costs must reach the edit's progress estimate: the _WorkProgress the edit makes weighs its work with
+    # them, not with the built-in ones
+    sc = importlib.import_module("smartcut.smart_cut")
+    made = []
+    real_init = sc._WorkProgress.__init__
+
+    def init(self, progress, cancel_object, plan, costs) -> None:  # noqa: ANN001
+        real_init(self, progress, cancel_object, plan, costs)
+        made.append((self, plan))
+
+    sc._WorkProgress.__init__ = init
+    try:
+        with with_env(write(tmp, "used.json", VALID)):
+            assert smartcut.process_segments(str(src), str(tmp / "out2.mp4"), segments, progress_callback=lambda c, n: None)
+    finally:
+        sc._WorkProgress.__init__ = real_init
+    assert len(made) == 1, f"{len(made)} progress estimates made"
+    work, plan = made[0]
+    assert sum(len(b) for b in plan.busyness) and sum(plan.copied_frames), "the edit must re-encode and copy frames"
+    expected = sc._WorkProgress(None, None, plan, progress_costs.parse(VALID))
+    built_in = sc._WorkProgress(None, None, plan, progress_costs.BUILT_IN)
+    for name in ("frame_costs", "piece_weights"):
+        mine, theirs, default = (np.concatenate([np.atleast_1d(np.asarray(v, float)) for v in getattr(w, name)])
+                                 for w in (work, expected, built_in))
+        assert np.allclose(mine, theirs), f"{name}: the edit didn't weigh its work with the file's costs"
+        assert not np.allclose(mine, default), f"{name}: the same with the built-in costs; the test can't tell them apart"
+
+
+def test_no_home(tmp: Path) -> None:
+    # load() never raises: not even when the default path can't be made (no home folder)
+    saved_env, saved_default = os.environ.pop(progress_costs.ENV_VAR, None), progress_costs.default_path
+
+    def no_home() -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    progress_costs.default_path = no_home
+    try:
+        costs, messages = progress_costs.load()
+    finally:
+        progress_costs.default_path = saved_default
+        if saved_env is not None:
+            os.environ[progress_costs.ENV_VAR] = saved_env
+    assert costs is progress_costs.BUILT_IN and warned(messages, "home directory"), messages
 
 
 def main() -> int:
@@ -170,7 +215,8 @@ def main() -> int:
                  ("Malformed, other versions, wrong types, out of range: warning and fallback", test_rejected),
                  ("SMARTCUT_PROGRESS_COSTS, else the per-user default path", test_paths),
                  ("Loaded and logged once per process", test_logged_once),
-                 ("Edits work with a broken file, and use a valid one", test_edit_with_files)]
+                 ("Edits work with a broken file, and weigh their work with a valid one's costs", test_edit_with_files),
+                 ("No home folder for the default path: the built-in costs, no error", test_no_home)]
         failed = 0
         for name, test in tests:
             try:

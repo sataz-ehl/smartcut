@@ -157,7 +157,10 @@ def parse(data: object, source: str = "progress_costs.json") -> ProgressCosts:
 def load(path: str | os.PathLike | None = None) -> tuple[ProgressCosts, list[tuple[int, str]]]:
     """The costs to use, from path (default: progress_costs_path()), and the messages to log as (level, text).
     Falls back to BUILT_IN when there is no file or it can't be used; never raises."""
-    path = Path(path) if path is not None else progress_costs_path()
+    try:
+        path = Path(path) if path is not None else progress_costs_path()
+    except Exception as e:  # no home folder for the default path (RuntimeError), ...
+        return BUILT_IN, [(logging.WARNING, f"no path for progress_costs.json ({e!r}); using the built-in values")]
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -182,7 +185,7 @@ def current() -> ProgressCosts:
     """The costs in use: loaded and logged once per process, at its first edit."""
     try:
         costs, messages = load()
-    except Exception as e:  # load() doesn't raise; this only guards an edit against a bug here
+    except Exception as e:  # load() doesn't raise; this only guards an edit against a bug there
         costs, messages = BUILT_IN, [(logging.WARNING, f"loading failed ({e!r}); using the built-in values")]
     for level, text in messages:
         log.log(level, "smartcut progress costs: %s", text)
