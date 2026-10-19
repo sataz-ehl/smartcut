@@ -13,8 +13,9 @@ Audio is copied only when the copy is exact (track_cutters.audio_needs_recode), 
 Checks per case, against the source:
 - copied or re-encoded, as the rule says
 - A/V sync: per segment, the audio's offset from where its video says it belongs (cross-correlation on noise-like
-  audio; a steady tone is ambiguous), within 1 ms (1.5 ms in Matroska / WebM, whose timestamps are rounded to 1 ms);
-  the video starts where it should (nothing shifted)
+  audio; a steady tone is ambiguous), within 1.5 ms: Matroska / WebM timestamps are rounded to 1 ms, and MP4's edit
+  list places the first video frame in FFmpeg's default movie timescale of 1000, up to 1 ms early (decided); the
+  video starts where it should (nothing shifted)
 - level: 10 ms RMS against the ideal output (the source with the expected fades), 0.85-1.2, from the start through
   every join (copied MDCT joins had bursts up to x33). A re-encode that starts mid-stream starts the encoder cold at
   the cut, and its first 20 ms may reach x1.3 on a pure tone: not checked
@@ -103,6 +104,13 @@ def read(path: Path) -> dict:
             "packets": packets, "first_packet": first_packet}
 
 
+def mvhd_timescale(path: Path) -> int:
+    """An MP4's movie timescale, from its mvhd box (version 0 or 1)."""
+    data = path.read_bytes()
+    i = data.index(b"mvhd") + 4
+    return int.from_bytes(data[i + (12 if data[i] == 0 else 20):][:4], "big")
+
+
 def lag(src: dict, out: dict, out_t: float, src_t: float, *, win: float = 0.3, search: float = 0.03) -> float:
     """Seconds by which the output audio at out_t is late against the source audio at src_t."""
     rate = src["rate"]
@@ -147,7 +155,9 @@ def check(src_path: Path, out_path: Path, segments: list[dict], copied: bool, si
         return f"re-encoded audio starts at {out['first_packet'] * 1000:.1f} ms: more than the encoder's priming"
     rate = src["rate"]
     segs, seg_out = expected(segments, src)
-    tolerance = 0.0015 if out_path.suffix in (".mkv", ".webm") else 0.001  # Matroska: timestamps in 1 ms
+    tolerance = 0.0015  # Matroska: timestamps in 1 ms; MP4: the edit list in the movie timescale (1000)
+    if out_path.suffix == ".mp4" and mvhd_timescale(out_path) != 1000:
+        return f"movie timescale {mvhd_timescale(out_path)}, expected FFmpeg's default 1000"
 
     # Video where it belongs, and A/V sync per segment (noise sources)
     n = 0
@@ -250,7 +260,7 @@ def check_gap(src_path: Path, out_path: Path) -> str | None:
     n1 = sum(1 for v in s_vt if a1 - 1e-6 <= v < b1 - 1e-6)
     for (S, V, u) in ((first[0], out["vt"][0], 0.3), (first[1], out["vt"][n1], gap[1] - a2 + 0.2)):
         late = lag(src, out, V + u, S + u)
-        if abs(late) > 0.001:
+        if abs(late) > 0.0015:
             return f"audio {late * 1000:+.2f} ms late at {S + u:.2f} s of the source"
     return None
 

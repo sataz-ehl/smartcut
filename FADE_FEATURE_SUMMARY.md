@@ -95,7 +95,7 @@ smartcut.process_segments("in.mp4", "out.mp4", [
 |---|---|
 | `misc_data.py` | `FadeInfo` (video/audio fade-in/out durations), `SegmentWithFade`; `CutSegment.fade_info`, `orig_segment_start/end`, `join_before/join_after` |
 | `progress_costs.py` | The progress estimate's costs: built-in, or a machine's own `progress_costs.json` (validated, with a fallback) |
-| `smart_cut.py` | `smart_cut()` accepts `SegmentWithFade` lists; attaches fade info and segment bounds to the cut pieces, marks the GOPs that overlap a video fade for re-encoding, finds each output's joins and picks `RecodeAudioCutter` for the audio tracks a copy wouldn't be exact for; sets the MP4 movie timescale |
+| `smart_cut.py` | `smart_cut()` accepts `SegmentWithFade` lists; attaches fade info and segment bounds to the cut pieces, marks the GOPs that overlap a video fade for re-encoding, finds each output's joins and picks `RecodeAudioCutter` for the audio tracks a copy wouldn't be exact for |
 | `video_cutter.py` | `VideoCutter._apply_fade_to_frame()` / `_fade_yuv_frame()`: per-frame video fade in the re-encode path; faster VP9/AV1 encoder settings |
 | `track_cutters.py` | `audio_needs_recode()`: copy or re-encode; `RecodeAudioCutter` + `create_recode_audio_output_stream()`: audio fades, join fades, bitrate (`_recode_audio_bitrate()`); `PrerollPassthruAudioCutter` / `OpusPassthruAudioCutter`: exact copies into MP4 |
 | `__main__.py` | CLI parsing of the fade keywords, multiple `--keep` |
@@ -178,11 +178,10 @@ smartcut.process_segments("in.mp4", "out.mp4", [
     then runs on past the last picture: 8 ms in a 9.7 s AAC-LC cut, 28 ms in a 10 s HE-AAC one, at most one frame.
     Re-encoded tracks run on by the encoder's padding (e.g. 17 ms).
   - Making FFmpeg stop exactly would need the last frame re-encoded. Left as is (decided).
-- **MP4 movie timescale.** MP4-family outputs set the muxer's `movie_timescale` to the video stream's timescale
-  (the first audio track's sample rate without video).
-  - The edit lists that delay the first video frame to its place after the cut, and end the audio, are written in
-    the movie timescale. With FFmpeg's default of 1000, rounded down, the video started up to 1 ms early: 0.02897 s
-    instead of 0.02995 s, so the audio played ~1 ms late against the picture.
+- **MP4 movie timescale: FFmpeg's default, 1000** (decided). The edit lists that delay the first video frame to its
+  place after the cut, and end the audio, are written in it, rounded down: the video can start up to 1 ms early
+  (0.02897 s instead of 0.02995 s in one cut), so the audio plays up to ~1 ms late against the picture. Setting the
+  video's timescale instead was tried and dropped.
 - **Output stream.** It is created from the encoder rather than copied from the source, so the stream header
   matches the packets.
   - Encoder: the source codec's own when FFmpeg has one (AAC and HE-AAC → FFmpeg's AAC, which writes AAC-LC since
