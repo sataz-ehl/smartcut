@@ -95,7 +95,7 @@ join are easy to check by eye too.
 | `psnr_reencoded.py <source> '<segments json>' <output> [<output> ...]` | PSNR of all of an edit's re-encoded frames against what the encoder was given (faded frames against the source faded by smartcut). Which frames are re-encoded comes from smartcut's own plan of the cut; every copied frame must be bit-exact, else it is reported and the exit status is 1. Several outputs compared frame by frame |
 | `exp_encoder.py <config.json> <media> <out> [cases] [--one-core]` | Run the cases with another encoder / encoder options for re-encoded GOPs, without changing smartcut |
 | `bench_audio.py <repo> <video> <out dir>` | Cost of re-encoding the whole audio track (audio fades) and of FFmpeg's AAC coders |
-| `progress_timeline.py <media> <out> [cases] [--one-core] [--timeline] [--calibrate]` | How steadily `progress_callback` moves: longest stretch without an update and the largest distance from an even pace, at the updates and as shown (a pause counts). `--calibrate` measures the costs that `smart_cut.py`'s work estimate uses: per case, and `progress_costs.RECODE_COST` per codec fitted over the encoder runs of all the cases (the built-in costs; a machine's own: `calibrate_progress.py`). Besides run_cases' cases it has 1080p calibration cases and typical app edits (`P2*`, `P3*`, `FB*`: 2 or 3 segments, without and with fades; H.264 720p, and 2 segments for 1080p, the other codecs and Facebook's H.264 + HE-AAC), run by name |
+| `progress_timeline.py <media> <out> [cases] [--one-core] [--timeline] [--calibrate]` | How steadily `progress_callback` moves: longest stretch without an update and the largest distance from an even pace, at the updates and as shown (a pause counts). At the updates it is measured two ways: `real off %` from the cut's real start (its first piece; changes are judged on this one) and `max off %` from the first update, as before Oct 2026, which leaves out the wait for the first update (with AV1, the first run's keyframe: 2-4 s at 720p-1080p on one core). `--repo` measures another smartcut checkout with the same harness. `--calibrate` measures the costs that `smart_cut.py`'s work estimate uses: per case, and `progress_costs.RECODE_COST` per codec fitted over the encoder runs of all the cases (the built-in costs; a machine's own: `calibrate_progress.py`). Besides run_cases' cases it has 1080p calibration cases and typical app edits (`P2*`, `P3*`, `FB*`: 2 or 3 segments, without and with fades; H.264 720p, and 2 segments for 1080p, the other codecs and Facebook's H.264 + HE-AAC), run by name |
 | `calibrate_progress.py` | A machine's own progress costs, see below |
 | `audio_coder_ab.py <out dir> <video>` | Listening files, "what was lost" difference files and spectrograms for AAC default vs fast coder |
 
@@ -211,7 +211,9 @@ asks for a margin:
 2. **Real runs.** Fresh runs of the app's typical edits (all of them held-out edits), each replayed under the costs in
    use and the new costs (fitted on all the edits), so both get the same timings.
 3. **Adopted** (the costs fitted on all the edits) only if both are more even than the costs in use by at least
-   **0.5 points** (`ADOPT_MARGIN`; mean largest distance from an even pace at the updates), and:
+   **0.5 points** (`ADOPT_MARGIN`; mean largest distance from an even pace at the updates, from each edit's first
+   update: both sets of costs are replayed on the same timings, so the time before the first update is the same for
+   both), and:
    - not `--quick`;
    - the pinning held (no encoder run or real run on more cores than expected);
    - the CPU check didn't warn: on one core, the median encoder run, or a real run of 1 s or more, got at least 0.85 of
@@ -219,7 +221,9 @@ asks for a margin:
    - the media has the Facebook clip (decided). The 720p held-out edits are the same scenes as the edits fitted on;
      the Facebook clip is the only other footage. Replayed without its edits, the 4-core calibration's held-out gain
      fell from -1.51 to -0.53 points: it carried most of the evidence. Without it the calibration runs and reports,
-     and writes only the candidate;
+     and writes only the candidate. The Facebook clip is H.264 (copied), so the held-out check has no other footage
+     for VP9 or AV1: their held-out edits are the source clip's 720p ones. VP9's cost relates to the content
+     differently from source to source (`progress_timeline.fit_recode_cost`), which this check can't see;
    - a held-out check could be made: the plan has at least two resolutions for every codec held out.
 
 Every reason that applies is printed after `NOT ADOPTED:`:

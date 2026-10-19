@@ -12,16 +12,18 @@ Unit tests (no encoding):
    progress_costs.previous.json; not adopted, only progress_costs.candidate.json is written
 6. The measuring processes release memory after every edit
 7. --cores N takes one CPU per physical core (the fastest kind first on hybrid CPUs), from the real topology
+8. progress_timeline's evenness from the cut's real start: the start is when the video cutter starts the first piece,
+   before the first update, recorded afresh for every edit; measured from it, a wait before the first update counts
 
 Smoke test of the harness on a short synthetic clip (H.264 only, --quick; needs the ffmpeg command on PATH or in
 SMARTCUT_TEST_FFMPEG, skipped without it; ~2 min):
-8. --make-media makes the clips and a manifest
-9. A --quick run checks the cores, fits, compares and says NOT ADOPTED: the file SMARTCUT_PROGRESS_COSTS names is
-   left as it was, and the candidate it writes loads with progress_costs.parse()
-10. main() in this process, the rule's verdict forced: decide() gets the run's facts (--quick, no Facebook clip, one
+9. --make-media makes the clips and a manifest
+10. A --quick run checks the cores, fits, compares and says NOT ADOPTED: the file SMARTCUT_PROGRESS_COSTS names is
+    left as it was, and the candidate it writes loads with progress_costs.parse()
+11. main() in this process, the rule's verdict forced: decide() gets the run's facts (--quick, no Facebook clip, one
     resolution, the pinning held), and an adoption replaces the file and keeps the one before as
     progress_costs.previous.json
-11. A changed clip, or one the calibration needs but the media lacks, is refused
+12. A changed clip, or one the calibration needs but the media lacks, is refused
 
 Synthetic clips re-encode differently from real ones: the smoke test checks the harness works, not the costs.
 
@@ -311,6 +313,34 @@ def smoke(tmp: Path, check) -> None:  # noqa: ANN001
     check("a changed clip is refused", r.returncode != 0 and "changed" in r.stdout + r.stderr, r.stdout + r.stderr)
 
 
+def test_real_start(tmp: Path) -> None:
+    import time  # noqa: PLC0415
+
+    import smartcut  # noqa: PLC0415
+    from smartcut import video_cutter  # noqa: PLC0415
+    assert hasattr(progress_timeline, "install_start_timer"), "progress_timeline can't measure from the cut's real start"
+    src = tmp / "start.mp4"
+    generate_test_video(str(src), duration=6)
+    saved = video_cutter.VideoCutter.segment
+    try:
+        started = progress_timeline.install_start_timer()
+        for k in range(2):
+            started.clear()
+            calls: list[tuple[float, float]] = []
+            t0 = time.perf_counter()
+            assert smartcut.process_segments(str(src), str(tmp / f"start{k}.mp4"), [{"start": 1, "end": 2.5}, {"start": 3.5, "end": 5}],
+                                             progress_callback=lambda c, n, t0=t0, calls=calls: calls.append((time.perf_counter() - t0, c / n)))
+            assert len(started) == 1 and calls, (started, len(calls))
+            start = started[0] - t0
+            assert 0 < start <= calls[0][0], f"edit {k}: the real start {start:.3f} s must come before the first update {calls[0][0]:.3f} s"
+    finally:
+        video_cutter.VideoCutter.segment = saved
+    # A wait before the first update: from the first update it doesn't count, from the real start it does
+    calls = [(4.0, 0.1), (8.0, 0.8), (10.0, 1.0)]
+    real, first = progress_timeline.evenness(calls, 0.0, 10.0)[0], progress_timeline.evenness(calls, calls[0][0], 10.0)[0]
+    assert abs(real - 0.3) < 1e-9 and abs(first - (0.8 - 4 / 6)) < 1e-9, (real, first)
+
+
 def main() -> int:
     failed, total = 0, 0
 
@@ -328,7 +358,8 @@ def main() -> int:
                            ("CPU checks: escaped pinning and other load, also in the real runs", test_cpu_checks),
                            ("Files: atomic replace, previous kept, candidate when not adopted", lambda: test_files(tmp)),
                            ("The measuring processes release memory after every edit", test_memory_released),
-                           ("--cores: one CPU per physical core, P-cores first", test_cores)):
+                           ("--cores: one CPU per physical core, P-cores first", test_cores),
+                           ("progress_timeline: evenness from the cut's real start", lambda: test_real_start(tmp))):
             try:
                 test()
                 check(name, True)
