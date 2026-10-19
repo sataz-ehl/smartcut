@@ -319,7 +319,7 @@ Run from the repo root (tests live in `smartcut/tests/`):
 | `test_validation.py` | Reversed segments rejected, out-of-order segments sorted (CLI and API) |
 | `test_audio_parameters.py` | Re-encoded audio keeps sample rate / channels; mixed and multi-segment cases |
 | `verify_audio_fade.py` | Measured audio level ramps for fade-in, fade-out, both |
-| `test_cancel.py` | Cancelling (also midway through re-encoding, with and without progress, and in the encoder's last flush), steady progress, input closed |
+| `test_cancel.py` | Cancelling (also midway through re-encoding, with and without progress, and in the encoder's last flush), steady progress, input closed (also after a cancel in the last flush) |
 | `test_last_frame.py` | Cuts keep their last frame, also when they end with re-encoded frames (H.264, VP9, AV1, fades) |
 | `test_multitrack.py` | Every audio track is kept: copied when exact, each re-encoded as a whole with a join or audio fades |
 | `test_webm.py` | `.webm` outputs: AAC re-encoded to Opus (with and without fades), Opus copied from the start, re-encoded from mid-stream |
@@ -328,7 +328,7 @@ Run from the repo root (tests live in `smartcut/tests/`):
 | `test_progress_costs.py` | A machine's `progress_costs.json`: used when valid (an edit weighs its work with its costs); missing, malformed, other versions, out of range fall back to the built-in costs; paths, also without a home folder; logged once; edits with a broken file |
 | `test_work_progress.py` | `_WorkProgress`, the progress estimate: frame costs, frames counted as the encoder outputs them, beyond or short of the estimate, the cap, cancelling |
 | `test_x265_options.py` | x265 options of HEVC re-encodes: the source's without its machine's threads, the lookahead cap, sources without options |
-| `test_calibrate_progress.py` | `calibrate_progress.py`: the adoption rule, held-out edits, CPU checks, file writes, memory release; a `--quick` run on a synthetic clip that must not adopt, and its refusal of changed or missing clips (needs ffmpeg) |
+| `test_calibrate_progress.py` | `calibrate_progress.py`: the adoption rule, held-out edits, CPU checks, file writes, memory release, `--cores`; on a synthetic clip a `--quick` run that must not adopt, `main()` with the verdict forced, and its refusal of changed or missing clips (needs ffmpeg) |
 | `regression/` | Measurement-based regression harness, test media generator and diagnostic tools, e.g. `join_sync.py` for A/V sync at every join (see its README) |
 
 ## Usage Examples

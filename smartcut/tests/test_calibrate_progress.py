@@ -14,17 +14,21 @@ Unit tests (no encoding):
 7. --cores N takes one CPU per physical core (the fastest kind first on hybrid CPUs), from the real topology
 
 Smoke test of the harness on a short synthetic clip (H.264 only, --quick; needs the ffmpeg command on PATH or in
-SMARTCUT_TEST_FFMPEG, skipped without it; ~1 min):
+SMARTCUT_TEST_FFMPEG, skipped without it; ~2 min):
 8. --make-media makes the clips and a manifest
 9. A --quick run checks the cores, fits, compares and says NOT ADOPTED: the file SMARTCUT_PROGRESS_COSTS names is
    left as it was, and the candidate it writes loads with progress_costs.parse()
-10. A changed clip, or one the calibration needs but the media lacks, is refused
+10. main() in this process, the rule's verdict forced: decide() gets the run's facts (--quick, no Facebook clip, one
+    resolution, the pinning held), and an adoption replaces the file and keeps the one before as
+    progress_costs.previous.json
+11. A changed clip, or one the calibration needs but the media lacks, is refused
 
 Synthetic clips re-encode differently from real ones: the smoke test checks the harness works, not the costs.
 
 Usage (from the repo root):
     python smartcut/tests/test_calibrate_progress.py
 """
+import io
 import json
 import os
 import shutil
@@ -220,6 +224,31 @@ def test_cores() -> None:
 
 # ------------------------------------------------------------------------------------------------------ smoke test
 
+def run_main(args: list[str], target: Path) -> tuple[str, dict]:
+    """calibrate_progress.main() in this process, reading and writing target (SMARTCUT_PROGRESS_COSTS), with decide()
+    answering "adopt": its output and what decide() was given."""
+    seen: dict = {}
+
+    def decide(**kw):  # noqa: ANN003, ANN202
+        seen.update(kw)
+        return True, []
+
+    out = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")  # main() reconfigures stdout's buffering
+    saved = cp.decide, sys.argv, sys.stdout, os.environ.get(progress_costs.ENV_VAR)
+    cp.decide, sys.argv, sys.stdout = decide, [str(HARNESS), *args, "--ffmpeg", str(shutil.which("ffmpeg"))], out
+    os.environ[progress_costs.ENV_VAR] = str(target)
+    try:
+        cp.main()
+    finally:
+        cp.decide, sys.argv, sys.stdout = saved[:3]
+        if saved[3] is None:
+            os.environ.pop(progress_costs.ENV_VAR, None)
+        else:
+            os.environ[progress_costs.ENV_VAR] = saved[3]
+    out.flush()
+    return out.buffer.getvalue().decode("utf-8"), seen  # type: ignore[attr-defined]
+
+
 def harness(*args: str, env: dict | None = None) -> subprocess.CompletedProcess:
     ffmpeg = os.environ.get("SMARTCUT_TEST_FFMPEG") or shutil.which("ffmpeg")
     return subprocess.run([sys.executable, "-X", "utf8", str(HARNESS), *args, "--ffmpeg", str(ffmpeg)],
@@ -257,6 +286,24 @@ def smoke(tmp: Path, check) -> None:  # noqa: ANN001
 
     r = harness("--media", str(media), "--quick", "--codecs", "h264,vp9", "--estimate")
     check("a clip the media lacks is refused", r.returncode != 0 and "vp9_360p.mp4" in r.stdout + r.stderr, r.stdout + r.stderr)
+
+    # main() itself, with the rule's verdict forced to adopt: what decide() is given, and what an adoption writes
+    target = tmp / "server2" / "progress_costs.json"
+    target.parent.mkdir()
+    target.write_text(before, encoding="utf-8")
+    try:
+        text, seen = run_main(["--media", str(media), "--quick", "--codecs", "h264", "--cores", "1"], target)
+        verdicts = [line for line in text.splitlines() if line.startswith(("ADOPTED:", "NOT ADOPTED:"))]
+        data = json.loads(target.read_text(encoding="utf-8"))
+        ok = (len(verdicts) == 1 and verdicts[0].startswith("ADOPTED: more even by at least") and str(target) in verdicts[0]
+              and data["adopted"] is True and data["measured"]["quick"] is True
+              and target.with_name("progress_costs.previous.json").read_text(encoding="utf-8") == before
+              and seen["quick"] is True and seen["facebook"] is False and seen["pinned"] is True
+              and "one resolution" in (seen["no_split"] or "") and all(isinstance(v, float) for v in seen["real"]))
+        detail = f"{seen}\n{text}"
+    except (Exception, SystemExit) as e:  # a failure or a refusal
+        ok, detail = False, repr(e)
+    check("main(): decide() gets the run's facts; an adoption replaces the file and keeps the one before", ok, detail)
 
     with open(media / "h264_360p.mp4", "ab") as f:
         f.write(b"\0")

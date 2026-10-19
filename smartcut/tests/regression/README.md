@@ -108,9 +108,10 @@ These need no test media and run like the other test scripts (`python smartcut/t
 - `smartcut/tests/test_x265_options.py`: the x265 options of HEVC re-encodes: the source's reused without its
   machine's threading options, the lookahead cap (bframes + 1 when needed), sources without options, RECODE mode.
 - `smartcut/tests/test_calibrate_progress.py`: `calibrate_progress.py`'s adoption rule, held-out edits, CPU checks,
-  file writes and memory release (unit tests); then, with the ffmpeg command (PATH or `SMARTCUT_TEST_FFMPEG`), a
-  `--quick` run on a synthetic clip, which must leave the file `SMARTCUT_PROGRESS_COSTS` names alone, and the refusal
-  of changed or missing clips (~1 min).
+  file writes, memory release and `--cores`' topology (unit tests); then, with the ffmpeg command (PATH or
+  `SMARTCUT_TEST_FFMPEG`), on a synthetic clip: a `--quick` run, which must leave the file `SMARTCUT_PROGRESS_COSTS`
+  names alone; `main()` with the verdict forced to adopt (what the rule is given, what an adoption writes); and the
+  refusal of changed or missing clips (~1 min).
 
 ## A machine's own progress costs (`calibrate_progress.py`)
 
@@ -170,6 +171,8 @@ The calibration itself:
     file is written, the one before kept as `progress_costs.previous.json`;
   - not adopted (`NOT ADOPTED: <reasons>. ... unchanged; the candidate is in ...`): the candidate goes to
     `progress_costs.candidate.json` next to it, and the file is left alone.
+  - New costs outside the ranges smartcut accepts (`progress_costs.py`) stop the calibration with a message, and
+    nothing is written.
   - Every file is written to a temporary file next to it and then renamed over it (`os.replace`), so smartcut never
     reads half a file, also if the calibration is stopped midway.
 - Restart the app after an adoption. smartcut reads the file at a process's first edit, and logs which costs it uses

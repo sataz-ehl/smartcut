@@ -855,7 +855,12 @@ def main() -> None:
         "margin": ADOPT_MARGIN, "not_adopted_because": reasons,
         "costs_before": json.loads(progress_costs.to_json(old))}
     text = progress_costs.to_json(new, measured_info, {**comparison, "adopted": adopt})
-    progress_costs.parse(json.loads(text))  # what smartcut will read must load
+    try:
+        progress_costs.parse(json.loads(text))  # what smartcut will read must load
+    except progress_costs.CostsFileError as e:
+        sys.exit(f"\nthe new costs are outside what smartcut accepts ({e}); nothing written. Codecs not calibrated get "
+                 "the costs in use scaled by the calibrated ones' speed: if the costs in use are far off, move their file "
+                 "away and rerun (smartcut uses its built-in costs meanwhile)")
     written = save_costs(target, text, adopt)
     if adopt:
         print(f"\nADOPTED: more even by at least {ADOPT_MARGIN} points (held-out edits {held_old:.1f} -> {held_new:.1f} %, "
