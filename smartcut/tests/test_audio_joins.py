@@ -10,7 +10,8 @@ Lossy audio is copied unless the output has a join or an audio fade (track_cutte
 - Mid-stream starts are copied (decided): exactly into MP4 for AAC, AC-3 and Opus (pre-roll packets the edit list
   or the Opus pre-skip skips); into Matroska / WebM, and MP3 anywhere, from the first whole frame after the cut, so
   their first ~100 ms aren't level-checked.
-- KEYFRAMES mode copies the audio (decided), and its joins stay in sync with the whole GOPs it keeps.
+- KEYFRAMES mode copies the audio (decided), except MP3 and lossless tracks (FLAC in MKV, ALAC in MOV) at joins, and
+  its joins stay in sync with the whole GOPs it keeps.
 
 Checks per case, against the source:
 - copied or re-encoded, as the rule says
@@ -337,11 +338,14 @@ def check_gap(src_path: Path, out_path: Path) -> str | None:
     return None
 
 
-def check_keyframes(src_path: Path, out_path: Path, copied: bool) -> str | None:
-    """KEYFRAMES mode with KEYFRAMES's segments: every piece is a whole GOP. AAC is copied; MP3 is re-encoded at the joins (as main:
-    copied MP3 joins decoded ~50 ms of silence). Either way the audio runs with the video: in sync with each kept
-    GOP and at the source's level throughout (the join fades were timed from the requested bounds, inside the GOPs,
-    which muted 1.2 s of a 6 s output)."""
+def check_keyframes(src_path: Path, out_path: Path, kind: str) -> str | None:
+    """KEYFRAMES mode with KEYFRAMES's segments: every piece is a whole GOP. AAC is copied (kind "copy"); MP3 is
+    re-encoded at the joins ("recode"; as main: copied MP3 joins decoded ~50 ms of silence), and so are lossless tracks,
+    losslessly ("lossless": bit-identical away from the join fades; decided: copied FLAC came 40 ms later at every join,
+    ALAC 22 ms earlier). Either way the audio runs with the video: in sync with each kept GOP and at the source's level
+    throughout (the join fades were timed from the requested bounds, inside the GOPs, which muted 1.2 s of a 6 s
+    output). A lossless re-encode can give the source's own packets, so it isn't told from a copy by them."""
+    copied = kind == "copy"
     from smartcut.media_container import MediaContainer  # noqa: PLC0415
     from smartcut.media_utils import VideoExportMode, VideoExportQuality  # noqa: PLC0415
     from smartcut.misc_data import AudioExportInfo, AudioExportSettings  # noqa: PLC0415
@@ -361,7 +365,7 @@ def check_keyframes(src_path: Path, out_path: Path, copied: bool) -> str | None:
     same = sum(p in set(src["packets"]) for p in out["packets"])
     if copied and same < len(out["packets"]):
         return f"only {same}/{len(out['packets'])} audio packets copied, expected a copy"
-    if not copied and same > 2:
+    if kind == "recode" and same > 2:
         return f"{same}/{len(out['packets'])} audio packets copied, expected a re-encode"
     rate, gop = src["rate"], 1.0  # 1 s GOPs: the kept GOPs are the whole seconds the segments touch
     kept = sorted({k for a, b in segments for k in range(int(a), math.ceil(b))})
@@ -386,6 +390,11 @@ def check_keyframes(src_path: Path, out_path: Path, copied: bool) -> str | None:
             r = np.sqrt((o[i:i + win] ** 2).mean()) / max(np.sqrt((src["x"][j:j + win] ** 2).mean()), 1e-9)
             if not 0.85 <= r <= 1.2:
                 return f"level {r:.2f} of the source at {o0 + u:.2f} s (source {s0 + u:.2f} s)"
+        if kind == "lossless":  # every sample away from the join fades as in the source; Matroska: within 0.5 ms
+            i, j, n = round((o0 + m) * rate), round((s0 + m - src["a0"]) * rate), round((length - 2 * m) * rate)
+            shift = rate // 2000 if out_path.suffix == ".mkv" else 0  # its ms timestamps place a jump's audio
+            if not any(np.array_equal(o[i:i + n], src["x"][j + d:j + d + n]) for d in range(-shift, shift + 1)):
+                return f"samples differ from the source's at {o0 + m:.2f}-{o0 + length - m:.2f} s"
     return None
 
 
@@ -438,13 +447,15 @@ def main() -> int:
             failed += problem is not None
             name = f"AAC in {ext.upper()}: no source audio across a join"
             print(f"✗ FAIL - {name}: {problem}" if problem else f"✓ PASS - {name}")
-        for name, acodec, copied in (("AAC", "aac", True), ("MP3", "libmp3lame", False)):
+        for name, acodec, ext, kind in (("AAC", "aac", "mp4", "copy"), ("MP3", "libmp3lame", "mp4", "recode"),
+                                        ("FLAC", "flac", "mkv", "lossless"), ("ALAC", "alac", "mov", "lossless")):
             total += 1
-            src = tmp / f"kf_{acodec}.mp4"
+            src = tmp / f"kf_{acodec}.{ext}"
             make_source(src, "libx264", acodec, 44100, "noise")
-            problem = check_keyframes(src, tmp / f"out{total}.mp4", copied)
+            problem = check_keyframes(src, tmp / f"out{total}.{ext}", kind)
             failed += problem is not None
-            name = f"KEYFRAMES mode, {name} in MP4, joins: " + ("copied" if copied else "re-encoded")
+            name = f"KEYFRAMES mode, {name} in {ext.upper()}, joins: " + {"copy": "copied", "recode": "re-encoded",
+                                                                           "lossless": "re-encoded losslessly"}[kind]
             print(f"✗ FAIL - {name}: {problem}" if problem else f"✓ PASS - {name}")
         heaac = media / "synth_heaac.mp4" if media else None
         if heaac is not None and heaac.exists():  # real (noise-like) HE-AAC audio

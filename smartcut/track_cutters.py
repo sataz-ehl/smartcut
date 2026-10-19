@@ -489,15 +489,18 @@ def audio_needs_recode(media_container: MediaContainer, format_name: str, track_
       exactly at the cut (pre-roll packets the edit list skips, see passthru_audio_cutter). Others, and every lossy
       track into Matroska / WebM, start at the first whole frame after the cut: up to a frame late with a softened
       first frame, then exact (MP3: the first frame may decode silent, its bit reservoir);
-    - in KEYFRAMES mode, which promises a lossless, fast cut (as main): every track but MP3 (MPEG audio Layer III, by
-      its frames) at a join.
+    - in KEYFRAMES mode, which promises a lossless, fast cut (as main): every track but these at a join (decided):
+      MP3 (MPEG audio Layer III, by its frames), and lossless tracks, whose re-encode is lossless too, while their
+      copied frames are long (FLAC ~100 ms) and each join shifted them: FLAC +40 / +80 / +120 ms after 3 joins, ALAC
+      -22 / -43 / -65 ms. With an audio-only fade-in, the audio of the kept GOP before the requested start is silent
+      (the fade starts at the requested start), as with video fades (decided).
     """
     track = media_container.audio_tracks[track_index]
     name = track.av_stream.codec_context.name
     if format_name == 'webm' and not webm_holds(track):
         return True
     if keyframes:
-        return has_joins and mpeg_audio_layer(track) == 3
+        return has_joins and (mpeg_audio_layer(track) == 3 or _is_lossless(name))
     if has_joins:
         return True
     return _is_lossless(name) and _first_copied_packet(track, first_piece.start_time) > 0
