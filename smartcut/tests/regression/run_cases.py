@@ -110,10 +110,23 @@ CASES = {
     "E4_hevc_closed":  ("synth_hevc_closed.mp4", [{"start": 3, "end": 9, "fadein": 1, "fadeout": 1}, {"start": 12, "end": 17}]),
     "E5_hevc_real":    ("real_hevc.mp4", TWO_SEGMENTS_REAL),
     "E6_hevc_720p":    ("real_hevc_720p.mp4", TWO_SEGMENTS_REAL),
+    # Matroska / WebM sources (no DTS stored; the audio encoder delay in the timeline, so the video starts 21 ms after
+    # the container start, or the audio 6.5 ms before it): re-encoded first pieces, into MKV / WebM and MP4
+    "K1_mkv_h264":       ("synth_h264.mkv", [{"start": 1.37, "end": 2.5}, {"start": 3.1, "end": 4.6}]),
+    "K2_mkv_to_mp4":     ("synth_h264.mkv", [{"start": 1.37, "end": 9.5, "fadein": 1, "fadeout": 1}, {"start": 12.1, "end": 14.6}]),
+    # HEVC from inside the first GOP: the next GOP's leading pictures are re-encoded, primed from the first GOP (the cut
+    # failed: the file's first packets, without DTS, were copied after the cut). Two segments, so the audio is
+    # re-encoded: one segment copied into MKV starts at the first whole audio frame after the cut (decided)
+    "K3_mkv_hevc":       ("synth_hevc.mkv", [{"start": 1.0, "end": 7.5}, {"start": 12.1, "end": 14.6}]),
+    "K4_mkv_hevc_fades": ("synth_hevc.mkv", [{"start": 1.0, "end": 7.5, "fadein": 0.5, "fadeout": 1}, {"start": 12.1, "end": 14.6}]),
+    "K5_webm_av1":       ("synth_av1_opus.webm", [{"start": 1.37, "end": 4.6, "fadein": 1, "fadeout": 1}, {"start": 7.1, "end": 9.6}]),
+    "K6_webm_to_mkv":    ("synth_vp9_opus.webm", [{"start": 1.37, "end": 2.5}, {"start": 3.1, "end": 4.6}]),
+    "K7_mp4_hevc_mkv":   ("synth_hevc.mp4", [{"start": 1.0, "end": 7.5}, {"start": 12.1, "end": 14.6}]),
 }
 EXPECTED_FAILURES = {"X_vp9_10bit"}  # smartcut can't re-encode 10/12-bit VP9 (profile 2/3)
 OUTPUT_EXT = {case: ".webm" for case in CASES if case.startswith("W")}  # default .mp4
-OUTPUT_EXT.update({"J3_mkv_start": ".mkv", "J4_mkv_heaac": ".mkv"})
+OUTPUT_EXT.update({"J3_mkv_start": ".mkv", "J4_mkv_heaac": ".mkv", "K1_mkv_h264": ".mkv", "K3_mkv_hevc": ".mkv",
+                   "K5_webm_av1": ".webm", "K6_webm_to_mkv": ".mkv", "K7_mp4_hevc_mkv": ".mkv"})
 
 # Verdict thresholds (correct outputs measured: fade errors <= 0.04, gaps <= 1.1 frames, |A-V| <= 20 ms)
 MAX_FADE_ERR_SYNTH, MAX_FADE_ERR_REAL = 0.08, 0.15
@@ -391,8 +404,9 @@ def rms_windows(x, rate, win):
     return np.sqrt((x[: k * n].reshape(k, n).astype(np.float64) ** 2).mean(axis=1))
 
 
-def measure_audio(o_track, s_track, o_offset, tone, segs, starts, lengths, v_duration):
-    """One audio track vs the same source track: length vs the video, fade curve error, gain outside fades, dips."""
+def measure_audio(o_track, s_track, o_offset, tone, segs, starts, lengths, v_duration, src_start: float = 0.0):
+    """One audio track vs the same source track: length vs the video, fade curve error, gain outside fades, dips.
+    src_start: the source's container start, which segment times count from."""
     (o_audio, o_rate, _), (s_audio, s_rate, s_astart) = o_track, s_track
     win = 0.01 if tone else 0.05
     o_rms, s_rms = rms_windows(o_audio, o_rate, win), rms_windows(s_audio, s_rate, win)
@@ -402,7 +416,7 @@ def measure_audio(o_track, s_track, o_offset, tone, segs, starts, lengths, v_dur
         _, _, ai, ao = fades_of(s)
         m = (at >= starts[k]) & (at < starts[k] + lengths[k])
         u = at[m] - starts[k]
-        idx = np.clip(((s["start"] + u - s_astart) / win).astype(int), 0, len(s_rms) - 1)
+        idx = np.clip(((src_start + s["start"] + u - s_astart) / win).astype(int), 0, len(s_rms) - 1)
         with np.errstate(divide="ignore", invalid="ignore"):
             a_gain[m] = np.where(s_rms[idx] > 1e-3, o_rms[m] / s_rms[idx], np.nan)
         a_ideal[m] = ideal_gain(u, lengths[k], ai, ao)
@@ -437,17 +451,29 @@ def analyse(media, out_dir, case, src_name, segs, out_path):
     o_info, o_vt, o_vmean, o_hash, o_audios = read_media(out_path)
     segs = sorted(segs, key=lambda s: s["start"])
     lengths = [s["end"] - s["start"] for s in segs]
-    starts = np.concatenate([[0], np.cumsum(lengths)[:-1]])
     expected = float(sum(lengths))
     fps = s_info["avg_rate"] or 30
     res = {"expected_s": expected, "out_info": o_info}
+    # Segment times count from the source's container start, the earliest first timestamp of any stream
+    st = s_info["start_time"]
 
-    t0 = o_vt[0] if len(o_vt) else 0
+    # Output times count from the cut: the first segment's start. Its first frame comes as long after the cut as the
+    # first frame kept comes after the segment start in the source, e.g. 18 ms for a cut at 1.37 s with frames at
+    # 1.367 and 1.4 s (it was taken as the cut, which put every join and fade that much early). A segment from the
+    # file start (0) starts at the first video frame (make_cut_segments: the first GOP's start), and so does the
+    # output. starts: where each segment's requested start lies in the output.
+    first_frame = float(s_vt[0]) - st if len(s_vt) else 0.0
+    piece_start = [first_frame if s["start"] <= 1e-6 else s["start"] for s in segs]
+    ends_out = np.cumsum([s["end"] - p for s, p in zip(segs, piece_start)])
+    starts = np.array([(ends_out[k - 1] if k else 0.0) + s["start"] - piece_start[k] for k, s in enumerate(segs)])
+    kept0 = s_vt[(s_vt >= st + segs[0]["start"] - 1e-9) & (s_vt < st + segs[0]["end"] - 1e-9)] if segs else s_vt[:0]
+    lead = float(kept0[0]) - (st + piece_start[0]) if len(kept0) else 0.0
+
+    t0 = o_vt[0] - lead if len(o_vt) else 0
     vt = o_vt - t0
     d = np.diff(vt)
     res["v_frames"] = len(vt)
     # Exactly the source frames inside the segments (smartcut keeps start <= t < end)
-    st = s_info["start_time"]
     res["v_frames_expected"] = int(sum(((s_vt >= st + s["start"] - 1e-9) & (s_vt < st + s["end"] - 1e-9)).sum() for s in segs))
     res["v_duration"] = float(vt[-1] + 1 / fps) if len(vt) else 0
     res["v_stream_s"] = o_info["v_stream_s"]
@@ -461,7 +487,7 @@ def analyse(media, out_dir, case, src_name, segs, out_path):
         vi, vo, _, _ = fades_of(s)
         m = (vt >= starts[k] - 1e-6) & (vt < starts[k] + lengths[k] - 1e-6)
         u = vt[m] - starts[k]
-        idx = np.clip(np.searchsorted(s_vt, s["start"] + u - 0.5 / fps), 0, len(s_vt) - 1)
+        idx = np.clip(np.searchsorted(s_vt, st + s["start"] + u - 0.5 / fps), 0, len(s_vt) - 1)
         base = s_vmean[idx] - 16
         with np.errstate(divide="ignore", invalid="ignore"):
             v_alpha[m] = np.where(base > 8, (o_vmean[m] - 16) / base, np.nan)
@@ -479,7 +505,7 @@ def analyse(media, out_dir, case, src_name, segs, out_path):
     for t, (o_track, s_track) in enumerate(zip(o_audios, s_audios)):
         tone = src_name.startswith("synth_") and s_info["atracks"][t][1] != "HE-AAC"
         tr, at, a_gain, a_ideal = measure_audio(o_track, s_track, o_track[2] - t0, tone, segs, starts, lengths,
-                                                res["v_duration"])
+                                                res["v_duration"], st)
         res["tracks"].append(tr)
         if t == 0:
             res.update(tr)
@@ -516,7 +542,8 @@ def analyse(media, out_dir, case, src_name, segs, out_path):
             problems.append("A/V sync")
     if res["v_frames"] != res["v_frames_expected"]:
         problems.append("frame count")
-    if res["v_stream_s"] is not None and abs(res["v_stream_s"] - res["v_duration"]) * fps > MAX_STREAM_END_FRAMES:
+    # The stream (MP4: its edit list) lasts from the first frame to the end of the last one
+    if res["v_stream_s"] is not None and len(vt) and abs(res["v_stream_s"] - (res["v_duration"] - vt[0])) * fps > MAX_STREAM_END_FRAMES:
         problems.append("stream duration")
     if res["v_max_gap_frames"] > MAX_GAP_FRAMES or res["v_nonmonotonic"]:
         problems.append("frame timing")

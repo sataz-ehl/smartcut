@@ -940,8 +940,12 @@ class VideoCutter:
             except Exception:
                 pass
 
-        # Process packets and yield frames when safe
-        current_dts = gop_start_dts
+        # Process packets and yield frames when safe. A packet without a DTS counts as at the DTS of the last one that
+        # had one, and the first ones as at start_dts (fork fix): Matroska stores no DTS, so FFmpeg gives the first
+        # packets after the file start or a seek none (as many as the codec's reorder delay). Counted at gop_start_dts,
+        # an HEVC CRA GOP primed from the first GOP (its start DTS unknown, so from the file start) collected the file's
+        # first packets as its own: they were copied after the cut and the muxer refused them (pts < dts).
+        current_dts = start_dts
 
         for packet in self.fetch_packet(start_dts, gop_end_dts):
             current_dts = packet.dts if packet.dts is not None else current_dts
