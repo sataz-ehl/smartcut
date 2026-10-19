@@ -161,9 +161,13 @@ whole, if that can be done faithfully** (decided; `audio_needs_recode()` and `re
       settling), in sync (+1.0 ms, Matroska's ms); MP3's first frame may decode silent (its bit reservoir). Main's
       Opus pre-roll copy into WebM shifted every stream by 72 ms; the branch had re-encoded these.
   - in **KEYFRAMES mode** (`VideoExportMode.KEYFRAMES`, decided: it promises a lossless, fast cut, as on main),
-    every track except for audio fades, WebM's Opus, and MP3 at a join (copied MP3 joins decode ~50 ms of silence).
-    Before, its joins were re-encoded, and their join fades, timed from the requested bounds inside the whole GOPs
-    kept, muted 1.2 s of a 6 s output.
+    every track except for audio fades, WebM's Opus, and at a join MP3 (copied MP3 joins decode ~50 ms of silence)
+    and lossless tracks (decided). Lossless tracks are re-encoded losslessly, bit-identical outside the 3 ms join
+    fades: their copied frames are long (FLAC ~100 ms), and each join shifted them (FLAC +40 / +80 / +120 ms after
+    3 joins, ALAC -22 / -43 / -65 ms; re-encoded, within 0.3 ms). Before, its joins were re-encoded, and their join
+    fades, timed from the requested bounds inside the whole GOPs kept, muted 1.2 s of a 6 s output.
+  - KEYFRAMES mode keeps whole GOPs, but the user's fades stay on the requested bounds (decided, as for video fades):
+    with an audio-only fade-in, the audio of the kept GOP before the requested start is silent.
 
   Mixing re-encoded and copied packets in one track instead left the encoder's buffered samples misplaced at the
   joins (an audible tick).
@@ -222,7 +226,10 @@ whole, if that can be done faithfully** (decided; `audio_needs_recode()` and `re
   join.` (or "its audio fades are left out"). Each distinct warning is given once per cut; in segment mode every
   file's own reason is (one file starting mid-stream, another with an audio fade).
   - Encoders: the source codec's own (AAC → FFmpeg's AAC; MP3 → LAME; Opus; Vorbis; AC-3; E-AC-3; MP2; FLAC; ALAC;
-    PCM; ...).
+    PCM; ...). MPEG audio goes by the layer in its frames (`mpeg_audio_layer()`), not the decoder's name: FFmpeg reads
+    MP2 in MP4 with its MP3 decoder (mp3float), and it was re-encoded as MP3. Now Layer II re-encodes with FFmpeg's
+    mp2 encoder, which takes s16 only: MP2 read by its default decoder (mp2, s16p; e.g. MP2 in MKV) re-encodes, MP2
+    read by a float decoder (mp2float, or mp3float in MP4) is copied with a warning.
   - Exceptions (decided): HE-AAC (v1, v2) → AAC-LC, since FFmpeg can't encode HE-AAC; and in WebM anything but Opus
     or Vorbis → Opus (resampled to 48 kHz if needed), which WebM needs. If such a track can't be re-encoded to Opus,
     the cut fails before writing anything: "WebM output needs Opus or Vorbis audio, and audio track 1 (aac) can't be
@@ -286,6 +293,10 @@ whole, if that can be done faithfully** (decided; `audio_needs_recode()` and `re
     "overlap" of 16-32 samples became inserted or dropped samples: clicks of 6.6-11.5x a tone's largest step, also
     with fades. Strictly less: a gap of exactly one tick, where a tick is a whole packet, is a missing packet (PCM in
     1 ms packets: the audio after it came 1 ms early).
+  - A gap further off is filled with silence; an overlap (timestamps jumping back) is dropped whole: each frame skips
+    what is already there, up to the whole frame, until the timestamps pass where the audio so far ends. Before,
+    only the first frame's overlap was: after a jump back of three AAC frames, everything came two frames (42.7 ms)
+    late.
   - This is judged on the decoded frames, before resampling (44.1 kHz into a WebM's Opus). A new resampler's first
     output is short by its delay, and judged after it, the next frame looked like a gap: 16-17 samples of silence
     after every restart (a step x5.6 a tone's own, and every segment 0.35 ms late). Now in sync with the source
@@ -387,9 +398,9 @@ Run from the repo root (tests live in `smartcut/tests/`):
 | `test_multitrack.py` | Every audio track is kept: copied when exact, each re-encoded as a whole with a join or audio fades |
 | `test_webm.py` | `.webm` outputs: AAC re-encoded to Opus (with and without fades), Opus copied from the start, re-encoded from mid-stream |
 | `test_audio_bitrate.py` | Bitrate of re-encoded audio: from the packets when the source reports none, floors per channel, MP3, lossless sources, encoder limits; cuts at about the source's rate |
-| `test_audio_joins.py` | Copied or re-encoded as the rule says; A/V sync within 1.5 ms at the start and every join; level and clicks at the joins (AAC, AC-3, MP3, Opus; mono, stereo, 5.1; MP4, MKV, WebM; HE-AAC with a media dir); copies into MP4 end at the cut; KEYFRAMES mode |
-| `test_audio_decode.py` | Decoding for re-encodes: Opus (10 and 20 ms packets) after a jump as in a continuous decode; a copy's pre-roll without packet durations; a one-tick gap; resampled re-encodes in sync |
-| `test_audio_faithful.py` | Re-encodes keep the codec, sample format, bit depth and layout: lossless ones bit-identical outside the join fades (FLAC, ALAC, PCM); otherwise copied with a warning (AAC "6 channels"; DTS, TrueHD and 32-bit FLAC with the ffmpeg command); WebM's clear error |
+| `test_audio_joins.py` | Copied or re-encoded as the rule says; A/V sync within 1.5 ms at the start and every join; level and clicks at the joins (AAC, AC-3, MP3, Opus; mono, stereo, 5.1; MP4, MKV, WebM; HE-AAC with a media dir); copies into MP4 end at the cut; KEYFRAMES mode (AAC copied; MP3, FLAC and ALAC re-encoded at the joins, the lossless ones bit-identical) |
+| `test_audio_decode.py` | Decoding for re-encodes: Opus (10 and 20 ms packets) after a jump as in a continuous decode; a copy's pre-roll without packet durations; a backwards timestamp jump of three frames; a one-tick gap; resampled re-encodes in sync, also across a gap in the source; a frame-threaded decoder drained (4 threads, on any number of CPUs) |
+| `test_audio_faithful.py` | Re-encodes keep the codec, sample format, bit depth and layout: lossless ones bit-identical outside the join fades (FLAC, ALAC, PCM); the source's tags but not its encoder's name; otherwise copied with a warning (AAC "6 channels"; MP2 in MP4, never re-encoded as MP3; DTS, TrueHD and 32-bit FLAC with the ffmpeg command); every file's reason warned in segment mode; WebM's clear error |
 | `test_progress_costs.py` | A machine's `progress_costs.json`: used when valid (an edit weighs its work with its costs); missing, malformed, other versions, out of range fall back to the built-in costs; paths, also without a home folder; logged once; edits with a broken file |
 | `test_work_progress.py` | `_WorkProgress`, the progress estimate: frame costs, frames counted as the encoder outputs them, beyond or short of the estimate, the cap, cancelling |
 | `test_x265_options.py` | x265 options of HEVC re-encodes: the source's without its machine's threads, the lookahead cap, sources without options |

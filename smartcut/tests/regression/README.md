@@ -115,8 +115,9 @@ These need no test media and run like the other test scripts (`python smartcut/t
 - `smartcut/tests/test_multitrack.py`: every audio track is kept (AAC + AC-3), copied or re-encoded with fades.
 - `smartcut/tests/test_webm.py`: `.webm` outputs (AAC re-encoded to Opus, Opus copied).
 - `smartcut/tests/test_audio_bitrate.py`: the bitrate of re-encoded audio (source's, floors, encoder limits).
-- `smartcut/tests/test_audio_joins.py`: copied or re-encoded as the rule says, A/V sync within 1 ms at the start and
-  every join, level and clicks at the joins (AAC, AC-3, MP3, Opus; MP4, MKV, WebM; HE-AAC with a media dir).
+- `smartcut/tests/test_audio_joins.py`: copied or re-encoded as the rule says, A/V sync within 1.5 ms at the start and
+  every join, level and clicks at the joins (AAC, AC-3, MP3, Opus; MP4, MKV, WebM; HE-AAC with a media dir);
+  KEYFRAMES mode (AAC copied; MP3, FLAC and ALAC re-encoded at joins).
 - `smartcut/tests/test_progress_costs.py`: progress_costs.json loading: valid, missing, malformed, other versions, out
   of range (fallback to the built-in costs), the paths (also without a home folder), logged once; edits with a broken
   file, and an edit weighing its work with a valid file's costs.

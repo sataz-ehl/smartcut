@@ -56,9 +56,9 @@ SmartCut supports all major video container formats:
 - **MP3** (libmp3lame) - passthrough or re-encoding
 - **Opus** (libopus) - passthrough or re-encoding
 - **Vorbis** (libvorbis) - passthrough or re-encoding
-- **FLAC** - lossless passthrough
-- **PCM** - 16-bit and 32-bit float
-- **Passthrough** - No re-encoding, unless the output has a join, an audio fade, or a lossless track starting mid-stream; re-encodes are faithful only (same codec, bit depth, layout, rate), else the track is copied with a warning (see `FADE_FEATURE_SUMMARY.md`, Audio)
+- **FLAC** - passthrough or re-encoding
+- **PCM** - re-encoding to 16-bit or 32-bit float; passthrough keeps any PCM format (its re-encodes at joins and fades keep the source's: s16, s24, s32, f32, f64, u8)
+- **Passthrough** - No re-encoding, unless the output has a join, an audio fade, or a lossless track starting mid-stream; re-encodes are faithful only (same codec, bit depth, layout, rate; lossless tracks bit-identical outside the fades), else the track is copied with a warning (see `FADE_FEATURE_SUMMARY.md`, Audio). Exceptions: HE-AAC becomes AAC-LC, and a `.webm` output re-encodes tracks other than Opus and Vorbis to Opus (resampled to 48 kHz if needed). MPEG audio is re-encoded as the layer its frames say (MP2 in MP4, read by FFmpeg's MP3 decoder, is copied, never turned into MP3). `KEYFRAMES` mode copies the audio, except for audio fades, `.webm` outputs, and at joins MP3 and lossless tracks (re-encoded losslessly)
 
 ## Minimal Re-encoding Strategy
 
