@@ -68,7 +68,9 @@ by measured per-codec costs, copied frames and re-encoded audio far less, and co
 encoder outputs them, also one by one in its flush (`_WorkProgress` in `smart_cut.py`). A re-encoded frame's cost
 follows how busy the source is around it (its packets' bytes per frame over a second, against the whole video's)
 and whether its video fades: x264 took 14 ms per frame on a static scene and 32 ms on a busy one in the same 720p
-clip, and about twice as long for a faded frame. The costs are a desktop core's (`progress_costs.py`). A machine's
+clip, and about twice as long for a faded frame. With AV1 the progress stands still while libaom encodes each
+re-encoded run's first frame, a keyframe, in a single call (2.1-2.4 s at 720p, 3.8-4.2 s at 1080p on one core; known
+and accepted, see `smart_cut.py`). The costs are a desktop core's (`progress_costs.py`). A machine's
 own, measured there by `tests/regression/calibrate_progress.py`, come from the `progress_costs.json` that
 `SMARTCUT_PROGRESS_COSTS` names, else `~/.config/smartcut/` or `%APPDATA%\smartcut\`. A broken file falls back to the
 built-in costs with a warning. They honour `cancel_check()`: it is polled before every
@@ -361,7 +363,7 @@ Run from the repo root (tests live in `smartcut/tests/`):
 | `test_progress_costs.py` | A machine's `progress_costs.json`: used when valid (an edit weighs its work with its costs); missing, malformed, other versions, out of range fall back to the built-in costs; paths, also without a home folder; logged once; edits with a broken file |
 | `test_work_progress.py` | `_WorkProgress`, the progress estimate: frame costs, frames counted as the encoder outputs them, beyond or short of the estimate, the cap, cancelling |
 | `test_x265_options.py` | x265 options of HEVC re-encodes: the source's without its machine's threads, the lookahead cap, sources without options |
-| `test_calibrate_progress.py` | `calibrate_progress.py`: the adoption rule, held-out edits, CPU checks, file writes, memory release, `--cores`; on a synthetic clip a `--quick` run that must not adopt, `main()` with the verdict forced, and its refusal of changed or missing clips (needs ffmpeg) |
+| `test_calibrate_progress.py` | `calibrate_progress.py`: the adoption rule, held-out edits, CPU checks, file writes, memory release, `--cores`; `progress_timeline`'s evenness from the cut's real start; on a synthetic clip a `--quick` run that must not adopt, `main()` with the verdict forced, and its refusal of changed or missing clips (needs ffmpeg) |
 | `regression/` | Measurement-based regression harness, test media generator and diagnostic tools, e.g. `join_sync.py` for A/V sync at every join (see its README) |
 
 ## Usage Examples

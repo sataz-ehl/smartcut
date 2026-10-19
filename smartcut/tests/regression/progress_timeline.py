@@ -185,6 +185,19 @@ def fit_recode_cost(runs: list[dict], shape: tuple[float, float] | None = None
     follows busyness) on a grid from 0 to 1, the others 0 or more (a negative one is dropped and the rest refitted).
     Returns (fixed, per_mp, busy, fade) and the error of each run's predicted time.
 
+    Not a negative busy, although libvpx is often faster on busy scenes (decided, Oct 2026). smartcut re-encodes VP9 at
+    crf 22 capped at the source's average bitrate (constrained quality). The cap binds on scenes busier than the
+    source's average and raises the quantizer there: one core, 720p, the same 120 frames of the calibration clip, a
+    static scene 73-78 ms per frame and a busy one 63 ms, both at the cap's 2.2 kB per frame (without the cap 76-78 and
+    76-85 ms, 2.4 and 4.9 kB). But how libvpx's time relates to the source's bytes differs by source: on the Facebook
+    VP9 clip the cap binds too (1.2-1.6 kB per frame, 1.5-4.5 kB without it), yet by scene busyness 0.35 / 0.61 / 0.83 /
+    1.28 took 42 / 48 / 41 / 33 ms. A negative busy fitted on one source didn't hold on another (replayed, one core,
+    largest distance from an even pace from the cut's real start; fitted on two sources, replayed on the third): with
+    the Facebook VP9 clip left out the fit gave -0.15 and its 10 edits went 7.7 -> 8.5 %; with either YouTube clip left
+    out the fit came out at 0 or +0.05 by itself. Fitted on the calibration clip alone (-0.10): its own 6 edits 5.6 ->
+    5.2 % (the 3 with fades worse) and a fresh P2_vp9_720p run 10.1 -> 8.4 %; another YouTube clip 6.0 -> 5.6 % (its
+    360p edits worse); the Facebook clip 7.2 -> 7.7 % (6 of 10 edits worse). Pooled over the three sources: -0.05.
+
     shape: (fixed, per_mp) to keep in proportion, fitting one factor for both. Runs at a single frame size can't
     separate them (calibrate_progress.py --quick).
 

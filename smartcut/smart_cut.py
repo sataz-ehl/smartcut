@@ -75,6 +75,19 @@ class CancelObject:
 # cancel_object is set, with or without progress, and the encoder's last flush too (in finish()).
 # The costs the work is weighed with, and how they were measured: progress_costs.py (built-in, or a machine's own from
 # its progress_costs.json).
+#
+# Known and accepted (decided, Oct 2026): with AV1 the progress stands still at the start of every re-encoded run while
+# libaom encodes the run's keyframe. libaom outputs nothing until its lookahead is full (10 frames from 720p up, 35
+# below), then encodes the keyframe in one encode() call: on one desktop core 2.1-2.4 s at 720p, 3.8-4.2 s at 1080p,
+# and at 360p 0.5-0.7 s with up to 0.9 s more in the next call: the work of 10-20 average frames (0.3-0.65 s after a
+# fade-in from black). As that frame counts as one frame, the bar then runs behind for a while.
+# Turning off libaom's keyframe filtering or its TPL model saved 0.1-0.6 s of it: it is the keyframe's own intra encode
+# (crf 22, capped at the source's bitrate). A cut to another scene within a run makes libaom insert a keyframe there
+# too (1.2 s at 720p). Progress only moves between encoder calls, so no cost model can move it during that call. x264
+# and libvpx encode their keyframes in 0.05-0.14 s at 720p. The first run's wait is before the first update, so the
+# evenness measured from the first update leaves it out: 2 segments of AV1 720p without fades are 7.4-7.8 % off an
+# even pace from the cut's real start, 3.6-3.8 % from the first update (one core; tests/regression/progress_timeline.py
+# prints both).
 
 
 class _Cancelled(Exception):

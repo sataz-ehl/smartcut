@@ -46,8 +46,11 @@ MODEL = 1  # the cost model: recode costs (fixed, per_mp, busy, fade) per codec,
 #     +28 ms, about 2x). libvpx and libaom no more (see progress_timeline.fit_recode_cost).
 #   - With one cost per frame and codec, as before, progress was up to 15-20 % off an even pace in common edits
 #     (2 segments without fades: H.264 720p 16.8-17.1 %, AV1 720p 14.6 %); now 3-7 % (one core, largest distance at
-#     the updates; 26 cases on average 9.5-9.7 % -> 4.4-4.7 %). libvpx's runs vary +-15 % in ways busyness doesn't
-#     predict (P2_vp9_720p 8-9 %).
+#     the updates from the first update; 26 cases on average 9.5-9.7 % -> 4.4-4.7 %).
+#   - libvpx's runs vary +-15 % (P2_vp9_720p 8-9 %): smartcut caps its VP9 re-encodes at the source's average bitrate,
+#     and where the cap binds libvpx is faster, by an amount that differs by source. A negative busy fitted on one
+#     source made another less even, so libvpx keeps 0.05 (decided, Oct 2026; progress_timeline.fit_recode_cost).
+#   - AV1 pauses at every run's keyframe: see smart_cut.py ("Known and accepted").
 # - hevc: x265 with its default settings, as for camera footage (sources without x265's options in their headers;
 #   with them smartcut reuses the source's settings), with the 1-thread pool and 1 frame thread it uses on a 1-CPU
 #   machine. The earlier cost (0.005 + 0.020 per megapixel) was measured while x265 escaped the one-core pinning, and

@@ -195,7 +195,9 @@ asks for a margin:
 2. **Real runs.** Fresh runs of the app's typical edits (all of them held-out edits), each replayed under the costs in
    use and the new costs (fitted on all the edits), so both get the same timings.
 3. **Adopted** (the costs fitted on all the edits) only if both are more even than the costs in use by at least
-   **0.5 points** (`ADOPT_MARGIN`; mean largest distance from an even pace at the updates), and:
+   **0.5 points** (`ADOPT_MARGIN`; mean largest distance from an even pace at the updates, from each edit's first
+   update: both sets of costs are replayed on the same timings, so the time before the first update is the same for
+   both), and:
    - not `--quick`;
    - the pinning held (no encoder run or real run on more cores than expected);
    - the CPU check didn't warn: on one core, the median encoder run, or a real run of 1 s or more, got at least 0.85 of
@@ -203,7 +205,9 @@ asks for a margin:
    - the media has the Facebook clip (decided). The 720p held-out edits are the same scenes as the edits fitted on;
      the Facebook clip is the only other footage. Replayed without its edits, the 4-core calibration's held-out gain
      fell from -1.51 to -0.53 points: it carried most of the evidence. Without it the calibration runs and reports,
-     and writes only the candidate;
+     and writes only the candidate. The Facebook clip is H.264 (copied), so the held-out check has no other footage
+     for VP9 or AV1: their held-out edits are the source clip's 720p ones. VP9's cost relates to the content
+     differently from source to source (`progress_timeline.fit_recode_cost`), which this check can't see;
    - a held-out check could be made: the plan has at least two resolutions for every codec held out.
 
 Every reason that applies is printed after `NOT ADOPTED:`:
