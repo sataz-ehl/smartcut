@@ -1,3 +1,4 @@
+import contextlib
 import heapq
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
@@ -127,10 +128,8 @@ def create_video_output_stream(
             for attr in ('color_range', 'color_primaries', 'color_trc', 'colorspace'):
                 value = getattr(in_stream.codec_context, attr, None)
                 if value is not None:
-                    try:
+                    with contextlib.suppress(AttributeError, TypeError, ValueError):
                         setattr(out_stream.codec_context, attr, value)
-                    except (AttributeError, TypeError, ValueError):
-                        pass
             out_stream.metadata.update(in_stream.metadata)
             out_stream.disposition = cast(Disposition, in_stream.disposition.value)
             out_stream.time_base = in_stream.time_base
